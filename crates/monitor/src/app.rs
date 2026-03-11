@@ -3,8 +3,8 @@ use nca_common::event::AgentCommand;
 
 use crate::controller::LiveAttachController;
 use crate::ingest::{reduce_event, replay_events_file};
-use crate::panels::{log, review, stats, timeline, tools};
 use crate::panels::review::{ReviewAction, ReviewState};
+use crate::panels::{log, review, stats, timeline, tools};
 use crate::session_index::{IndexedSession, SessionIndex};
 use crate::state::{AppState, TaskCard, TaskStatus};
 use crate::workspaces::WorkspaceManager;
@@ -139,7 +139,10 @@ impl MonitorApp {
                 ui.text_edit_singleline(&mut self.new_session_form.model_override);
             });
 
-            ui.checkbox(&mut self.new_session_form.safe_mode, "Safe mode (read-only)");
+            ui.checkbox(
+                &mut self.new_session_form.safe_mode,
+                "Safe mode (read-only)",
+            );
 
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -162,7 +165,9 @@ impl MonitorApp {
                             let safe_mode = self.new_session_form.safe_mode;
 
                             spawn_nca_run(&workspace, &prompt, model.as_deref(), safe_mode);
-                            self.set_status("Session started. It will appear in the session list shortly.");
+                            self.set_status(
+                                "Session started. It will appear in the session list shortly.",
+                            );
                             self.new_session_form = NewSessionForm::default();
                             self.view = View::Home;
                         }
@@ -323,12 +328,30 @@ impl MonitorApp {
             return;
         }
 
-        let top_level: Vec<_> = cards.iter().filter(|c| c.parent_session_id.is_none()).collect();
-        let child_cards: Vec<_> = cards.iter().filter(|c| c.parent_session_id.is_some()).collect();
+        let top_level: Vec<_> = cards
+            .iter()
+            .filter(|c| c.parent_session_id.is_none())
+            .collect();
+        let child_cards: Vec<_> = cards
+            .iter()
+            .filter(|c| c.parent_session_id.is_some())
+            .collect();
 
-        let running: Vec<_> = top_level.iter().filter(|c| c.status == TaskStatus::Running || c.status == TaskStatus::WaitingApproval).copied().collect();
-        let completed: Vec<_> = top_level.iter().filter(|c| c.status == TaskStatus::Completed).copied().collect();
-        let failed: Vec<_> = top_level.iter().filter(|c| c.status == TaskStatus::Error || c.status == TaskStatus::Cancelled).copied().collect();
+        let running: Vec<_> = top_level
+            .iter()
+            .filter(|c| c.status == TaskStatus::Running || c.status == TaskStatus::WaitingApproval)
+            .copied()
+            .collect();
+        let completed: Vec<_> = top_level
+            .iter()
+            .filter(|c| c.status == TaskStatus::Completed)
+            .copied()
+            .collect();
+        let failed: Vec<_> = top_level
+            .iter()
+            .filter(|c| c.status == TaskStatus::Error || c.status == TaskStatus::Cancelled)
+            .copied()
+            .collect();
 
         if !running.is_empty() {
             ui.heading("Active Runs");
@@ -383,7 +406,12 @@ impl MonitorApp {
         }
     }
 
-    fn show_child_cards(&mut self, ui: &mut egui::Ui, parent: &TaskCard, all_children: &[&TaskCard]) {
+    fn show_child_cards(
+        &mut self,
+        ui: &mut egui::Ui,
+        parent: &TaskCard,
+        all_children: &[&TaskCard],
+    ) {
         let children: Vec<_> = all_children
             .iter()
             .filter(|c| parent.child_session_ids.contains(&c.session_id))
@@ -436,43 +464,42 @@ impl MonitorApp {
             TaskStatus::Queued => egui::Color32::from_rgb(100, 160, 220),
         };
 
-        egui::Frame::group(ui.style())
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.colored_label(status_color, card.status.label());
-                    ui.separator();
-                    let short_id = &card.session_id[..card.session_id.len().min(16)];
-                    if ui.link(short_id).clicked() {
-                        self.app_state.select_session(Some(card.session_id.clone()));
-                        self.view = View::Session;
-                    }
-                    ui.separator();
-                    ui.label(&card.workspace_name);
-                    ui.label(&card.model);
-                    if let Some(branch) = &card.branch {
-                        ui.label(format!("\u{2192} {branch}"));
-                    }
-                    if !card.child_session_ids.is_empty() {
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.colored_label(status_color, card.status.label());
+                ui.separator();
+                let short_id = &card.session_id[..card.session_id.len().min(16)];
+                if ui.link(short_id).clicked() {
+                    self.app_state.select_session(Some(card.session_id.clone()));
+                    self.view = View::Session;
+                }
+                ui.separator();
+                ui.label(&card.workspace_name);
+                ui.label(&card.model);
+                if let Some(branch) = &card.branch {
+                    ui.label(format!("\u{2192} {branch}"));
+                }
+                if !card.child_session_ids.is_empty() {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(100, 160, 220),
+                        format!("{} children", card.child_session_ids.len()),
+                    );
+                }
+                if let Some(ref parent_id) = card.parent_session_id {
+                    let short_parent = &parent_id[..parent_id.len().min(12)];
+                    ui.label(format!("(child of {short_parent})"));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(&card.updated_at);
+                    if card.pending_approvals > 0 {
                         ui.colored_label(
-                            egui::Color32::from_rgb(100, 160, 220),
-                            format!("{} children", card.child_session_ids.len()),
+                            egui::Color32::from_rgb(200, 180, 60),
+                            format!("{} pending", card.pending_approvals),
                         );
                     }
-                    if let Some(ref parent_id) = card.parent_session_id {
-                        let short_parent = &parent_id[..parent_id.len().min(12)];
-                        ui.label(format!("(child of {short_parent})"));
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(&card.updated_at);
-                        if card.pending_approvals > 0 {
-                            ui.colored_label(
-                                egui::Color32::from_rgb(200, 180, 60),
-                                format!("{} pending", card.pending_approvals),
-                            );
-                        }
-                    });
                 });
             });
+        });
     }
 
     fn load_review_for_session(&mut self, session: &crate::session_index::IndexedSession) {
@@ -528,12 +555,7 @@ impl MonitorApp {
         let sessions = self.session_index.maybe_refresh().to_vec();
         let workspace = sessions
             .iter()
-            .find(|s| {
-                s.meta
-                    .as_ref()
-                    .and_then(|m| m.worktree_path.as_ref())
-                    == Some(&wt_path)
-            })
+            .find(|s| s.meta.as_ref().and_then(|m| m.worktree_path.as_ref()) == Some(&wt_path))
             .map(|s| s.workspace.clone())
             .unwrap_or_else(|| wt_path.clone());
 
@@ -552,22 +574,18 @@ impl MonitorApp {
         };
 
         let sessions = self.session_index.maybe_refresh().to_vec();
-        if let Some(session) = sessions.iter().find(|s| {
-            s.meta
-                .as_ref()
-                .and_then(|m| m.worktree_path.as_ref())
-                == Some(&wt_path)
-        }) {
+        if let Some(session) = sessions
+            .iter()
+            .find(|s| s.meta.as_ref().and_then(|m| m.worktree_path.as_ref()) == Some(&wt_path))
+        {
             let mgr = nca_runtime::worktree::WorktreeManager::new(&session.workspace);
             match mgr.merge_into_base(&session.id, &base) {
                 Ok(()) => {
-                    self.review_state.merge_status =
-                        Some("Merged successfully.".to_string());
+                    self.review_state.merge_status = Some("Merged successfully.".to_string());
                     let _ = mgr.remove_worktree(&session.id, true);
                 }
                 Err(e) => {
-                    self.review_state.merge_status =
-                        Some(format!("Merge failed: {e}"));
+                    self.review_state.merge_status = Some(format!("Merge failed: {e}"));
                 }
             }
         }
@@ -580,12 +598,10 @@ impl MonitorApp {
         };
 
         let sessions = self.session_index.maybe_refresh().to_vec();
-        if let Some(session) = sessions.iter().find(|s| {
-            s.meta
-                .as_ref()
-                .and_then(|m| m.worktree_path.as_ref())
-                == Some(&wt_path)
-        }) {
+        if let Some(session) = sessions
+            .iter()
+            .find(|s| s.meta.as_ref().and_then(|m| m.worktree_path.as_ref()) == Some(&wt_path))
+        {
             let mgr = nca_runtime::worktree::WorktreeManager::new(&session.workspace);
             let _ = mgr.remove_worktree(&session.id, true);
             self.review_state.clear();
@@ -792,7 +808,8 @@ impl MonitorApp {
                                             ui.label("Parent:");
                                             let short = &parent_id[..parent_id.len().min(20)];
                                             if ui.link(short).clicked() {
-                                                self.app_state.select_session(Some(parent_id.clone()));
+                                                self.app_state
+                                                    .select_session(Some(parent_id.clone()));
                                             }
                                         });
                                         if let Some(ref reason) = meta.spawn_reason {
@@ -800,7 +817,10 @@ impl MonitorApp {
                                         }
                                     }
                                     if !meta.child_session_ids.is_empty() {
-                                        ui.label(format!("Children ({}):", meta.child_session_ids.len()));
+                                        ui.label(format!(
+                                            "Children ({}):",
+                                            meta.child_session_ids.len()
+                                        ));
                                         for child_id in &meta.child_session_ids {
                                             ui.horizontal(|ui| {
                                                 ui.label("  \u{2514}");
@@ -810,8 +830,12 @@ impl MonitorApp {
                                                     .find(|x| &x.id == child_id)
                                                     .map(|x| x.status_display())
                                                     .unwrap_or("unknown");
-                                                if ui.link(format!("{short} [{child_status}]")).clicked() {
-                                                    self.app_state.select_session(Some(child_id.clone()));
+                                                if ui
+                                                    .link(format!("{short} [{child_status}]"))
+                                                    .clicked()
+                                                {
+                                                    self.app_state
+                                                        .select_session(Some(child_id.clone()));
                                                 }
                                             });
                                         }
@@ -843,9 +867,7 @@ impl MonitorApp {
 
                     let review_action = egui::CollapsingHeader::new("Review workbench")
                         .default_open(false)
-                        .show(ui, |ui| {
-                            review::show(ui, &mut self.review_state)
-                        })
+                        .show(ui, |ui| review::show(ui, &mut self.review_state))
                         .body_returned
                         .unwrap_or(ReviewAction::None);
 
@@ -884,22 +906,13 @@ impl eframe::App for MonitorApp {
 
 /// Spawn an nca run as a background process. The session will appear in
 /// the session index once it writes its metadata to disk.
-fn spawn_nca_run(
-    workspace: &std::path::Path,
-    prompt: &str,
-    model: Option<&str>,
-    safe_mode: bool,
-) {
+fn spawn_nca_run(workspace: &std::path::Path, prompt: &str, model: Option<&str>, safe_mode: bool) {
     let exe = match std::env::current_exe()
         .ok()
         .and_then(|p| {
             let dir = p.parent()?;
             let nca = dir.join("nca");
-            if nca.exists() {
-                Some(nca)
-            } else {
-                None
-            }
+            if nca.exists() { Some(nca) } else { None }
         })
         .or_else(|| which_nca())
     {

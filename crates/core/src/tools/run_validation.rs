@@ -64,8 +64,8 @@ impl ToolExecutor for RunValidationTool {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
-        let output = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output())
-            .await;
+        let output =
+            tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output()).await;
 
         let output = match output {
             Ok(Ok(output)) => output,
@@ -82,7 +82,9 @@ impl ToolExecutor for RunValidationTool {
                     call_id: call.id.clone(),
                     success: false,
                     output: String::new(),
-                    error: Some(format!("validation command timed out after {timeout_secs}s")),
+                    error: Some(format!(
+                        "validation command timed out after {timeout_secs}s"
+                    )),
                 };
             }
         };

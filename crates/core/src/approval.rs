@@ -36,7 +36,11 @@ impl ApprovalPolicy {
             }
         }
 
-        let explicitly_allowed = self.config.allow.iter().any(|pattern| key.contains(pattern));
+        let explicitly_allowed = self
+            .config
+            .allow
+            .iter()
+            .any(|pattern| key.contains(pattern));
 
         let readonly = matches!(
             tool_name,

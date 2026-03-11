@@ -45,10 +45,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut ReviewState) -> ReviewAction {
             ui.label(format!("\u{2190} {base}"));
         }
         ui.separator();
-        ui.label(format!(
-            "{} ahead, {} behind",
-            state.ahead, state.behind
-        ));
+        ui.label(format!("{} ahead, {} behind", state.ahead, state.behind));
     });
 
     if let Some(ref msg) = state.merge_status {
@@ -62,7 +59,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut ReviewState) -> ReviewAction {
         ui.vertical(|ui| {
             ui.set_min_width(200.0);
             ui.heading("Changed Files");
-            if let Some(clicked) = files::show(ui, &state.changed_files, state.selected_file.as_ref()) {
+            if let Some(clicked) =
+                files::show(ui, &state.changed_files, state.selected_file.as_ref())
+            {
                 state.selected_file = Some(clicked);
                 action = ReviewAction::LoadDiff;
             }

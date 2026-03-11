@@ -1,6 +1,6 @@
+use crate::pty::PtyManager;
 use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
 use nca_core::tools::ToolExecutor;
-use crate::pty::PtyManager;
 use std::sync::Arc;
 
 /// Runtime-backed bash tool that executes shell commands via PTY.

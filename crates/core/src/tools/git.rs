@@ -36,7 +36,12 @@ impl ToolExecutor for GitStatusTool {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolResult {
-        run_git(&self.workspace_root, &["status", "--short", "--branch"], call).await
+        run_git(
+            &self.workspace_root,
+            &["status", "--short", "--branch"],
+            call,
+        )
+        .await
     }
 }
 

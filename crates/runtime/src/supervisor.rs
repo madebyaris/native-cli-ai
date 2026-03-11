@@ -8,8 +8,8 @@ use nca_common::session::{SessionMeta, SessionState, SessionStatus};
 use nca_core::agent::AgentLoop;
 use nca_core::approval::{ApprovalHandler, ApprovalPolicy};
 use nca_core::harness::build_system_prompt;
-use nca_core::provider::factory::build_provider;
 use nca_core::provider::ProviderError;
+use nca_core::provider::factory::build_provider;
 use nca_core::tools::ToolRegistry;
 use nca_core::tools::spawn_subagent::{SpawnRequest, SpawnSubagentTool};
 use std::collections::HashMap;
@@ -340,7 +340,12 @@ impl Supervisor {
         self.base_branch = Some(base_branch);
     }
 
-    pub fn set_parent(&mut self, parent_id: String, summary: Option<String>, reason: Option<String>) {
+    pub fn set_parent(
+        &mut self,
+        parent_id: String,
+        summary: Option<String>,
+        reason: Option<String>,
+    ) {
         self.parent_session_id = Some(parent_id);
         self.inherited_summary = summary;
         self.spawn_reason = reason;
@@ -526,15 +531,13 @@ pub fn spawn_command_consumer_with_store(
                                     metas.push(state.meta);
                                 }
                             }
-                            let resp = nca_common::event::AgentResponse::SessionList {
-                                sessions: metas,
-                            };
+                            let resp =
+                                nca_common::event::AgentResponse::SessionList { sessions: metas };
                             if let Some(ref tx) = event_tx {
                                 let _ = tx
                                     .send(AgentEvent::MessageReceived {
                                         role: "system".into(),
-                                        content: serde_json::to_string(&resp)
-                                            .unwrap_or_default(),
+                                        content: serde_json::to_string(&resp).unwrap_or_default(),
                                     })
                                     .await;
                             }
@@ -551,7 +554,9 @@ pub fn spawn_command_consumer_with_store(
                     }
                 }
                 AgentCommand::StartSession { .. } | AgentCommand::ResumeSession { .. } => {
-                    tracing::warn!("StartSession/ResumeSession commands should be handled by the desktop app, not the command consumer");
+                    tracing::warn!(
+                        "StartSession/ResumeSession commands should be handled by the desktop app, not the command consumer"
+                    );
                 }
             }
         }
@@ -677,8 +682,7 @@ pub fn spawn_subagent_consumer(
     event_tx: Option<tokio::sync::mpsc::Sender<AgentEvent>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let parent_store =
-            SessionStore::new(workspace_root.join(&config.session.history_dir));
+        let parent_store = SessionStore::new(workspace_root.join(&config.session.history_dir));
 
         while let Some(req) = spawn_rx.recv().await {
             let summary = build_parent_summary(&parent_messages);
@@ -757,13 +761,13 @@ pub fn spawn_subagent_consumer(
 }
 
 /// Append a child session ID to the parent session's metadata on disk.
-async fn append_child_to_parent(
-    store: &SessionStore,
-    parent_id: &str,
-    child_id: &str,
-) {
+async fn append_child_to_parent(store: &SessionStore, parent_id: &str, child_id: &str) {
     if let Ok(mut parent) = store.load(parent_id).await {
-        if !parent.meta.child_session_ids.contains(&child_id.to_string()) {
+        if !parent
+            .meta
+            .child_session_ids
+            .contains(&child_id.to_string())
+        {
             parent.meta.child_session_ids.push(child_id.to_string());
             let _ = store.save(&parent).await;
         }
@@ -829,9 +833,7 @@ pub struct ChildSessionResult {
 
 /// Spawn a child session that inherits parent context and runs to completion.
 /// Returns the result of the child run. This is a blocking async call.
-pub async fn spawn_child_session(
-    cfg: ChildSessionConfig,
-) -> Result<ChildSessionResult, String> {
+pub async fn spawn_child_session(cfg: ChildSessionConfig) -> Result<ChildSessionResult, String> {
     let mut sup = Supervisor::create(SupervisorConfig {
         config: cfg.config.clone(),
         workspace_root: cfg.workspace_root.clone(),

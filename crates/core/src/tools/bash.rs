@@ -1,5 +1,5 @@
 use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 use super::ToolExecutor;
 

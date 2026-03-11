@@ -66,10 +66,7 @@ impl ToolExecutor for SpawnSubagentTool {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolResult {
-        let task = call.input["task"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let task = call.input["task"].as_str().unwrap_or("").to_string();
 
         if task.is_empty() {
             return ToolResult {
@@ -89,9 +86,7 @@ impl ToolExecutor for SpawnSubagentTool {
             })
             .unwrap_or_default();
 
-        let use_worktree = call.input["use_worktree"]
-            .as_bool()
-            .unwrap_or(true);
+        let use_worktree = call.input["use_worktree"].as_bool().unwrap_or(true);
 
         let (reply_tx, reply_rx) = oneshot::channel();
 
@@ -122,7 +117,10 @@ impl ToolExecutor for SpawnSubagentTool {
                     error: if success {
                         None
                     } else {
-                        Some(format!("Sub-agent finished with status: {}", response.status))
+                        Some(format!(
+                            "Sub-agent finished with status: {}",
+                            response.status
+                        ))
                     },
                 }
             }

@@ -45,9 +45,7 @@ pub fn spawn_stream_task(
         })),
     };
 
-    let ipc_handle_rebuilt = event_tx_ipc.map(|tx| {
-        IpcRebroadcast { event_tx: tx }
-    });
+    let ipc_handle_rebuilt = event_tx_ipc.map(|tx| IpcRebroadcast { event_tx: tx });
 
     tokio::spawn(async move {
         use nca_common::event::EventEnvelope;
@@ -123,7 +121,9 @@ fn render_human_event(event: &AgentEvent) {
             eprintln!("[approval] resolved={approved}");
         }
         AgentEvent::Checkpoint {
-            phase, detail, turn,
+            phase,
+            detail,
+            turn,
         } => {
             eprintln!("[checkpoint] turn={turn} phase={phase} {detail}");
         }

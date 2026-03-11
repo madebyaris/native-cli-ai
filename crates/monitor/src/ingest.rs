@@ -51,7 +51,9 @@ pub fn reduce_event(
             None,
         ),
         AgentEvent::TokensStreamed { delta } => (
-            Some(TimelineEntry::Tokens { delta: delta.clone() }),
+            Some(TimelineEntry::Tokens {
+                delta: delta.clone(),
+            }),
             None,
             None,
             None,
@@ -146,7 +148,11 @@ pub fn reduce_event(
             None,
             None,
         ),
-        AgentEvent::Checkpoint { phase, detail, turn } => (
+        AgentEvent::Checkpoint {
+            phase,
+            detail,
+            turn,
+        } => (
             Some(TimelineEntry::Checkpoint {
                 phase: phase.clone(),
                 detail: detail.clone(),

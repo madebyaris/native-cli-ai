@@ -1,7 +1,7 @@
 //! Panel: tool call history with inputs and outputs.
 
-use crate::state::ToolCallState;
 use super::truncate_chars;
+use crate::state::ToolCallState;
 use eframe::egui;
 use std::collections::HashMap;
 
@@ -18,7 +18,11 @@ pub fn show(ui: &mut egui::Ui, tool_calls: &HashMap<String, ToolCallState>) {
                 egui::CollapsingHeader::new(format!("{}", call_id))
                     .default_open(false)
                     .show(ui, |ui| match state {
-                        ToolCallState::Started { tool, input, output } => {
+                        ToolCallState::Started {
+                            tool,
+                            input,
+                            output,
+                        } => {
                             ui.label(format!("Tool: {tool}"));
                             ui.label("Input:");
                             ui.code(truncate_chars(&input.to_string(), 500));

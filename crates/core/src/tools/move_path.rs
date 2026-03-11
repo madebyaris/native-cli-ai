@@ -1,6 +1,6 @@
 use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
 
-use super::{rename_path::rename_impl, ToolExecutor};
+use super::{ToolExecutor, rename_path::rename_impl};
 
 pub struct MovePathTool {
     workspace_root: std::path::PathBuf,

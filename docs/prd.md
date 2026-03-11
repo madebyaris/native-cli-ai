@@ -181,6 +181,7 @@ A separate `nca-monitor` binary (egui) connects to one or more running nca sessi
 
 ```
 nca                          # Start interactive REPL
+nca --run                    # Start interactive run profile (Claude-style)
 nca --prompt "..."           # One-shot mode
 nca run --prompt "..."       # Explicit run command with stream modes
 nca spawn --prompt "..."     # Background session
@@ -193,6 +194,9 @@ nca cancel <session-id>      # Cancel a running session
 nca --safe                   # Read-only mode
 nca --resume                 # Resume last session
 nca --model MiniMax-M2.5     # Override model
+nca run --prompt "..." --model MiniMax-M2.5
+nca spawn --prompt "..." --model MiniMax-M2.5
+nca resume <session-id> --model MiniMax-M2.5
 nca --stream ndjson          # NDJSON event streaming
 nca --permission-mode plan   # Analysis only, no edits or shell execution
 nca --verbose                # Debug logging

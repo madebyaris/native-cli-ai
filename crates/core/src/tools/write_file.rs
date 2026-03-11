@@ -42,7 +42,7 @@ impl ToolExecutor for WriteFileTool {
                     success: false,
                     output: String::new(),
                     error: Some("Invalid write path".into()),
-                }
+                };
             }
         };
 
@@ -63,7 +63,7 @@ impl ToolExecutor for WriteFileTool {
                     success: false,
                     output: String::new(),
                     error: Some(format!("Failed to resolve parent path: {err}")),
-                }
+                };
             }
         };
 

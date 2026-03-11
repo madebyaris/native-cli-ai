@@ -2,6 +2,10 @@
 
 A Rust-native AI coding assistant for the terminal. No JavaScript, no webview, single binary.
 
+## Toolchain
+
+This workspace uses Rust edition 2024. Use a recent toolchain (Rust/Cargo that supports edition 2024) before building.
+
 ## Quick Start
 
 ```bash
@@ -14,11 +18,19 @@ export MINIMAX_API_KEY="your-api-key"
 # Run the CLI
 cargo run -p nca-cli
 
+# Run with explicit interactive profile
+cargo run -p nca-cli -- --run
+
 # Run a one-shot MiniMax prompt
 cargo run -p nca-cli -- --prompt "Explain this repository"
 
 # Preferred command form
 cargo run -p nca-cli -- run --prompt "Build a login page" --stream human
+
+# Override model in run/spawn/resume surfaces
+cargo run -p nca-cli -- run --prompt "Review code" --model MiniMax-M2.5
+cargo run -p nca-cli -- spawn --prompt "Implement tests" --model MiniMax-M2.5
+cargo run -p nca-cli -- resume <session_id> --model MiniMax-M2.5
 
 # Run in safe mode (read/search/list only)
 cargo run -p nca-cli -- --safe

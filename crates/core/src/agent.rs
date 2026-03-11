@@ -138,11 +138,11 @@ impl AgentLoop {
                     })
                     .await;
                     return Err(ProviderError::Other(
-                        "Provider returned empty response with no tool calls after retries"
-                            .into(),
+                        "Provider returned empty response with no tool calls after retries".into(),
                     ));
                 }
-                self.messages.push(Message::assistant(assistant_text.clone()));
+                self.messages
+                    .push(Message::assistant(assistant_text.clone()));
                 self.emit(AgentEvent::MessageReceived {
                     role: "assistant".into(),
                     content: assistant_text.clone(),
@@ -160,8 +160,10 @@ impl AgentLoop {
                 })
                 .collect();
 
-            self.messages
-                .push(Message::assistant_with_tool_calls(assistant_text, replay_tool_calls));
+            self.messages.push(Message::assistant_with_tool_calls(
+                assistant_text,
+                replay_tool_calls,
+            ));
 
             if tool_calls.len() as u32 > self.max_tool_calls_per_turn {
                 return Err(ProviderError::Other(format!(
@@ -191,10 +193,8 @@ impl AgentLoop {
                         output: String::new(),
                         error: Some(format!("tool `{}` denied by policy", call.name)),
                     };
-                    self.messages.push(Message::tool(
-                        call.id.clone(),
-                        format_tool_result(&result),
-                    ));
+                    self.messages
+                        .push(Message::tool(call.id.clone(), format_tool_result(&result)));
                     self.emit(AgentEvent::ToolCallCompleted {
                         call_id: result.call_id.clone(),
                         output: result,
@@ -229,10 +229,8 @@ impl AgentLoop {
                                 call.name
                             )),
                         };
-                        self.messages.push(Message::tool(
-                            call.id.clone(),
-                            format_tool_result(&result),
-                        ));
+                        self.messages
+                            .push(Message::tool(call.id.clone(), format_tool_result(&result)));
                         self.emit(AgentEvent::ToolCallCompleted {
                             call_id: result.call_id.clone(),
                             output: result,

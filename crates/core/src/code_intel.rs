@@ -65,7 +65,9 @@ impl CodeIntel for FastLocalCodeIntel {
         for line in stdout.lines() {
             let mut parts = line.splitn(3, ':');
             let Some(file) = parts.next() else { continue };
-            let Some(line_no) = parts.next() else { continue };
+            let Some(line_no) = parts.next() else {
+                continue;
+            };
             let Some(text) = parts.next() else { continue };
             matches.push(SymbolMatch {
                 file: PathBuf::from(file),

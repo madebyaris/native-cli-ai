@@ -144,8 +144,7 @@ impl SessionVm {
     }
 
     pub fn resolve_approval(&mut self, call_id: &str) {
-        self.pending_approvals
-            .retain(|a| a.call_id != call_id);
+        self.pending_approvals.retain(|a| a.call_id != call_id);
     }
 }
 

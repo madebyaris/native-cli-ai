@@ -114,9 +114,14 @@ pub async fn build_resumed_session_runtime(
     interactive_approvals: bool,
     session_id: &str,
 ) -> Result<SessionRuntime, ProviderError> {
-    let mut supervisor =
-        Supervisor::resume(config.clone(), workspace_root, safe_mode, interactive_approvals, session_id)
-            .await?;
+    let mut supervisor = Supervisor::resume(
+        config.clone(),
+        workspace_root,
+        safe_mode,
+        interactive_approvals,
+        session_id,
+    )
+    .await?;
     let handle = supervisor.take_handle();
     Ok(SessionRuntime {
         supervisor,

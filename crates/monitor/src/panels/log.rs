@@ -1,7 +1,7 @@
 //! Panel: raw event log viewer.
 
-use crate::state::TimelineEntry;
 use super::truncate_chars;
+use crate::state::TimelineEntry;
 use eframe::egui;
 
 /// Renders the event log / timeline.
@@ -23,14 +23,20 @@ pub fn show(ui: &mut egui::Ui, timeline: &[TimelineEntry]) {
                         (role.as_str(), truncate_chars(content, 200))
                     }
                     TimelineEntry::Tokens { delta } => ("tokens", truncate_chars(delta, 80)),
-                    TimelineEntry::ToolStart { call_id, tool, input } => (
+                    TimelineEntry::ToolStart {
+                        call_id,
+                        tool,
+                        input,
+                    } => (
                         "tool start",
-                        format!("{call_id} | {tool} | {}", truncate_chars(&input.to_string(), 100)),
+                        format!(
+                            "{call_id} | {tool} | {}",
+                            truncate_chars(&input.to_string(), 100)
+                        ),
                     ),
-                    TimelineEntry::ToolComplete { call_id, output } => (
-                        "tool done",
-                        format!("{call_id} | ok={}", output.success),
-                    ),
+                    TimelineEntry::ToolComplete { call_id, output } => {
+                        ("tool done", format!("{call_id} | ok={}", output.success))
+                    }
                     TimelineEntry::ApprovalRequested {
                         call_id,
                         tool,
@@ -47,19 +53,26 @@ pub fn show(ui: &mut egui::Ui, timeline: &[TimelineEntry]) {
                         "cost",
                         format!("in={input_tokens} out={output_tokens} ${estimated_cost_usd:.4}"),
                     ),
-                    TimelineEntry::Checkpoint { phase, detail, turn } => {
-                        ("checkpoint", format!("turn {turn} | {phase}: {detail}"))
-                    }
+                    TimelineEntry::Checkpoint {
+                        phase,
+                        detail,
+                        turn,
+                    } => ("checkpoint", format!("turn {turn} | {phase}: {detail}")),
                     TimelineEntry::SessionEnded { reason } => {
                         ("session ended", format!("{:?}", reason))
                     }
                     TimelineEntry::Error { message } => ("error", truncate_chars(message, 300)),
-                    TimelineEntry::ChildSpawned { child_session_id, task } => {
-                        ("child spawned", format!("{child_session_id} | {}", truncate_chars(task, 100)))
-                    }
-                    TimelineEntry::ChildCompleted { child_session_id, status } => {
-                        ("child done", format!("{child_session_id} | {status}"))
-                    }
+                    TimelineEntry::ChildSpawned {
+                        child_session_id,
+                        task,
+                    } => (
+                        "child spawned",
+                        format!("{child_session_id} | {}", truncate_chars(task, 100)),
+                    ),
+                    TimelineEntry::ChildCompleted {
+                        child_session_id,
+                        status,
+                    } => ("child done", format!("{child_session_id} | {status}")),
                 };
                 ui.horizontal(|ui| {
                     ui.label(format!("[{i}]"));
