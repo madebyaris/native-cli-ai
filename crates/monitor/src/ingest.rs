@@ -187,6 +187,18 @@ pub fn reduce_event(
             None,
             None,
         ),
+        AgentEvent::Response { response } => (
+            Some(TimelineEntry::Message {
+                role: "system".into(),
+                content: serde_json::to_string(response).unwrap_or_default(),
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
         AgentEvent::ChildSessionSpawned {
             child_session_id,
             task,

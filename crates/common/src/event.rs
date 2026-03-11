@@ -64,6 +64,9 @@ pub enum AgentEvent {
     Error {
         message: String,
     },
+    Response {
+        response: AgentResponse,
+    },
     ChildSessionSpawned {
         parent_session_id: String,
         child_session_id: String,

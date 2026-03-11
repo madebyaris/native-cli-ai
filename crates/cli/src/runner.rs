@@ -70,6 +70,18 @@ impl SessionRuntime {
         &self.supervisor.agent().messages
     }
 
+    pub fn request_cancel(&self) {
+        self.supervisor.request_cancel();
+    }
+
+    pub fn cancel_handle(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.supervisor.cancel_handle()
+    }
+
+    pub fn event_tx(&self) -> Option<tokio::sync::mpsc::Sender<AgentEvent>> {
+        self.supervisor.event_tx()
+    }
+
     pub fn config(&self) -> &NcaConfig {
         // We need access to config for child spawning; expose through supervisor
         // For now, return a reference through the supervisor's stored config

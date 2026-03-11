@@ -15,7 +15,7 @@ use nca_common::event::EndReason;
 use repl::Repl;
 use runner::{build_resumed_session_runtime, build_session_runtime};
 use std::path::PathBuf;
-use stream::{StreamMode, spawn_stream_task};
+use stream::{StreamMode, spawn_event_fanout_task, spawn_stream_task};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -93,6 +93,21 @@ enum Command {
         #[arg(long)]
         safe: bool,
         #[arg(long, value_enum, default_value_t = CliPermissionMode::Default)]
+        permission_mode: CliPermissionMode,
+        #[arg(long, hide = true)]
+        session_id: Option<String>,
+    },
+    #[command(hide = true)]
+    Serve {
+        #[arg(long)]
+        prompt: Option<String>,
+        #[arg(long, value_enum, default_value_t = StreamMode::Ndjson)]
+        stream: StreamMode,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        safe: bool,
+        #[arg(long, value_enum, default_value_t = CliPermissionMode::AcceptEdits)]
         permission_mode: CliPermissionMode,
         #[arg(long, hide = true)]
         session_id: Option<String>,
@@ -220,6 +235,21 @@ async fn main() -> anyhow::Result<()> {
                 session_id,
             )
             .await?;
+        }
+        Some(Command::Serve {
+            prompt,
+            stream,
+            model,
+            safe,
+            permission_mode,
+            session_id,
+        }) => {
+            if let Some(model) = model {
+                config.model.default_model = model.clone();
+                config.provider.minimax.model = model;
+            }
+            config.permissions.mode = permission_mode.into();
+            run_service_session(config, &workspace_root, prompt, stream, safe, session_id).await?;
         }
         Some(Command::Spawn {
             prompt,
@@ -395,6 +425,151 @@ async fn run_one_shot(
         if let Some(st) = spawn_task {
             st.abort();
         }
+    }
+    Ok(())
+}
+
+async fn run_service_session(
+    config: NcaConfig,
+    workspace_root: &PathBuf,
+    initial_prompt: Option<String>,
+    stream: StreamMode,
+    safe: bool,
+    session_id: Option<String>,
+) -> anyhow::Result<()> {
+    use nca_runtime::session_store::SessionStore;
+    use nca_runtime::supervisor::{SessionControlCommand, spawn_command_consumer_with_store};
+    use std::sync::atomic::Ordering;
+
+    let ipc_approval = IpcApprovalHandler::new();
+    let mut runtime = build_session_runtime(
+        config.clone(),
+        workspace_root,
+        safe,
+        true,
+        session_id,
+        Some(ipc_approval.clone()),
+    )
+    .await
+    .map_err(anyhow::Error::msg)?;
+
+    let event_rx = runtime
+        .take_event_rx()
+        .ok_or_else(|| anyhow::anyhow!("missing event receiver"))?;
+    let approval_pending = runtime.take_ipc_approval_pending();
+    let mut command_rx = None;
+    let mut event_tx_ipc = None;
+    if let Some(ipc_handle) = runtime.take_ipc_handle() {
+        let (etx, crx) = ipc_handle.into_parts();
+        event_tx_ipc = Some(etx);
+        command_rx = Some(crx);
+    }
+
+    let fanout_task =
+        spawn_event_fanout_task(event_rx, stream, runtime.event_log_path(), event_tx_ipc);
+
+    let subagent_task = if let Some(spawn_rx) = runtime.take_spawn_rx() {
+        Some(nca_runtime::supervisor::spawn_subagent_consumer(
+            spawn_rx,
+            runtime.session_id().to_string(),
+            runtime.workspace_root().to_path_buf(),
+            config.clone(),
+            runtime.messages().to_vec(),
+            runtime.event_tx(),
+        ))
+    } else {
+        None
+    };
+
+    let (prompt_tx, mut prompt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (control_tx, mut control_rx) =
+        tokio::sync::mpsc::unbounded_channel::<SessionControlCommand>();
+
+    let command_task = command_rx.map(|crx| {
+        spawn_command_consumer_with_store(
+            crx,
+            approval_pending,
+            None,
+            Some(SessionStore::new(
+                runtime.workspace_root().join(&config.session.history_dir),
+            )),
+            runtime.event_tx(),
+            Some(prompt_tx.clone()),
+            Some(control_tx.clone()),
+        )
+    });
+
+    if let Some(prompt) = initial_prompt {
+        let _ = prompt_tx.send(prompt);
+    }
+
+    let cancel_handle = runtime.cancel_handle();
+    let mut reason = EndReason::UserExit;
+
+    loop {
+        let prompt = tokio::select! {
+            control = control_rx.recv() => {
+                match control {
+                    Some(SessionControlCommand::Cancel) => {
+                        cancel_handle.store(true, Ordering::SeqCst);
+                        reason = EndReason::Cancelled;
+                        break;
+                    }
+                    Some(SessionControlCommand::Shutdown) => {
+                        cancel_handle.store(true, Ordering::SeqCst);
+                        reason = EndReason::UserExit;
+                        break;
+                    }
+                    None => break,
+                }
+            }
+            prompt = prompt_rx.recv() => match prompt {
+                Some(prompt) => prompt,
+                None => break,
+            }
+        };
+
+        let run_fut = runtime.run_turn(&prompt);
+        tokio::pin!(run_fut);
+
+        let result = tokio::select! {
+            result = &mut run_fut => result,
+            control = control_rx.recv() => {
+                match control {
+                    Some(SessionControlCommand::Cancel) => {
+                        cancel_handle.store(true, Ordering::SeqCst);
+                        reason = EndReason::Cancelled;
+                    }
+                    Some(SessionControlCommand::Shutdown) => {
+                        cancel_handle.store(true, Ordering::SeqCst);
+                        reason = EndReason::UserExit;
+                    }
+                    None => {}
+                }
+                run_fut.await
+            }
+        };
+
+        if let Err(error) = result {
+            if error.to_string().contains("run cancelled") {
+                if matches!(reason, EndReason::Cancelled | EndReason::UserExit) {
+                    break;
+                }
+                continue;
+            }
+            eprintln!("[session:error] {error}");
+            reason = EndReason::Error;
+            break;
+        }
+    }
+
+    runtime.finish(reason).await;
+    fanout_task.abort();
+    if let Some(task) = command_task {
+        task.abort();
+    }
+    if let Some(task) = subagent_task {
+        task.abort();
     }
     Ok(())
 }

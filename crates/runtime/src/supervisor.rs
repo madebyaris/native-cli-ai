@@ -14,7 +14,7 @@ use nca_core::tools::ToolRegistry;
 use nca_core::tools::spawn_subagent::{SpawnRequest, SpawnSubagentTool};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
@@ -329,6 +329,14 @@ impl Supervisor {
         &mut self.agent
     }
 
+    pub fn request_cancel(&self) {
+        self.agent.request_cancel();
+    }
+
+    pub fn cancel_handle(&self) -> Arc<AtomicBool> {
+        self.agent.cancel_handle()
+    }
+
     pub fn set_worktree_info(
         &mut self,
         worktree_path: PathBuf,
@@ -420,11 +428,25 @@ pub fn spawn_event_fanout(
 /// Spawns a task that consumes IPC commands and resolves approvals/cancellation.
 /// Also handles desktop-oriented commands like QueryState and ListSessions.
 pub fn spawn_command_consumer(
-    mut command_rx: mpsc::UnboundedReceiver<AgentCommand>,
+    command_rx: mpsc::UnboundedReceiver<AgentCommand>,
     approval_pending: Option<Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>>,
     cancel_tx: Option<oneshot::Sender<()>>,
 ) -> tokio::task::JoinHandle<()> {
-    spawn_command_consumer_with_store(command_rx, approval_pending, cancel_tx, None, None)
+    spawn_command_consumer_with_store(
+        command_rx,
+        approval_pending,
+        cancel_tx,
+        None,
+        None,
+        None,
+        None,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionControlCommand {
+    Cancel,
+    Shutdown,
 }
 
 /// Extended command consumer that can also answer query commands using a session store.
@@ -434,6 +456,8 @@ pub fn spawn_command_consumer_with_store(
     cancel_tx: Option<oneshot::Sender<()>>,
     session_store: Option<SessionStore>,
     event_tx: Option<mpsc::Sender<AgentEvent>>,
+    prompt_tx: Option<mpsc::UnboundedSender<String>>,
+    control_tx: Option<mpsc::UnboundedSender<SessionControlCommand>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut cancel = cancel_tx;
@@ -461,7 +485,9 @@ pub fn spawn_command_consumer_with_store(
                     if let Some(tx) = cancel.take() {
                         let _ = tx.send(());
                     }
-                    if let Some(ref tx) = event_tx {
+                    if let Some(ref tx) = control_tx {
+                        let _ = tx.send(SessionControlCommand::Cancel);
+                    } else if let Some(ref tx) = event_tx {
                         let _ = tx
                             .send(AgentEvent::SessionEnded {
                                 reason: EndReason::Cancelled,
@@ -473,7 +499,9 @@ pub fn spawn_command_consumer_with_store(
                     if let Some(tx) = cancel.take() {
                         let _ = tx.send(());
                     }
-                    if let Some(ref tx) = event_tx {
+                    if let Some(ref tx) = control_tx {
+                        let _ = tx.send(SessionControlCommand::Shutdown);
+                    } else if let Some(ref tx) = event_tx {
                         let _ = tx
                             .send(AgentEvent::SessionEnded {
                                 reason: EndReason::UserExit,
@@ -483,7 +511,9 @@ pub fn spawn_command_consumer_with_store(
                     break;
                 }
                 AgentCommand::SendMessage { content } => {
-                    if let Some(ref tx) = event_tx {
+                    if let Some(ref tx) = prompt_tx {
+                        let _ = tx.send(content);
+                    } else if let Some(ref tx) = event_tx {
                         let _ = tx
                             .send(AgentEvent::MessageReceived {
                                 role: "user".into(),
@@ -500,13 +530,7 @@ pub fn spawn_command_consumer_with_store(
                                     session: state,
                                 };
                                 if let Some(ref tx) = event_tx {
-                                    let _ = tx
-                                        .send(AgentEvent::MessageReceived {
-                                            role: "system".into(),
-                                            content: serde_json::to_string(&resp)
-                                                .unwrap_or_default(),
-                                        })
-                                        .await;
+                                    let _ = tx.send(AgentEvent::Response { response: resp }).await;
                                 }
                             }
                             Err(e) => {
@@ -534,12 +558,7 @@ pub fn spawn_command_consumer_with_store(
                             let resp =
                                 nca_common::event::AgentResponse::SessionList { sessions: metas };
                             if let Some(ref tx) = event_tx {
-                                let _ = tx
-                                    .send(AgentEvent::MessageReceived {
-                                        role: "system".into(),
-                                        content: serde_json::to_string(&resp).unwrap_or_default(),
-                                    })
-                                    .await;
+                                let _ = tx.send(AgentEvent::Response { response: resp }).await;
                             }
                         }
                         Err(e) => {
@@ -696,19 +715,7 @@ pub fn spawn_subagent_consumer(
                 focus_files: req.focus_files,
             };
 
-            if let Some(ref tx) = event_tx {
-                let _ = tx
-                    .send(AgentEvent::ChildSessionSpawned {
-                        parent_session_id: parent_session_id.clone(),
-                        child_session_id: "pending".into(),
-                        task: req.task.clone(),
-                        workspace: workspace_root.clone(),
-                        branch: None,
-                    })
-                    .await;
-            }
-
-            let result = spawn_child_session(child_cfg).await;
+            let result = spawn_child_session(child_cfg, event_tx.clone()).await;
             match result {
                 Ok(res) => {
                     append_child_to_parent(
@@ -833,7 +840,10 @@ pub struct ChildSessionResult {
 
 /// Spawn a child session that inherits parent context and runs to completion.
 /// Returns the result of the child run. This is a blocking async call.
-pub async fn spawn_child_session(cfg: ChildSessionConfig) -> Result<ChildSessionResult, String> {
+pub async fn spawn_child_session(
+    cfg: ChildSessionConfig,
+    event_tx: Option<tokio::sync::mpsc::Sender<AgentEvent>>,
+) -> Result<ChildSessionResult, String> {
     let mut sup = Supervisor::create(SupervisorConfig {
         config: cfg.config.clone(),
         workspace_root: cfg.workspace_root.clone(),
@@ -870,6 +880,18 @@ pub async fn spawn_child_session(cfg: ChildSessionConfig) -> Result<ChildSession
                 }
             }
         }
+    }
+
+    if let Some(ref tx) = event_tx {
+        let _ = tx
+            .send(AgentEvent::ChildSessionSpawned {
+                parent_session_id: cfg.parent_session_id.clone(),
+                child_session_id: child_id.clone(),
+                task: cfg.task.clone(),
+                workspace: sup.workspace_root.clone(),
+                branch: sup.branch.clone(),
+            })
+            .await;
     }
 
     let mut context_prompt = format!(
@@ -935,5 +957,114 @@ fn is_pid_alive(pid: u32) -> bool {
     {
         let _ = pid;
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use nca_common::event::{AgentCommand, AgentEvent, AgentResponse};
+    use nca_common::session::{SessionMeta, SessionState, SessionStatus};
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn send_message_forwards_prompt_to_session_queue() {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+
+        let task = spawn_command_consumer_with_store(
+            cmd_rx,
+            None,
+            None,
+            None,
+            None,
+            Some(prompt_tx),
+            Some(control_tx),
+        );
+
+        cmd_tx
+            .send(AgentCommand::SendMessage {
+                content: "hello from monitor".into(),
+            })
+            .unwrap();
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(1), prompt_rx.recv())
+            .await
+            .expect("prompt should be forwarded")
+            .expect("prompt channel should remain open");
+        assert_eq!(received, "hello from monitor");
+
+        let _ = cmd_tx.send(AgentCommand::Shutdown);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn query_state_emits_structured_response_event() {
+        let tmp = tempdir().unwrap();
+        let sessions_dir = tmp.path().join(".nca").join("sessions");
+        let store = SessionStore::new(&sessions_dir);
+        let now = Utc::now();
+        let state = SessionState {
+            meta: SessionMeta {
+                id: "session-test".into(),
+                created_at: now,
+                updated_at: now,
+                workspace: tmp.path().to_path_buf(),
+                model: "MiniMax-M2.5".into(),
+                status: SessionStatus::Running,
+                pid: None,
+                socket_path: None,
+                worktree_path: None,
+                branch: None,
+                base_branch: None,
+                parent_session_id: None,
+                child_session_ids: Vec::new(),
+                inherited_summary: None,
+                spawn_reason: None,
+            },
+            messages: Vec::new(),
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            estimated_cost_usd: 0.0,
+        };
+        store.save(&state).await.unwrap();
+
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let task = spawn_command_consumer_with_store(
+            cmd_rx,
+            None,
+            None,
+            Some(store),
+            Some(event_tx),
+            None,
+            None,
+        );
+
+        cmd_tx
+            .send(AgentCommand::QueryState {
+                session_id: "session-test".into(),
+            })
+            .unwrap();
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("event should be emitted")
+            .expect("event channel should remain open");
+
+        match event {
+            AgentEvent::Response { response } => match response {
+                AgentResponse::SessionState { session } => {
+                    assert_eq!(session.meta.id, "session-test");
+                }
+                other => panic!("unexpected response payload: {other:?}"),
+            },
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let _ = cmd_tx.send(AgentCommand::Shutdown);
+        task.abort();
     }
 }

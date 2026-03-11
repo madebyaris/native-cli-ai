@@ -937,7 +937,7 @@ fn spawn_nca_run(workspace: &std::path::Path, prompt: &str, model: Option<&str>,
 
     let mut cmd = std::process::Command::new(exe);
     cmd.current_dir(workspace)
-        .arg("run")
+        .arg("serve")
         .arg("--prompt")
         .arg(prompt)
         .arg("--stream")
@@ -945,7 +945,7 @@ fn spawn_nca_run(workspace: &std::path::Path, prompt: &str, model: Option<&str>,
         .arg("--session-id")
         .arg(&session_id)
         .arg("--permission-mode")
-        .arg("dont-ask");
+        .arg("accept-edits");
 
     if safe_mode {
         cmd.arg("--safe");
