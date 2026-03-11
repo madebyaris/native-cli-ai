@@ -12,8 +12,9 @@ use std::time::Duration;
 pub struct LiveAttachController {
     event_rx: mpsc::Receiver<AgentEvent>,
     stop_flag: Arc<AtomicBool>,
-    socket_path: PathBuf,
+    command_tx: mpsc::Sender<AgentCommand>,
     _join_handle: Option<thread::JoinHandle<()>>,
+    _command_join_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl LiveAttachController {
@@ -21,8 +22,10 @@ impl LiveAttachController {
     /// The background task will reconnect with backoff when the connection drops.
     pub fn attach(socket_path: PathBuf) -> Self {
         let (event_tx, event_rx) = mpsc::channel();
+        let (command_tx, command_rx) = mpsc::channel::<AgentCommand>();
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop = stop_flag.clone();
+        let command_stop = stop_flag.clone();
 
         let socket_path_for_handle = socket_path.clone();
         let join_handle = thread::spawn(move || {
@@ -33,11 +36,29 @@ impl LiveAttachController {
             rt.block_on(Self::attach_loop(socket_path_for_handle, event_tx, stop));
         });
 
+        let socket_path_for_commands = socket_path.clone();
+        let command_join_handle = thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            while !command_stop.load(Ordering::SeqCst) {
+                let cmd = match command_rx.recv_timeout(Duration::from_millis(200)) {
+                    Ok(cmd) => cmd,
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                };
+                let client = nca_runtime::ipc::IpcClient::new(socket_path_for_commands.clone());
+                let _ = rt.block_on(client.send_command(&cmd));
+            }
+        });
+
         Self {
             event_rx,
             stop_flag,
-            socket_path,
+            command_tx,
             _join_handle: Some(join_handle),
+            _command_join_handle: Some(command_join_handle),
         }
     }
 
@@ -92,19 +113,8 @@ impl LiveAttachController {
         self.stop_flag.store(true, Ordering::SeqCst);
     }
 
-    /// Send a command to the running session. Spawns a thread for the async send.
+    /// Send a command to the running session through the command worker.
     pub fn send_command(&self, cmd: &AgentCommand) {
-        let path = self.socket_path.clone();
-        let cmd = cmd.clone();
-        thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .ok();
-            if let Some(rt) = rt {
-                let client = nca_runtime::ipc::IpcClient::new(path);
-                let _ = rt.block_on(client.send_command(&cmd));
-            }
-        });
+        let _ = self.command_tx.send(cmd.clone());
     }
 }

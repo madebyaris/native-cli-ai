@@ -100,6 +100,8 @@ pub struct SessionVm {
 }
 
 impl SessionVm {
+    const MAX_TIMELINE_ENTRIES: usize = 2_000;
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -114,9 +116,21 @@ impl SessionVm {
         error: Option<String>,
         session_ended: Option<EndReason>,
     ) {
-        if let Some(e) = timeline_entry {
+        if let Some(mut e) = timeline_entry {
             self.current_action = current_action_from_entry(&e);
-            self.timeline.push(e);
+            if let TimelineEntry::Tokens { delta } = &mut e {
+                if let Some(TimelineEntry::Tokens { delta: previous }) = self.timeline.last_mut() {
+                    previous.push_str(delta);
+                } else {
+                    self.timeline.push(e);
+                }
+            } else {
+                self.timeline.push(e);
+            }
+            if self.timeline.len() > Self::MAX_TIMELINE_ENTRIES {
+                let trim = self.timeline.len() - Self::MAX_TIMELINE_ENTRIES;
+                self.timeline.drain(0..trim);
+            }
         }
         if let Some((call_id, tool, description)) = pending_approval {
             self.pending_approvals.push(PendingApproval {
@@ -286,7 +300,10 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(vm.current_action.as_deref(), Some("Running tool: read_file"));
+        assert_eq!(
+            vm.current_action.as_deref(),
+            Some("Running tool: read_file")
+        );
 
         vm.apply(
             Some(TimelineEntry::ApprovalRequested {

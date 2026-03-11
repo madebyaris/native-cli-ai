@@ -989,6 +989,7 @@ impl MonitorApp {
 
 impl eframe::App for MonitorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        ctx.request_repaint_after(std::time::Duration::from_millis(120));
         match self.view {
             View::Home => self.show_home(ctx),
             View::Session => self.show_session_view(ctx),

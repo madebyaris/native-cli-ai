@@ -22,3 +22,6 @@ chrono = { version = "0.4", features = ["serde"] }
 egui = "0.30"
 eframe = "0.30"
 rfd = "0.15"
+
+[dev-dependencies]
+tempfile = "3"
