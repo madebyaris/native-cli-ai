@@ -813,15 +813,9 @@ mod tests {
 
     #[test]
     fn parses_run_subcommand_model_override() {
-        let cli = Cli::try_parse_from([
-            "nca",
-            "run",
-            "--prompt",
-            "hello",
-            "--model",
-            "MiniMax-M2.5",
-        ])
-        .expect("should parse run subcommand");
+        let cli =
+            Cli::try_parse_from(["nca", "run", "--prompt", "hello", "--model", "MiniMax-M2.5"])
+                .expect("should parse run subcommand");
 
         match cli.command {
             Some(Command::Run { model, .. }) => {

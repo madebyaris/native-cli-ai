@@ -28,9 +28,7 @@ impl Repl {
 
         if self.run_mode {
             stdout
-                .write_all(
-                    b"[run-mode] Type /help for commands. Use /exit to quit.\n",
-                )
+                .write_all(b"[run-mode] Type /help for commands. Use /exit to quit.\n")
                 .await?;
             stdout.flush().await?;
         }
@@ -146,25 +144,23 @@ impl Repl {
                         .await?;
                 }
             }
-            "/sessions" => {
-                match self.runtime.list_session_ids().await {
-                    Ok(mut ids) => {
-                        ids.sort();
-                        if ids.is_empty() {
-                            stdout.write_all(b"no saved sessions\n").await?;
-                        } else {
-                            for id in ids {
-                                stdout.write_all(format!("{id}\n").as_bytes()).await?;
-                            }
+            "/sessions" => match self.runtime.list_session_ids().await {
+                Ok(mut ids) => {
+                    ids.sort();
+                    if ids.is_empty() {
+                        stdout.write_all(b"no saved sessions\n").await?;
+                    } else {
+                        for id in ids {
+                            stdout.write_all(format!("{id}\n").as_bytes()).await?;
                         }
                     }
-                    Err(error) => {
-                        stdout
-                            .write_all(format!("failed to list sessions: {error}\n").as_bytes())
-                            .await?;
-                    }
                 }
-            }
+                Err(error) => {
+                    stdout
+                        .write_all(format!("failed to list sessions: {error}\n").as_bytes())
+                        .await?;
+                }
+            },
             _ => {
                 stdout
                     .write_all(format!("unknown command: {command}\n").as_bytes())

@@ -12,6 +12,7 @@ pub struct IndexedSession {
     pub meta: Option<SessionMeta>,
     pub is_live: bool,
     pub workspace: PathBuf,
+    pub last_action: Option<String>,
 }
 
 /// Discovers sessions across multiple workspaces and the runtime socket dir.
@@ -116,6 +117,7 @@ impl SessionIndex {
                                         meta: None,
                                         is_live: true,
                                         workspace,
+                                        last_action: None,
                                     },
                                 );
                             } else if let Some(s) = by_id.get_mut(stem) {
@@ -157,6 +159,7 @@ fn scan_sessions_dir(
                         .and_then(|m| m.socket_path.as_ref())
                         .map(|p| p.exists())
                         .unwrap_or(false);
+                    let last_action = load_last_action(workspace, stem);
                     by_id.insert(
                         stem.to_string(),
                         IndexedSession {
@@ -164,6 +167,7 @@ fn scan_sessions_dir(
                             meta,
                             is_live,
                             workspace: workspace.to_path_buf(),
+                            last_action,
                         },
                     );
                 }
@@ -189,6 +193,47 @@ fn load_session_meta(path: &Path) -> Option<SessionMeta> {
         .map(|w| w.meta)
         .or_else(|_| serde_json::from_str::<SessionMeta>(&json))
         .ok()
+}
+
+fn load_last_action(workspace: &Path, session_id: &str) -> Option<String> {
+    use nca_common::event::{AgentEvent, EventEnvelope};
+
+    let events_path = workspace
+        .join(".nca")
+        .join("sessions")
+        .join(format!("{session_id}.events.jsonl"));
+    let data = std::fs::read_to_string(events_path).ok()?;
+    let mut last = None;
+    for line in data.lines() {
+        let event = match serde_json::from_str::<EventEnvelope>(line)
+            .map(|envelope| envelope.event)
+            .or_else(|_| serde_json::from_str::<AgentEvent>(line))
+        {
+            Ok(event) => event,
+            Err(_) => continue,
+        };
+        let action = match event {
+            AgentEvent::TokensStreamed { .. } => Some("Streaming response".to_string()),
+            AgentEvent::ToolCallStarted { tool, .. } => Some(format!("Running tool: {tool}")),
+            AgentEvent::ApprovalRequested { tool, .. } => Some(format!("Waiting approval: {tool}")),
+            AgentEvent::ChildSessionSpawned {
+                child_session_id, ..
+            } => Some(format!("Sub-agent started: {child_session_id}")),
+            AgentEvent::ChildSessionCompleted {
+                child_session_id,
+                status,
+                ..
+            } => Some(format!("Sub-agent {child_session_id}: {status}")),
+            AgentEvent::Checkpoint { detail, .. } => Some(detail),
+            AgentEvent::SessionEnded { reason } => Some(format!("Session ended: {:?}", reason)),
+            AgentEvent::Error { message } => Some(format!("Error: {message}")),
+            _ => None,
+        };
+        if let Some(action) = action {
+            last = Some(action);
+        }
+    }
+    last
 }
 
 impl IndexedSession {

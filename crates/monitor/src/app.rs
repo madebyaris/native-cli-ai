@@ -4,7 +4,7 @@ use nca_common::event::AgentCommand;
 use crate::controller::LiveAttachController;
 use crate::ingest::{reduce_event, replay_events_file};
 use crate::panels::review::{ReviewAction, ReviewState};
-use crate::panels::{log, review, stats, timeline, tools};
+use crate::panels::{log, review, sessions, stats, terminal, timeline, tools};
 use crate::session_index::{IndexedSession, SessionIndex};
 use crate::state::{AppState, TaskCard, TaskStatus};
 use crate::workspaces::WorkspaceManager;
@@ -18,13 +18,62 @@ enum View {
 }
 
 /// State for the new-session creation dialog.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PermissionPreset {
+    Default,
+    Plan,
+    AcceptEdits,
+    DontAsk,
+    BypassPermissions,
+}
+
+impl PermissionPreset {
+    fn as_arg(self) -> &'static str {
+        match self {
+            PermissionPreset::Default => "default",
+            PermissionPreset::Plan => "plan",
+            PermissionPreset::AcceptEdits => "accept-edits",
+            PermissionPreset::DontAsk => "dont-ask",
+            PermissionPreset::BypassPermissions => "bypass-permissions",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            PermissionPreset::Default => "Default",
+            PermissionPreset::Plan => "Plan (read-only)",
+            PermissionPreset::AcceptEdits => "Accept edits",
+            PermissionPreset::DontAsk => "Don't ask (deny writes/exec)",
+            PermissionPreset::BypassPermissions => "Bypass permissions",
+        }
+    }
+}
+
+impl Default for PermissionPreset {
+    fn default() -> Self {
+        Self::AcceptEdits
+    }
+}
+
+#[derive(Debug)]
 struct NewSessionForm {
     workspace_idx: Option<usize>,
     prompt: String,
     model_override: String,
     safe_mode: bool,
-    permission_mode: String,
+    permission_mode: PermissionPreset,
+}
+
+impl Default for NewSessionForm {
+    fn default() -> Self {
+        Self {
+            workspace_idx: None,
+            prompt: String::new(),
+            model_override: String::new(),
+            safe_mode: false,
+            permission_mode: PermissionPreset::AcceptEdits,
+        }
+    }
 }
 
 pub struct MonitorApp {
@@ -143,6 +192,24 @@ impl MonitorApp {
                 &mut self.new_session_form.safe_mode,
                 "Safe mode (read-only)",
             );
+            ui.add_space(4.0);
+            egui::ComboBox::from_label("Permission mode")
+                .selected_text(self.new_session_form.permission_mode.label())
+                .show_ui(ui, |ui| {
+                    for mode in [
+                        PermissionPreset::AcceptEdits,
+                        PermissionPreset::Default,
+                        PermissionPreset::Plan,
+                        PermissionPreset::DontAsk,
+                        PermissionPreset::BypassPermissions,
+                    ] {
+                        ui.selectable_value(
+                            &mut self.new_session_form.permission_mode,
+                            mode,
+                            mode.label(),
+                        );
+                    }
+                });
 
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -163,13 +230,26 @@ impl MonitorApp {
                                 Some(self.new_session_form.model_override.clone())
                             };
                             let safe_mode = self.new_session_form.safe_mode;
+                            let permission_mode = self.new_session_form.permission_mode;
 
-                            spawn_nca_run(&workspace, &prompt, model.as_deref(), safe_mode);
-                            self.set_status(
-                                "Session started. It will appear in the session list shortly.",
-                            );
-                            self.new_session_form = NewSessionForm::default();
-                            self.view = View::Home;
+                            match spawn_nca_run(
+                                &workspace,
+                                &prompt,
+                                model.as_deref(),
+                                safe_mode,
+                                permission_mode,
+                            ) {
+                                Ok(session_id) => {
+                                    self.set_status(format!(
+                                        "Session {session_id} started. It will appear shortly."
+                                    ));
+                                    self.new_session_form = NewSessionForm::default();
+                                    self.view = View::Home;
+                                }
+                                Err(error) => {
+                                    self.set_status(format!("Failed to start session: {error}"));
+                                }
+                            }
                         }
                     }
                 }
@@ -315,6 +395,10 @@ impl MonitorApp {
                         .map(|m| m.child_session_ids.clone())
                         .unwrap_or_default(),
                     spawn_reason: s.meta.as_ref().and_then(|m| m.spawn_reason.clone()),
+                    current_action: s
+                        .last_action
+                        .clone()
+                        .unwrap_or_else(|| format!("status: {}", s.status_display())),
                 }
             })
             .collect();
@@ -452,6 +536,9 @@ impl MonitorApp {
         if let Some(branch) = &card.branch {
             ui.label(format!("\u{2192} {branch}"));
         }
+        if !card.current_action.is_empty() {
+            ui.label(format!("| {}", card.current_action));
+        }
     }
 
     fn show_task_card(&mut self, ui: &mut egui::Ui, card: &TaskCard) {
@@ -479,6 +566,7 @@ impl MonitorApp {
                 if let Some(branch) = &card.branch {
                     ui.label(format!("\u{2192} {branch}"));
                 }
+                ui.label(crate::panels::truncate_chars(&card.current_action, 80));
                 if !card.child_session_ids.is_empty() {
                     ui.colored_label(
                         egui::Color32::from_rgb(100, 160, 220),
@@ -666,33 +754,20 @@ impl MonitorApp {
                 });
                 ui.separator();
 
-                if sessions.is_empty() {
-                    ui.label("No sessions found.");
-                } else {
-                    for s in &sessions {
-                        let label = format!(
-                            "{} {} {}",
-                            &s.id[..s.id.len().min(16)],
-                            s.status_display(),
-                            s.updated_display()
-                        );
-                        let is_selected = selected_id.as_ref() == Some(&s.id);
-                        let response = ui.selectable_label(is_selected, &label);
-                        if response.clicked() {
-                            self.app_state.select_session(Some(s.id.clone()));
-                        }
-                    }
+                if let Some(selected) = sessions::show(ui, &sessions, selected_id.as_deref()) {
+                    self.app_state.select_session(Some(selected));
                 }
             });
 
         // Approval bar
         if let (Some(vm), Some(attach)) = (&self.app_state.session_vm, &self.live_attach) {
-            if !vm.pending_approvals.is_empty() {
+            let pending = vm.pending_approvals.clone();
+            if !pending.is_empty() {
                 egui::TopBottomPanel::bottom("approval_bar")
                     .min_height(60.0)
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
-                            for approval in &vm.pending_approvals {
+                            for approval in &pending {
                                 ui.label(format!("{}: {}", approval.tool, approval.description));
                                 if ui.button("Approve").clicked() {
                                     attach.send_command(&AgentCommand::ApproveToolCall {
@@ -732,12 +807,14 @@ impl MonitorApp {
                                     attach.send_command(&AgentCommand::SendMessage {
                                         content: self.prompt_input.clone(),
                                     });
+                                    self.set_status("Prompt sent to live session");
                                     self.prompt_input.clear();
                                 }
                             }
                             if let Some(ref attach) = self.live_attach {
                                 if ui.button("Cancel").clicked() {
                                     attach.send_command(&AgentCommand::Cancel);
+                                    self.set_status("Cancel signal sent");
                                 }
                             }
                         });
@@ -766,6 +843,7 @@ impl MonitorApp {
                                     }
                                     self.live_attach =
                                         Some(LiveAttachController::attach(socket_path));
+                                    self.set_status("Reconnected to live session");
                                 } else {
                                     self.set_status("No active socket for this session.");
                                 }
@@ -773,6 +851,14 @@ impl MonitorApp {
                         }
                     });
                     self.show_status_bar(ui);
+                    if let Some(vm) = self.app_state.session_vm.as_ref() {
+                        if let Some(action) = vm.current_action.as_ref() {
+                            ui.label(format!(
+                                "Current action: {}",
+                                crate::panels::truncate_chars(action, 120)
+                            ));
+                        }
+                    }
                 }
                 let has_vm = self.app_state.session_vm.is_some();
                 if has_vm {
@@ -864,6 +950,13 @@ impl MonitorApp {
                                 .show(ui, |ui| tools::show(ui, &vm.tool_calls));
                         });
                     });
+                    ui.add_space(6.0);
+                    egui::CollapsingHeader::new("Live terminal")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            let vm = self.app_state.session_vm.as_ref().unwrap();
+                            terminal::show(ui, vm);
+                        });
 
                     let review_action = egui::CollapsingHeader::new("Review workbench")
                         .default_open(false)
@@ -906,7 +999,13 @@ impl eframe::App for MonitorApp {
 
 /// Spawn an nca run as a background process. The session will appear in
 /// the session index once it writes its metadata to disk.
-fn spawn_nca_run(workspace: &std::path::Path, prompt: &str, model: Option<&str>, safe_mode: bool) {
+fn spawn_nca_run(
+    workspace: &std::path::Path,
+    prompt: &str,
+    model: Option<&str>,
+    safe_mode: bool,
+    permission_mode: PermissionPreset,
+) -> Result<String, String> {
     let exe = match std::env::current_exe()
         .ok()
         .and_then(|p| {
@@ -917,23 +1016,17 @@ fn spawn_nca_run(workspace: &std::path::Path, prompt: &str, model: Option<&str>,
         .or_else(|| which_nca())
     {
         Some(exe) => exe,
-        None => return,
+        None => return Err("nca binary not found in PATH".into()),
     };
 
     let sessions_dir = workspace.join(".nca/sessions");
-    let _ = std::fs::create_dir_all(&sessions_dir);
+    std::fs::create_dir_all(&sessions_dir).map_err(|err| err.to_string())?;
 
     let session_id = format!("session-{}", chrono::Utc::now().timestamp_millis());
     let spawn_log = sessions_dir.join(format!("{session_id}.spawn.log"));
 
-    let stdout = match std::fs::File::create(&spawn_log) {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-    let stderr = match stdout.try_clone() {
-        Ok(f) => f,
-        Err(_) => return,
-    };
+    let stdout = std::fs::File::create(&spawn_log).map_err(|err| err.to_string())?;
+    let stderr = stdout.try_clone().map_err(|err| err.to_string())?;
 
     let mut cmd = std::process::Command::new(exe);
     cmd.current_dir(workspace)
@@ -945,7 +1038,7 @@ fn spawn_nca_run(workspace: &std::path::Path, prompt: &str, model: Option<&str>,
         .arg("--session-id")
         .arg(&session_id)
         .arg("--permission-mode")
-        .arg("accept-edits");
+        .arg(permission_mode.as_arg());
 
     if safe_mode {
         cmd.arg("--safe");
@@ -955,7 +1048,8 @@ fn spawn_nca_run(workspace: &std::path::Path, prompt: &str, model: Option<&str>,
     }
 
     cmd.stdout(stdout).stderr(stderr);
-    let _ = cmd.spawn();
+    cmd.spawn().map_err(|err| err.to_string())?;
+    Ok(session_id)
 }
 
 fn which_nca() -> Option<std::path::PathBuf> {
