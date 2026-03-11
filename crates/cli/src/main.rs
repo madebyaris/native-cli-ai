@@ -1,5 +1,5 @@
-mod approval_prompt;
 mod app;
+mod approval_prompt;
 mod prompt;
 mod render;
 mod repl;
@@ -15,10 +15,13 @@ use nca_common::event::EndReason;
 use repl::Repl;
 use runner::{build_resumed_session_runtime, build_session_runtime};
 use std::path::PathBuf;
-use stream::{spawn_stream_task, StreamMode};
+use stream::{StreamMode, spawn_event_fanout_task, spawn_stream_task};
 
 #[derive(Parser, Debug)]
-#[command(name = "nca", about = "Native CLI AI - a Rust-powered coding assistant")]
+#[command(
+    name = "nca",
+    about = "Native CLI AI - a Rust-powered coding assistant"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -34,6 +37,10 @@ struct Cli {
     /// Resume the last session
     #[arg(short, long)]
     resume: bool,
+
+    /// Start interactive run mode (Claude-style)
+    #[arg(long)]
+    run: bool,
 
     /// Override the default model
     #[arg(long)]
@@ -80,6 +87,8 @@ enum Command {
         #[arg(long, value_enum, default_value_t = StreamMode::Human)]
         stream: StreamMode,
         #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
         json: bool,
         #[arg(long)]
         safe: bool,
@@ -88,9 +97,26 @@ enum Command {
         #[arg(long, hide = true)]
         session_id: Option<String>,
     },
+    #[command(hide = true)]
+    Serve {
+        #[arg(long)]
+        prompt: Option<String>,
+        #[arg(long, value_enum, default_value_t = StreamMode::Ndjson)]
+        stream: StreamMode,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        safe: bool,
+        #[arg(long, value_enum, default_value_t = CliPermissionMode::AcceptEdits)]
+        permission_mode: CliPermissionMode,
+        #[arg(long, hide = true)]
+        session_id: Option<String>,
+    },
     Spawn {
         #[arg(long)]
         prompt: String,
+        #[arg(long)]
+        model: Option<String>,
         #[arg(long)]
         safe: bool,
         #[arg(long, value_enum, default_value_t = CliPermissionMode::DontAsk)]
@@ -101,6 +127,8 @@ enum Command {
         session_id: String,
         #[arg(long)]
         prompt: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
         #[arg(long)]
         safe: bool,
         #[arg(long, value_enum, default_value_t = StreamMode::Human)]
@@ -186,21 +214,58 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Run {
             prompt,
             stream,
+            model,
             json,
             safe,
             permission_mode,
             session_id,
         }) => {
+            if let Some(model) = model {
+                config.model.default_model = model.clone();
+                config.provider.minimax.model = model;
+            }
             config.permissions.mode = permission_mode.into();
-            run_one_shot(config, &workspace_root, &prompt, stream, json, safe, session_id).await?;
+            run_one_shot(
+                config,
+                &workspace_root,
+                &prompt,
+                stream,
+                json,
+                safe,
+                session_id,
+            )
+            .await?;
+        }
+        Some(Command::Serve {
+            prompt,
+            stream,
+            model,
+            safe,
+            permission_mode,
+            session_id,
+        }) => {
+            if let Some(model) = model {
+                config.model.default_model = model.clone();
+                config.provider.minimax.model = model;
+            }
+            config.permissions.mode = permission_mode.into();
+            run_service_session(config, &workspace_root, prompt, stream, safe, session_id).await?;
         }
         Some(Command::Spawn {
             prompt,
+            model,
             safe,
             permission_mode,
         }) => {
             config.permissions.mode = permission_mode.into();
-            spawn_run(&workspace_root, &prompt, safe, permission_mode).await?;
+            spawn_run(
+                &workspace_root,
+                &prompt,
+                model.as_deref(),
+                safe,
+                permission_mode,
+            )
+            .await?;
         }
         Some(Command::Sessions) => {
             list_sessions(&config, &workspace_root).await?;
@@ -208,10 +273,15 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Resume {
             session_id,
             prompt,
+            model,
             safe,
             stream,
             permission_mode,
         }) => {
+            if let Some(model) = model {
+                config.model.default_model = model.clone();
+                config.provider.minimax.model = model;
+            }
             config.permissions.mode = permission_mode.into();
             resume_session(config, &workspace_root, &session_id, prompt, safe, stream).await?;
         }
@@ -230,23 +300,9 @@ async fn main() -> anyhow::Result<()> {
         None => {
             if let Some(prompt) = cli.prompt.as_deref() {
                 config.permissions.mode = cli.permission_mode.into();
-                run_one_shot(
-                    config,
-                    &workspace_root,
-                    prompt,
-                    cli.stream,
-                    cli.json,
-                    cli.safe,
-                    cli.session_id,
-                )
-                .await?;
-            } else if cli.resume {
-                println!("Use `nca sessions` and `nca resume <session_id>` to resume a session.");
-            } else {
-                config.permissions.mode = cli.permission_mode.into();
-                let ipc_approval = IpcApprovalHandler::new();
-                let mut runtime =
-                    build_session_runtime(
+                if cli.run {
+                    let ipc_approval = IpcApprovalHandler::new();
+                    let mut runtime = build_session_runtime(
                         config.clone(),
                         &workspace_root,
                         cli.safe,
@@ -256,6 +312,51 @@ async fn main() -> anyhow::Result<()> {
                     )
                     .await
                     .map_err(anyhow::Error::msg)?;
+                    if let Some(rx) = runtime.take_event_rx() {
+                        let ipc_handle = runtime.take_ipc_handle();
+                        let approval_pending = runtime.take_ipc_approval_pending();
+                        let _stream_task = spawn_stream_task(
+                            rx,
+                            cli.stream,
+                            runtime.event_log_path(),
+                            ipc_handle,
+                            approval_pending,
+                            None,
+                        );
+                        let _ = runtime.run_turn(prompt).await;
+                        let mut repl = Repl::new(runtime, cli.safe, true);
+                        repl.run().await?;
+                    }
+                } else {
+                    run_one_shot(
+                        config,
+                        &workspace_root,
+                        prompt,
+                        cli.stream,
+                        cli.json,
+                        cli.safe,
+                        cli.session_id,
+                    )
+                    .await?;
+                }
+            } else if cli.resume {
+                println!("Use `nca sessions` and `nca resume <session_id>` to resume a session.");
+            } else {
+                if cli.run {
+                    eprintln!("[run-mode] interactive run profile enabled");
+                }
+                config.permissions.mode = cli.permission_mode.into();
+                let ipc_approval = IpcApprovalHandler::new();
+                let mut runtime = build_session_runtime(
+                    config.clone(),
+                    &workspace_root,
+                    cli.safe,
+                    true,
+                    cli.session_id,
+                    Some(ipc_approval.clone()),
+                )
+                .await
+                .map_err(anyhow::Error::msg)?;
                 if let Some(rx) = runtime.take_event_rx() {
                     let ipc_handle = runtime.take_ipc_handle();
                     let approval_pending = runtime.take_ipc_approval_pending();
@@ -267,7 +368,7 @@ async fn main() -> anyhow::Result<()> {
                         approval_pending,
                         None,
                     );
-                    let mut repl = Repl::new(runtime, cli.safe);
+                    let mut repl = Repl::new(runtime, cli.safe, cli.run);
                     repl.run().await?;
                 }
             }
@@ -287,17 +388,16 @@ async fn run_one_shot(
     session_id: Option<String>,
 ) -> anyhow::Result<()> {
     let ipc_approval = IpcApprovalHandler::new();
-    let mut runtime =
-        build_session_runtime(
-            config.clone(),
-            workspace_root,
-            safe,
-            true,
-            session_id,
-            Some(ipc_approval.clone()),
-        )
-        .await
-        .map_err(anyhow::Error::msg)?;
+    let mut runtime = build_session_runtime(
+        config.clone(),
+        workspace_root,
+        safe,
+        true,
+        session_id,
+        Some(ipc_approval.clone()),
+    )
+    .await
+    .map_err(anyhow::Error::msg)?;
     if let Some(rx) = runtime.take_event_rx() {
         let ipc_handle = runtime.take_ipc_handle();
         let approval_pending = runtime.take_ipc_approval_pending();
@@ -358,9 +458,155 @@ async fn run_one_shot(
     Ok(())
 }
 
+async fn run_service_session(
+    config: NcaConfig,
+    workspace_root: &PathBuf,
+    initial_prompt: Option<String>,
+    stream: StreamMode,
+    safe: bool,
+    session_id: Option<String>,
+) -> anyhow::Result<()> {
+    use nca_runtime::session_store::SessionStore;
+    use nca_runtime::supervisor::{SessionControlCommand, spawn_command_consumer_with_store};
+    use std::sync::atomic::Ordering;
+
+    let ipc_approval = IpcApprovalHandler::new();
+    let mut runtime = build_session_runtime(
+        config.clone(),
+        workspace_root,
+        safe,
+        true,
+        session_id,
+        Some(ipc_approval.clone()),
+    )
+    .await
+    .map_err(anyhow::Error::msg)?;
+
+    let event_rx = runtime
+        .take_event_rx()
+        .ok_or_else(|| anyhow::anyhow!("missing event receiver"))?;
+    let approval_pending = runtime.take_ipc_approval_pending();
+    let mut command_rx = None;
+    let mut event_tx_ipc = None;
+    if let Some(ipc_handle) = runtime.take_ipc_handle() {
+        let (etx, crx) = ipc_handle.into_parts();
+        event_tx_ipc = Some(etx);
+        command_rx = Some(crx);
+    }
+
+    let fanout_task =
+        spawn_event_fanout_task(event_rx, stream, runtime.event_log_path(), event_tx_ipc);
+
+    let subagent_task = if let Some(spawn_rx) = runtime.take_spawn_rx() {
+        Some(nca_runtime::supervisor::spawn_subagent_consumer(
+            spawn_rx,
+            runtime.session_id().to_string(),
+            runtime.workspace_root().to_path_buf(),
+            config.clone(),
+            runtime.messages().to_vec(),
+            runtime.event_tx(),
+        ))
+    } else {
+        None
+    };
+
+    let (prompt_tx, mut prompt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (control_tx, mut control_rx) =
+        tokio::sync::mpsc::unbounded_channel::<SessionControlCommand>();
+
+    let command_task = command_rx.map(|crx| {
+        spawn_command_consumer_with_store(
+            crx,
+            approval_pending,
+            None,
+            Some(SessionStore::new(
+                runtime.workspace_root().join(&config.session.history_dir),
+            )),
+            runtime.event_tx(),
+            Some(prompt_tx.clone()),
+            Some(control_tx.clone()),
+        )
+    });
+
+    if let Some(prompt) = initial_prompt {
+        let _ = prompt_tx.send(prompt);
+    }
+
+    let cancel_handle = runtime.cancel_handle();
+    let mut reason = EndReason::UserExit;
+
+    loop {
+        let prompt = tokio::select! {
+            control = control_rx.recv() => {
+                match control {
+                    Some(SessionControlCommand::Cancel) => {
+                        cancel_handle.store(true, Ordering::SeqCst);
+                        reason = EndReason::Cancelled;
+                        break;
+                    }
+                    Some(SessionControlCommand::Shutdown) => {
+                        cancel_handle.store(true, Ordering::SeqCst);
+                        reason = EndReason::UserExit;
+                        break;
+                    }
+                    None => break,
+                }
+            }
+            prompt = prompt_rx.recv() => match prompt {
+                Some(prompt) => prompt,
+                None => break,
+            }
+        };
+
+        let run_fut = runtime.run_turn(&prompt);
+        tokio::pin!(run_fut);
+
+        let result = tokio::select! {
+            result = &mut run_fut => result,
+            control = control_rx.recv() => {
+                match control {
+                    Some(SessionControlCommand::Cancel) => {
+                        cancel_handle.store(true, Ordering::SeqCst);
+                        reason = EndReason::Cancelled;
+                    }
+                    Some(SessionControlCommand::Shutdown) => {
+                        cancel_handle.store(true, Ordering::SeqCst);
+                        reason = EndReason::UserExit;
+                    }
+                    None => {}
+                }
+                run_fut.await
+            }
+        };
+
+        if let Err(error) = result {
+            if error.to_string().contains("run cancelled") {
+                if matches!(reason, EndReason::Cancelled | EndReason::UserExit) {
+                    break;
+                }
+                continue;
+            }
+            eprintln!("[session:error] {error}");
+            reason = EndReason::Error;
+            break;
+        }
+    }
+
+    runtime.finish(reason).await;
+    fanout_task.abort();
+    if let Some(task) = command_task {
+        task.abort();
+    }
+    if let Some(task) = subagent_task {
+        task.abort();
+    }
+    Ok(())
+}
+
 async fn spawn_run(
     workspace_root: &PathBuf,
     prompt: &str,
+    model: Option<&str>,
     safe: bool,
     permission_mode: CliPermissionMode,
 ) -> anyhow::Result<()> {
@@ -372,7 +618,8 @@ async fn spawn_run(
     let stderr = stdout.try_clone()?;
     let exe = std::env::current_exe()?;
 
-    std::process::Command::new(exe)
+    let mut command = std::process::Command::new(exe);
+    command
         .arg("run")
         .arg("--prompt")
         .arg(prompt)
@@ -382,10 +629,13 @@ async fn spawn_run(
         .arg(&session_id)
         .arg("--permission-mode")
         .arg(permission_mode.as_arg())
-        .args(if safe { vec!["--safe"] } else { vec![] })
-        .stdout(stdout)
-        .stderr(stderr)
-        .spawn()?;
+        .args(if safe { vec!["--safe"] } else { vec![] });
+
+    if let Some(model) = model {
+        command.arg("--model").arg(model);
+    }
+
+    command.stdout(stdout).stderr(stderr).spawn()?;
 
     println!("{session_id}");
     Ok(())
@@ -415,10 +665,9 @@ async fn resume_session(
     safe: bool,
     stream: StreamMode,
 ) -> anyhow::Result<()> {
-    let mut runtime =
-        build_resumed_session_runtime(config, workspace_root, safe, true, session_id)
-            .await
-            .map_err(anyhow::Error::msg)?;
+    let mut runtime = build_resumed_session_runtime(config, workspace_root, safe, true, session_id)
+        .await
+        .map_err(anyhow::Error::msg)?;
     if let Some(rx) = runtime.take_event_rx() {
         let ipc_handle = runtime.take_ipc_handle();
         let approval_pending = runtime.take_ipc_approval_pending();
@@ -431,10 +680,13 @@ async fn resume_session(
             None,
         );
         if let Some(prompt) = prompt {
-            let output = runtime.run_turn(&prompt).await.map_err(anyhow::Error::msg)?;
+            let output = runtime
+                .run_turn(&prompt)
+                .await
+                .map_err(anyhow::Error::msg)?;
             println!("{output}");
         } else {
-            let mut repl = Repl::new(runtime, safe);
+            let mut repl = Repl::new(runtime, safe, true);
             repl.run().await?;
         }
     }
@@ -546,4 +798,30 @@ async fn print_log_file(
     };
     print!("{data}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_top_level_run_mode() {
+        let cli = Cli::try_parse_from(["nca", "--run"]).expect("should parse run mode");
+        assert!(cli.run);
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn parses_run_subcommand_model_override() {
+        let cli =
+            Cli::try_parse_from(["nca", "run", "--prompt", "hello", "--model", "MiniMax-M2.5"])
+                .expect("should parse run subcommand");
+
+        match cli.command {
+            Some(Command::Run { model, .. }) => {
+                assert_eq!(model.as_deref(), Some("MiniMax-M2.5"));
+            }
+            _ => panic!("expected run subcommand"),
+        }
+    }
 }

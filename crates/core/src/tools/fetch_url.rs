@@ -99,7 +99,10 @@ impl ToolExecutor for FetchUrlTool {
         ToolResult {
             call_id: call.id.clone(),
             success: true,
-            output: normalized.chars().take(self.config.max_fetch_chars).collect(),
+            output: normalized
+                .chars()
+                .take(self.config.max_fetch_chars)
+                .collect(),
             error: None,
         }
     }

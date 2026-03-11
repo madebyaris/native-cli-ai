@@ -64,6 +64,9 @@ pub enum AgentEvent {
     Error {
         message: String,
     },
+    Response {
+        response: AgentResponse,
+    },
     ChildSessionSpawned {
         parent_session_id: String,
         child_session_id: String,
@@ -90,9 +93,15 @@ pub enum EndReason {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AgentCommand {
-    SendMessage { content: String },
-    ApproveToolCall { call_id: String },
-    DenyToolCall { call_id: String },
+    SendMessage {
+        content: String,
+    },
+    ApproveToolCall {
+        call_id: String,
+    },
+    DenyToolCall {
+        call_id: String,
+    },
     Cancel,
     Shutdown,
     /// Desktop: request the runtime to start a new session in a workspace.
@@ -108,9 +117,13 @@ pub enum AgentCommand {
         prompt: Option<String>,
     },
     /// Desktop: query current session state snapshot.
-    QueryState { session_id: String },
+    QueryState {
+        session_id: String,
+    },
     /// Desktop: list all sessions in a workspace.
-    ListSessions { workspace: PathBuf },
+    ListSessions {
+        workspace: PathBuf,
+    },
 }
 
 /// Responses to query commands, sent back over IPC.

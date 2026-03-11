@@ -13,6 +13,12 @@ pub fn show(ui: &mut egui::Ui, vm: &SessionVm, status: &str, model: &str) {
         ui.label("Model:");
         ui.label(model);
     });
+    if let Some(action) = vm.current_action.as_ref() {
+        ui.horizontal(|ui| {
+            ui.label("Current action:");
+            ui.label(crate::panels::truncate_chars(action, 120));
+        });
+    }
     ui.separator();
     ui.horizontal(|ui| {
         ui.label("Input tokens:");

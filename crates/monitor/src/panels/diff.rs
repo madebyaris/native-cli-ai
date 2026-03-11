@@ -12,26 +12,24 @@ pub fn show(ui: &mut egui::Ui, diff_text: &str, file_path: &str) {
     ui.heading(file_path);
     ui.separator();
 
-    egui::ScrollArea::both()
-        .max_height(500.0)
-        .show(ui, |ui| {
-            for line in diff_text.lines() {
-                let (color, prefix) = if line.starts_with('+') && !line.starts_with("+++") {
-                    (egui::Color32::from_rgb(80, 200, 120), true)
-                } else if line.starts_with('-') && !line.starts_with("---") {
-                    (egui::Color32::from_rgb(220, 80, 80), true)
-                } else if line.starts_with("@@") {
-                    (egui::Color32::from_rgb(100, 160, 220), false)
-                } else if line.starts_with("diff ") || line.starts_with("index ") {
-                    (egui::Color32::GRAY, false)
-                } else {
-                    (egui::Color32::from_rgb(200, 200, 200), false)
-                };
+    egui::ScrollArea::both().max_height(500.0).show(ui, |ui| {
+        for line in diff_text.lines() {
+            let (color, prefix) = if line.starts_with('+') && !line.starts_with("+++") {
+                (egui::Color32::from_rgb(80, 200, 120), true)
+            } else if line.starts_with('-') && !line.starts_with("---") {
+                (egui::Color32::from_rgb(220, 80, 80), true)
+            } else if line.starts_with("@@") {
+                (egui::Color32::from_rgb(100, 160, 220), false)
+            } else if line.starts_with("diff ") || line.starts_with("index ") {
+                (egui::Color32::GRAY, false)
+            } else {
+                (egui::Color32::from_rgb(200, 200, 200), false)
+            };
 
-                let _ = prefix;
-                ui.colored_label(color, egui::RichText::new(line).monospace());
-            }
-        });
+            let _ = prefix;
+            ui.colored_label(color, egui::RichText::new(line).monospace());
+        }
+    });
 }
 
 /// Show a summary of changes: additions, deletions, and file count.

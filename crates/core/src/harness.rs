@@ -37,13 +37,17 @@ pub fn build_system_prompt(config: &NcaConfig, workspace_root: &Path) -> String 
         }
     }
 
-    if let Some(text) = read_if_exists(&workspace_root.join(&config.harness.project_instructions_path)) {
+    if let Some(text) =
+        read_if_exists(&workspace_root.join(&config.harness.project_instructions_path))
+    {
         if !text.trim().is_empty() {
             sections.push(format!("Project Instructions:\n{}", text.trim()));
         }
     }
 
-    if let Some(text) = read_if_exists(&workspace_root.join(&config.harness.local_instructions_path)) {
+    if let Some(text) =
+        read_if_exists(&workspace_root.join(&config.harness.local_instructions_path))
+    {
         if !text.trim().is_empty() {
             sections.push(format!("Local Instructions:\n{}", text.trim()));
         }

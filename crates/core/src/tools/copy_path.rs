@@ -73,7 +73,11 @@ impl ToolExecutor for CopyPathTool {
             Ok(_) => ToolResult {
                 call_id: call.id.clone(),
                 success: true,
-                output: format!("Copied {} -> {}", canonical_from.display(), to_path.display()),
+                output: format!(
+                    "Copied {} -> {}",
+                    canonical_from.display(),
+                    to_path.display()
+                ),
                 error: None,
             },
             Err(err) => ToolResult {

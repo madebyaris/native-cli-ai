@@ -36,7 +36,11 @@ impl ApprovalPolicy {
             }
         }
 
-        let explicitly_allowed = self.config.allow.iter().any(|pattern| key.contains(pattern));
+        let explicitly_allowed = self
+            .config
+            .allow
+            .iter()
+            .any(|pattern| key.contains(pattern));
 
         let readonly = matches!(
             tool_name,
@@ -106,5 +110,13 @@ impl ApprovalPolicy {
             Some(handler) => handler.resolve(call, description).await,
             None => false,
         }
+    }
+
+    pub fn mode(&self) -> PermissionMode {
+        self.config.mode
+    }
+
+    pub fn set_mode(&mut self, mode: PermissionMode) {
+        self.config.mode = mode;
     }
 }

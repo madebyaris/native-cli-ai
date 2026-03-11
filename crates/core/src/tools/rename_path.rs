@@ -83,7 +83,11 @@ pub(super) async fn rename_impl(
         Ok(()) => ToolResult {
             call_id: call.id.clone(),
             success: true,
-            output: format!("{verb} {} -> {}", canonical_from.display(), to_path.display()),
+            output: format!(
+                "{verb} {} -> {}",
+                canonical_from.display(),
+                to_path.display()
+            ),
             error: None,
         },
         Err(err) => ToolResult {

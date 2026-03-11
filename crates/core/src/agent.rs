@@ -1,6 +1,8 @@
 use nca_common::event::AgentEvent;
 use nca_common::message::{Message, MessageToolCall};
 use nca_common::tool::{PermissionTier, ToolCall, ToolDefinition};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::approval::ApprovalPolicy;
 use crate::cost::CostTracker;
@@ -19,6 +21,7 @@ pub struct AgentLoop {
     max_turns: u32,
     max_tool_calls_per_turn: u32,
     checkpoint_interval: u32,
+    cancel_flag: Arc<AtomicBool>,
 }
 
 impl AgentLoop {
@@ -43,6 +46,7 @@ impl AgentLoop {
             max_turns,
             max_tool_calls_per_turn,
             checkpoint_interval,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -54,6 +58,7 @@ impl AgentLoop {
     /// Run one turn: send messages to the provider, execute any tool calls,
     /// and repeat until the provider returns a final text response.
     pub async fn run_turn(&mut self, user_input: &str) -> Result<String, ProviderError> {
+        self.cancel_flag.store(false, Ordering::SeqCst);
         self.messages.push(Message::user(user_input));
         self.emit(AgentEvent::MessageReceived {
             role: "user".into(),
@@ -66,6 +71,13 @@ impl AgentLoop {
         const MAX_EMPTY_RETRIES: u32 = 2;
 
         let final_text = loop {
+            if self.is_cancelled() {
+                self.emit(AgentEvent::Error {
+                    message: "Run cancelled".into(),
+                })
+                .await;
+                return Err(ProviderError::Other("run cancelled".into()));
+            }
             turn += 1;
             if turn > self.max_turns {
                 return Err(ProviderError::Other(format!(
@@ -90,6 +102,13 @@ impl AgentLoop {
             let mut got_usage = false;
 
             while let Some(chunk) = stream.recv().await {
+                if self.is_cancelled() {
+                    self.emit(AgentEvent::Error {
+                        message: "Run cancelled while streaming model output".into(),
+                    })
+                    .await;
+                    return Err(ProviderError::Other("run cancelled".into()));
+                }
                 match chunk {
                     StreamChunk::TextDelta(delta) => {
                         assistant_text.push_str(&delta);
@@ -138,11 +157,11 @@ impl AgentLoop {
                     })
                     .await;
                     return Err(ProviderError::Other(
-                        "Provider returned empty response with no tool calls after retries"
-                            .into(),
+                        "Provider returned empty response with no tool calls after retries".into(),
                     ));
                 }
-                self.messages.push(Message::assistant(assistant_text.clone()));
+                self.messages
+                    .push(Message::assistant(assistant_text.clone()));
                 self.emit(AgentEvent::MessageReceived {
                     role: "assistant".into(),
                     content: assistant_text.clone(),
@@ -160,8 +179,10 @@ impl AgentLoop {
                 })
                 .collect();
 
-            self.messages
-                .push(Message::assistant_with_tool_calls(assistant_text, replay_tool_calls));
+            self.messages.push(Message::assistant_with_tool_calls(
+                assistant_text,
+                replay_tool_calls,
+            ));
 
             if tool_calls.len() as u32 > self.max_tool_calls_per_turn {
                 return Err(ProviderError::Other(format!(
@@ -172,6 +193,13 @@ impl AgentLoop {
             }
 
             for (index, call) in tool_calls.into_iter().enumerate() {
+                if self.is_cancelled() {
+                    self.emit(AgentEvent::Error {
+                        message: "Run cancelled before tool execution".into(),
+                    })
+                    .await;
+                    return Err(ProviderError::Other("run cancelled".into()));
+                }
                 if self.checkpoint_interval > 0
                     && (index as u32 + 1) % self.checkpoint_interval == 0
                 {
@@ -191,10 +219,8 @@ impl AgentLoop {
                         output: String::new(),
                         error: Some(format!("tool `{}` denied by policy", call.name)),
                     };
-                    self.messages.push(Message::tool(
-                        call.id.clone(),
-                        format_tool_result(&result),
-                    ));
+                    self.messages
+                        .push(Message::tool(call.id.clone(), format_tool_result(&result)));
                     self.emit(AgentEvent::ToolCallCompleted {
                         call_id: result.call_id.clone(),
                         output: result,
@@ -229,10 +255,8 @@ impl AgentLoop {
                                 call.name
                             )),
                         };
-                        self.messages.push(Message::tool(
-                            call.id.clone(),
-                            format_tool_result(&result),
-                        ));
+                        self.messages
+                            .push(Message::tool(call.id.clone(), format_tool_result(&result)));
                         self.emit(AgentEvent::ToolCallCompleted {
                             call_id: result.call_id.clone(),
                             output: result,
@@ -293,6 +317,18 @@ impl AgentLoop {
 
     pub fn event_sender(&self) -> Option<tokio::sync::mpsc::Sender<AgentEvent>> {
         Some(self.event_tx.clone())
+    }
+
+    pub fn request_cancel(&self) {
+        self.cancel_flag.store(true, Ordering::SeqCst);
+    }
+
+    pub fn cancel_handle(&self) -> Arc<AtomicBool> {
+        self.cancel_flag.clone()
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel_flag.load(Ordering::SeqCst)
     }
 }
 

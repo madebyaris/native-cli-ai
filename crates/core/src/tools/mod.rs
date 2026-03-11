@@ -5,8 +5,8 @@ pub mod copy_path;
 pub mod create_directory;
 pub mod delete_path;
 pub mod edit_file;
-pub mod filesystem;
 pub mod fetch_url;
+pub mod filesystem;
 pub mod git;
 pub mod list_directory;
 pub mod move_path;
@@ -73,7 +73,9 @@ impl ToolRegistry {
         registry.register(Box::new(apply_patch::ApplyPatchTool::new(
             workspace_root.clone(),
         )));
-        registry.register(Box::new(edit_file::EditFileTool::new(workspace_root.clone())));
+        registry.register(Box::new(edit_file::EditFileTool::new(
+            workspace_root.clone(),
+        )));
         registry.register(Box::new(rename_path::RenamePathTool::new(
             workspace_root.clone(),
         )));

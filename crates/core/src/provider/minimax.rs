@@ -1,7 +1,7 @@
+use futures_util::StreamExt;
 use nca_common::config::{MiniMaxConfig, NcaConfig};
 use nca_common::message::{Message, Role};
 use nca_common::tool::{ToolCall, ToolDefinition};
-use futures_util::StreamExt;
 use reqwest::header::AUTHORIZATION;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

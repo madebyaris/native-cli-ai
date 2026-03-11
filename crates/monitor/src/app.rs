@@ -3,8 +3,8 @@ use nca_common::event::AgentCommand;
 
 use crate::controller::LiveAttachController;
 use crate::ingest::{reduce_event, replay_events_file};
-use crate::panels::{log, review, stats, timeline, tools};
 use crate::panels::review::{ReviewAction, ReviewState};
+use crate::panels::{log, review, sessions, stats, terminal, timeline, tools};
 use crate::session_index::{IndexedSession, SessionIndex};
 use crate::state::{AppState, TaskCard, TaskStatus};
 use crate::workspaces::WorkspaceManager;
@@ -18,13 +18,62 @@ enum View {
 }
 
 /// State for the new-session creation dialog.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PermissionPreset {
+    Default,
+    Plan,
+    AcceptEdits,
+    DontAsk,
+    BypassPermissions,
+}
+
+impl PermissionPreset {
+    fn as_arg(self) -> &'static str {
+        match self {
+            PermissionPreset::Default => "default",
+            PermissionPreset::Plan => "plan",
+            PermissionPreset::AcceptEdits => "accept-edits",
+            PermissionPreset::DontAsk => "dont-ask",
+            PermissionPreset::BypassPermissions => "bypass-permissions",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            PermissionPreset::Default => "Default",
+            PermissionPreset::Plan => "Plan (read-only)",
+            PermissionPreset::AcceptEdits => "Accept edits",
+            PermissionPreset::DontAsk => "Don't ask (deny writes/exec)",
+            PermissionPreset::BypassPermissions => "Bypass permissions",
+        }
+    }
+}
+
+impl Default for PermissionPreset {
+    fn default() -> Self {
+        Self::AcceptEdits
+    }
+}
+
+#[derive(Debug)]
 struct NewSessionForm {
     workspace_idx: Option<usize>,
     prompt: String,
     model_override: String,
     safe_mode: bool,
-    permission_mode: String,
+    permission_mode: PermissionPreset,
+}
+
+impl Default for NewSessionForm {
+    fn default() -> Self {
+        Self {
+            workspace_idx: None,
+            prompt: String::new(),
+            model_override: String::new(),
+            safe_mode: false,
+            permission_mode: PermissionPreset::AcceptEdits,
+        }
+    }
 }
 
 pub struct MonitorApp {
@@ -139,7 +188,28 @@ impl MonitorApp {
                 ui.text_edit_singleline(&mut self.new_session_form.model_override);
             });
 
-            ui.checkbox(&mut self.new_session_form.safe_mode, "Safe mode (read-only)");
+            ui.checkbox(
+                &mut self.new_session_form.safe_mode,
+                "Safe mode (read-only)",
+            );
+            ui.add_space(4.0);
+            egui::ComboBox::from_label("Permission mode")
+                .selected_text(self.new_session_form.permission_mode.label())
+                .show_ui(ui, |ui| {
+                    for mode in [
+                        PermissionPreset::AcceptEdits,
+                        PermissionPreset::Default,
+                        PermissionPreset::Plan,
+                        PermissionPreset::DontAsk,
+                        PermissionPreset::BypassPermissions,
+                    ] {
+                        ui.selectable_value(
+                            &mut self.new_session_form.permission_mode,
+                            mode,
+                            mode.label(),
+                        );
+                    }
+                });
 
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -160,11 +230,26 @@ impl MonitorApp {
                                 Some(self.new_session_form.model_override.clone())
                             };
                             let safe_mode = self.new_session_form.safe_mode;
+                            let permission_mode = self.new_session_form.permission_mode;
 
-                            spawn_nca_run(&workspace, &prompt, model.as_deref(), safe_mode);
-                            self.set_status("Session started. It will appear in the session list shortly.");
-                            self.new_session_form = NewSessionForm::default();
-                            self.view = View::Home;
+                            match spawn_nca_run(
+                                &workspace,
+                                &prompt,
+                                model.as_deref(),
+                                safe_mode,
+                                permission_mode,
+                            ) {
+                                Ok(session_id) => {
+                                    self.set_status(format!(
+                                        "Session {session_id} started. It will appear shortly."
+                                    ));
+                                    self.new_session_form = NewSessionForm::default();
+                                    self.view = View::Home;
+                                }
+                                Err(error) => {
+                                    self.set_status(format!("Failed to start session: {error}"));
+                                }
+                            }
                         }
                     }
                 }
@@ -310,6 +395,10 @@ impl MonitorApp {
                         .map(|m| m.child_session_ids.clone())
                         .unwrap_or_default(),
                     spawn_reason: s.meta.as_ref().and_then(|m| m.spawn_reason.clone()),
+                    current_action: s
+                        .last_action
+                        .clone()
+                        .unwrap_or_else(|| format!("status: {}", s.status_display())),
                 }
             })
             .collect();
@@ -323,12 +412,30 @@ impl MonitorApp {
             return;
         }
 
-        let top_level: Vec<_> = cards.iter().filter(|c| c.parent_session_id.is_none()).collect();
-        let child_cards: Vec<_> = cards.iter().filter(|c| c.parent_session_id.is_some()).collect();
+        let top_level: Vec<_> = cards
+            .iter()
+            .filter(|c| c.parent_session_id.is_none())
+            .collect();
+        let child_cards: Vec<_> = cards
+            .iter()
+            .filter(|c| c.parent_session_id.is_some())
+            .collect();
 
-        let running: Vec<_> = top_level.iter().filter(|c| c.status == TaskStatus::Running || c.status == TaskStatus::WaitingApproval).copied().collect();
-        let completed: Vec<_> = top_level.iter().filter(|c| c.status == TaskStatus::Completed).copied().collect();
-        let failed: Vec<_> = top_level.iter().filter(|c| c.status == TaskStatus::Error || c.status == TaskStatus::Cancelled).copied().collect();
+        let running: Vec<_> = top_level
+            .iter()
+            .filter(|c| c.status == TaskStatus::Running || c.status == TaskStatus::WaitingApproval)
+            .copied()
+            .collect();
+        let completed: Vec<_> = top_level
+            .iter()
+            .filter(|c| c.status == TaskStatus::Completed)
+            .copied()
+            .collect();
+        let failed: Vec<_> = top_level
+            .iter()
+            .filter(|c| c.status == TaskStatus::Error || c.status == TaskStatus::Cancelled)
+            .copied()
+            .collect();
 
         if !running.is_empty() {
             ui.heading("Active Runs");
@@ -383,7 +490,12 @@ impl MonitorApp {
         }
     }
 
-    fn show_child_cards(&mut self, ui: &mut egui::Ui, parent: &TaskCard, all_children: &[&TaskCard]) {
+    fn show_child_cards(
+        &mut self,
+        ui: &mut egui::Ui,
+        parent: &TaskCard,
+        all_children: &[&TaskCard],
+    ) {
         let children: Vec<_> = all_children
             .iter()
             .filter(|c| parent.child_session_ids.contains(&c.session_id))
@@ -424,6 +536,9 @@ impl MonitorApp {
         if let Some(branch) = &card.branch {
             ui.label(format!("\u{2192} {branch}"));
         }
+        if !card.current_action.is_empty() {
+            ui.label(format!("| {}", card.current_action));
+        }
     }
 
     fn show_task_card(&mut self, ui: &mut egui::Ui, card: &TaskCard) {
@@ -436,43 +551,43 @@ impl MonitorApp {
             TaskStatus::Queued => egui::Color32::from_rgb(100, 160, 220),
         };
 
-        egui::Frame::group(ui.style())
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.colored_label(status_color, card.status.label());
-                    ui.separator();
-                    let short_id = &card.session_id[..card.session_id.len().min(16)];
-                    if ui.link(short_id).clicked() {
-                        self.app_state.select_session(Some(card.session_id.clone()));
-                        self.view = View::Session;
-                    }
-                    ui.separator();
-                    ui.label(&card.workspace_name);
-                    ui.label(&card.model);
-                    if let Some(branch) = &card.branch {
-                        ui.label(format!("\u{2192} {branch}"));
-                    }
-                    if !card.child_session_ids.is_empty() {
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.colored_label(status_color, card.status.label());
+                ui.separator();
+                let short_id = &card.session_id[..card.session_id.len().min(16)];
+                if ui.link(short_id).clicked() {
+                    self.app_state.select_session(Some(card.session_id.clone()));
+                    self.view = View::Session;
+                }
+                ui.separator();
+                ui.label(&card.workspace_name);
+                ui.label(&card.model);
+                if let Some(branch) = &card.branch {
+                    ui.label(format!("\u{2192} {branch}"));
+                }
+                ui.label(crate::panels::truncate_chars(&card.current_action, 80));
+                if !card.child_session_ids.is_empty() {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(100, 160, 220),
+                        format!("{} children", card.child_session_ids.len()),
+                    );
+                }
+                if let Some(ref parent_id) = card.parent_session_id {
+                    let short_parent = &parent_id[..parent_id.len().min(12)];
+                    ui.label(format!("(child of {short_parent})"));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(&card.updated_at);
+                    if card.pending_approvals > 0 {
                         ui.colored_label(
-                            egui::Color32::from_rgb(100, 160, 220),
-                            format!("{} children", card.child_session_ids.len()),
+                            egui::Color32::from_rgb(200, 180, 60),
+                            format!("{} pending", card.pending_approvals),
                         );
                     }
-                    if let Some(ref parent_id) = card.parent_session_id {
-                        let short_parent = &parent_id[..parent_id.len().min(12)];
-                        ui.label(format!("(child of {short_parent})"));
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(&card.updated_at);
-                        if card.pending_approvals > 0 {
-                            ui.colored_label(
-                                egui::Color32::from_rgb(200, 180, 60),
-                                format!("{} pending", card.pending_approvals),
-                            );
-                        }
-                    });
                 });
             });
+        });
     }
 
     fn load_review_for_session(&mut self, session: &crate::session_index::IndexedSession) {
@@ -528,12 +643,7 @@ impl MonitorApp {
         let sessions = self.session_index.maybe_refresh().to_vec();
         let workspace = sessions
             .iter()
-            .find(|s| {
-                s.meta
-                    .as_ref()
-                    .and_then(|m| m.worktree_path.as_ref())
-                    == Some(&wt_path)
-            })
+            .find(|s| s.meta.as_ref().and_then(|m| m.worktree_path.as_ref()) == Some(&wt_path))
             .map(|s| s.workspace.clone())
             .unwrap_or_else(|| wt_path.clone());
 
@@ -552,22 +662,18 @@ impl MonitorApp {
         };
 
         let sessions = self.session_index.maybe_refresh().to_vec();
-        if let Some(session) = sessions.iter().find(|s| {
-            s.meta
-                .as_ref()
-                .and_then(|m| m.worktree_path.as_ref())
-                == Some(&wt_path)
-        }) {
+        if let Some(session) = sessions
+            .iter()
+            .find(|s| s.meta.as_ref().and_then(|m| m.worktree_path.as_ref()) == Some(&wt_path))
+        {
             let mgr = nca_runtime::worktree::WorktreeManager::new(&session.workspace);
             match mgr.merge_into_base(&session.id, &base) {
                 Ok(()) => {
-                    self.review_state.merge_status =
-                        Some("Merged successfully.".to_string());
+                    self.review_state.merge_status = Some("Merged successfully.".to_string());
                     let _ = mgr.remove_worktree(&session.id, true);
                 }
                 Err(e) => {
-                    self.review_state.merge_status =
-                        Some(format!("Merge failed: {e}"));
+                    self.review_state.merge_status = Some(format!("Merge failed: {e}"));
                 }
             }
         }
@@ -580,12 +686,10 @@ impl MonitorApp {
         };
 
         let sessions = self.session_index.maybe_refresh().to_vec();
-        if let Some(session) = sessions.iter().find(|s| {
-            s.meta
-                .as_ref()
-                .and_then(|m| m.worktree_path.as_ref())
-                == Some(&wt_path)
-        }) {
+        if let Some(session) = sessions
+            .iter()
+            .find(|s| s.meta.as_ref().and_then(|m| m.worktree_path.as_ref()) == Some(&wt_path))
+        {
             let mgr = nca_runtime::worktree::WorktreeManager::new(&session.workspace);
             let _ = mgr.remove_worktree(&session.id, true);
             self.review_state.clear();
@@ -650,33 +754,20 @@ impl MonitorApp {
                 });
                 ui.separator();
 
-                if sessions.is_empty() {
-                    ui.label("No sessions found.");
-                } else {
-                    for s in &sessions {
-                        let label = format!(
-                            "{} {} {}",
-                            &s.id[..s.id.len().min(16)],
-                            s.status_display(),
-                            s.updated_display()
-                        );
-                        let is_selected = selected_id.as_ref() == Some(&s.id);
-                        let response = ui.selectable_label(is_selected, &label);
-                        if response.clicked() {
-                            self.app_state.select_session(Some(s.id.clone()));
-                        }
-                    }
+                if let Some(selected) = sessions::show(ui, &sessions, selected_id.as_deref()) {
+                    self.app_state.select_session(Some(selected));
                 }
             });
 
         // Approval bar
         if let (Some(vm), Some(attach)) = (&self.app_state.session_vm, &self.live_attach) {
-            if !vm.pending_approvals.is_empty() {
+            let pending = vm.pending_approvals.clone();
+            if !pending.is_empty() {
                 egui::TopBottomPanel::bottom("approval_bar")
                     .min_height(60.0)
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
-                            for approval in &vm.pending_approvals {
+                            for approval in &pending {
                                 ui.label(format!("{}: {}", approval.tool, approval.description));
                                 if ui.button("Approve").clicked() {
                                     attach.send_command(&AgentCommand::ApproveToolCall {
@@ -716,12 +807,14 @@ impl MonitorApp {
                                     attach.send_command(&AgentCommand::SendMessage {
                                         content: self.prompt_input.clone(),
                                     });
+                                    self.set_status("Prompt sent to live session");
                                     self.prompt_input.clear();
                                 }
                             }
                             if let Some(ref attach) = self.live_attach {
                                 if ui.button("Cancel").clicked() {
                                     attach.send_command(&AgentCommand::Cancel);
+                                    self.set_status("Cancel signal sent");
                                 }
                             }
                         });
@@ -750,6 +843,7 @@ impl MonitorApp {
                                     }
                                     self.live_attach =
                                         Some(LiveAttachController::attach(socket_path));
+                                    self.set_status("Reconnected to live session");
                                 } else {
                                     self.set_status("No active socket for this session.");
                                 }
@@ -757,6 +851,14 @@ impl MonitorApp {
                         }
                     });
                     self.show_status_bar(ui);
+                    if let Some(vm) = self.app_state.session_vm.as_ref() {
+                        if let Some(action) = vm.current_action.as_ref() {
+                            ui.label(format!(
+                                "Current action: {}",
+                                crate::panels::truncate_chars(action, 120)
+                            ));
+                        }
+                    }
                 }
                 let has_vm = self.app_state.session_vm.is_some();
                 if has_vm {
@@ -792,7 +894,8 @@ impl MonitorApp {
                                             ui.label("Parent:");
                                             let short = &parent_id[..parent_id.len().min(20)];
                                             if ui.link(short).clicked() {
-                                                self.app_state.select_session(Some(parent_id.clone()));
+                                                self.app_state
+                                                    .select_session(Some(parent_id.clone()));
                                             }
                                         });
                                         if let Some(ref reason) = meta.spawn_reason {
@@ -800,7 +903,10 @@ impl MonitorApp {
                                         }
                                     }
                                     if !meta.child_session_ids.is_empty() {
-                                        ui.label(format!("Children ({}):", meta.child_session_ids.len()));
+                                        ui.label(format!(
+                                            "Children ({}):",
+                                            meta.child_session_ids.len()
+                                        ));
                                         for child_id in &meta.child_session_ids {
                                             ui.horizontal(|ui| {
                                                 ui.label("  \u{2514}");
@@ -810,8 +916,12 @@ impl MonitorApp {
                                                     .find(|x| &x.id == child_id)
                                                     .map(|x| x.status_display())
                                                     .unwrap_or("unknown");
-                                                if ui.link(format!("{short} [{child_status}]")).clicked() {
-                                                    self.app_state.select_session(Some(child_id.clone()));
+                                                if ui
+                                                    .link(format!("{short} [{child_status}]"))
+                                                    .clicked()
+                                                {
+                                                    self.app_state
+                                                        .select_session(Some(child_id.clone()));
                                                 }
                                             });
                                         }
@@ -840,12 +950,17 @@ impl MonitorApp {
                                 .show(ui, |ui| tools::show(ui, &vm.tool_calls));
                         });
                     });
+                    ui.add_space(6.0);
+                    egui::CollapsingHeader::new("Live terminal")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            let vm = self.app_state.session_vm.as_ref().unwrap();
+                            terminal::show(ui, vm);
+                        });
 
                     let review_action = egui::CollapsingHeader::new("Review workbench")
                         .default_open(false)
-                        .show(ui, |ui| {
-                            review::show(ui, &mut self.review_state)
-                        })
+                        .show(ui, |ui| review::show(ui, &mut self.review_state))
                         .body_returned
                         .unwrap_or(ReviewAction::None);
 
@@ -874,6 +989,7 @@ impl MonitorApp {
 
 impl eframe::App for MonitorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        ctx.request_repaint_after(std::time::Duration::from_millis(120));
         match self.view {
             View::Home => self.show_home(ctx),
             View::Session => self.show_session_view(ctx),
@@ -889,42 +1005,33 @@ fn spawn_nca_run(
     prompt: &str,
     model: Option<&str>,
     safe_mode: bool,
-) {
+    permission_mode: PermissionPreset,
+) -> Result<String, String> {
     let exe = match std::env::current_exe()
         .ok()
         .and_then(|p| {
             let dir = p.parent()?;
             let nca = dir.join("nca");
-            if nca.exists() {
-                Some(nca)
-            } else {
-                None
-            }
+            if nca.exists() { Some(nca) } else { None }
         })
         .or_else(|| which_nca())
     {
         Some(exe) => exe,
-        None => return,
+        None => return Err("nca binary not found in PATH".into()),
     };
 
     let sessions_dir = workspace.join(".nca/sessions");
-    let _ = std::fs::create_dir_all(&sessions_dir);
+    std::fs::create_dir_all(&sessions_dir).map_err(|err| err.to_string())?;
 
     let session_id = format!("session-{}", chrono::Utc::now().timestamp_millis());
     let spawn_log = sessions_dir.join(format!("{session_id}.spawn.log"));
 
-    let stdout = match std::fs::File::create(&spawn_log) {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-    let stderr = match stdout.try_clone() {
-        Ok(f) => f,
-        Err(_) => return,
-    };
+    let stdout = std::fs::File::create(&spawn_log).map_err(|err| err.to_string())?;
+    let stderr = stdout.try_clone().map_err(|err| err.to_string())?;
 
     let mut cmd = std::process::Command::new(exe);
     cmd.current_dir(workspace)
-        .arg("run")
+        .arg("serve")
         .arg("--prompt")
         .arg(prompt)
         .arg("--stream")
@@ -932,7 +1039,7 @@ fn spawn_nca_run(
         .arg("--session-id")
         .arg(&session_id)
         .arg("--permission-mode")
-        .arg("dont-ask");
+        .arg(permission_mode.as_arg());
 
     if safe_mode {
         cmd.arg("--safe");
@@ -942,7 +1049,8 @@ fn spawn_nca_run(
     }
 
     cmd.stdout(stdout).stderr(stderr);
-    let _ = cmd.spawn();
+    cmd.spawn().map_err(|err| err.to_string())?;
+    Ok(session_id)
 }
 
 fn which_nca() -> Option<std::path::PathBuf> {

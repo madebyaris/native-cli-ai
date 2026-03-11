@@ -75,7 +75,11 @@ impl WorktreeManager {
 
         let base_branch = self.current_branch()?;
         let branch_name = format!("nca/{session_id}");
-        let worktree_path = self.repo_root.join(".nca").join("worktrees").join(session_id);
+        let worktree_path = self
+            .repo_root
+            .join(".nca")
+            .join("worktrees")
+            .join(session_id);
 
         if worktree_path.exists() {
             std::fs::remove_dir_all(&worktree_path)
@@ -120,7 +124,11 @@ impl WorktreeManager {
         session_id: &str,
         delete_branch: bool,
     ) -> Result<(), WorktreeError> {
-        let worktree_path = self.repo_root.join(".nca").join("worktrees").join(session_id);
+        let worktree_path = self
+            .repo_root
+            .join(".nca")
+            .join("worktrees")
+            .join(session_id);
 
         if worktree_path.exists() {
             let output = Command::new("git")
@@ -160,22 +168,22 @@ impl WorktreeManager {
         let mut result = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&worktrees_dir) {
             for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                            let session_id = name.to_string();
-                            let branch_name = format!("nca/{session_id}");
-                            let base_branch = self.current_branch().unwrap_or_else(|_| "main".into());
-                            result.push(WorktreeInfo {
-                                worktree_path: path,
-                                branch_name,
-                                base_branch,
-                                session_id,
-                                created_at: chrono::Utc::now(),
-                            });
-                        }
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        let session_id = name.to_string();
+                        let branch_name = format!("nca/{session_id}");
+                        let base_branch = self.current_branch().unwrap_or_else(|_| "main".into());
+                        result.push(WorktreeInfo {
+                            worktree_path: path,
+                            branch_name,
+                            base_branch,
+                            session_id,
+                            created_at: chrono::Utc::now(),
+                        });
                     }
                 }
+            }
         }
         result
     }
@@ -214,19 +222,9 @@ impl WorktreeManager {
     }
 
     /// Get the diff for a specific file in a worktree.
-    pub fn file_diff(
-        &self,
-        worktree_path: &Path,
-        base_branch: &str,
-        file_path: &Path,
-    ) -> String {
+    pub fn file_diff(&self, worktree_path: &Path, base_branch: &str, file_path: &Path) -> String {
         let output = Command::new("git")
-            .args([
-                "diff",
-                base_branch,
-                "--",
-                &file_path.display().to_string(),
-            ])
+            .args(["diff", base_branch, "--", &file_path.display().to_string()])
             .current_dir(worktree_path)
             .output();
 
@@ -237,13 +235,14 @@ impl WorktreeManager {
     }
 
     /// Get ahead/behind counts relative to base branch.
-    pub fn ahead_behind(
-        &self,
-        worktree_path: &Path,
-        base_branch: &str,
-    ) -> (usize, usize) {
+    pub fn ahead_behind(&self, worktree_path: &Path, base_branch: &str) -> (usize, usize) {
         let output = Command::new("git")
-            .args(["rev-list", "--left-right", "--count", &format!("{base_branch}...HEAD")])
+            .args([
+                "rev-list",
+                "--left-right",
+                "--count",
+                &format!("{base_branch}...HEAD"),
+            ])
             .current_dir(worktree_path)
             .output();
 
@@ -280,7 +279,13 @@ impl WorktreeManager {
         }
 
         let output = Command::new("git")
-            .args(["merge", "--no-ff", &branch_name, "-m", &format!("Merge nca session {session_id}")])
+            .args([
+                "merge",
+                "--no-ff",
+                &branch_name,
+                "-m",
+                &format!("Merge nca session {session_id}"),
+            ])
             .current_dir(&self.repo_root)
             .output()
             .map_err(|e| WorktreeError::Io(e.to_string()))?;

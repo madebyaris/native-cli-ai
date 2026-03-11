@@ -96,9 +96,12 @@ pub struct SessionVm {
     pub errors: Vec<String>,
     pub end_reason: Option<EndReason>,
     pub model: Option<String>,
+    pub current_action: Option<String>,
 }
 
 impl SessionVm {
+    const MAX_TIMELINE_ENTRIES: usize = 2_000;
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -113,8 +116,21 @@ impl SessionVm {
         error: Option<String>,
         session_ended: Option<EndReason>,
     ) {
-        if let Some(e) = timeline_entry {
-            self.timeline.push(e);
+        if let Some(mut e) = timeline_entry {
+            self.current_action = current_action_from_entry(&e);
+            if let TimelineEntry::Tokens { delta } = &mut e {
+                if let Some(TimelineEntry::Tokens { delta: previous }) = self.timeline.last_mut() {
+                    previous.push_str(delta);
+                } else {
+                    self.timeline.push(e);
+                }
+            } else {
+                self.timeline.push(e);
+            }
+            if self.timeline.len() > Self::MAX_TIMELINE_ENTRIES {
+                let trim = self.timeline.len() - Self::MAX_TIMELINE_ENTRIES;
+                self.timeline.drain(0..trim);
+            }
         }
         if let Some((call_id, tool, description)) = pending_approval {
             self.pending_approvals.push(PendingApproval {
@@ -144,8 +160,7 @@ impl SessionVm {
     }
 
     pub fn resolve_approval(&mut self, call_id: &str) {
-        self.pending_approvals
-            .retain(|a| a.call_id != call_id);
+        self.pending_approvals.retain(|a| a.call_id != call_id);
     }
 }
 
@@ -164,6 +179,7 @@ pub struct TaskCard {
     pub parent_session_id: Option<String>,
     pub child_session_ids: Vec<String>,
     pub spawn_reason: Option<String>,
+    pub current_action: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,5 +245,81 @@ impl AppState {
     pub fn clear_session_vm(&mut self) {
         self.loaded_session_id = None;
         self.session_vm = None;
+    }
+}
+
+fn current_action_from_entry(entry: &TimelineEntry) -> Option<String> {
+    match entry {
+        TimelineEntry::SessionStarted { .. } => Some("Session started".into()),
+        TimelineEntry::Message { role, .. } if role == "assistant" => Some("Responding".into()),
+        TimelineEntry::Tokens { .. } => Some("Streaming response".into()),
+        TimelineEntry::ToolStart { tool, .. } => Some(format!("Running tool: {tool}")),
+        TimelineEntry::ToolComplete { output, .. } => {
+            if output.success {
+                Some("Tool completed".into())
+            } else {
+                Some("Tool failed".into())
+            }
+        }
+        TimelineEntry::ApprovalRequested { tool, .. } => Some(format!("Waiting approval: {tool}")),
+        TimelineEntry::ApprovalResolved { approved, .. } => Some(if *approved {
+            "Approval granted".into()
+        } else {
+            "Approval denied".into()
+        }),
+        TimelineEntry::Checkpoint { detail, .. } => Some(detail.clone()),
+        TimelineEntry::SessionEnded { reason } => Some(format!("Session ended: {:?}", reason)),
+        TimelineEntry::Error { message } => Some(format!("Error: {message}")),
+        TimelineEntry::ChildSpawned {
+            child_session_id, ..
+        } => Some(format!("Sub-agent started: {child_session_id}")),
+        TimelineEntry::ChildCompleted {
+            child_session_id,
+            status,
+        } => Some(format!("Sub-agent {child_session_id}: {status}")),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_vm_tracks_current_action_from_timeline() {
+        let mut vm = SessionVm::new();
+        vm.apply(
+            Some(TimelineEntry::ToolStart {
+                call_id: "call-1".into(),
+                tool: "read_file".into(),
+                input: serde_json::json!({"path":"README.md"}),
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            vm.current_action.as_deref(),
+            Some("Running tool: read_file")
+        );
+
+        vm.apply(
+            Some(TimelineEntry::ApprovalRequested {
+                call_id: "call-2".into(),
+                tool: "execute_bash".into(),
+                description: "requires approval".into(),
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            vm.current_action.as_deref(),
+            Some("Waiting approval: execute_bash")
+        );
     }
 }

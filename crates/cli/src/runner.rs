@@ -1,5 +1,5 @@
 use crate::approval_prompt::IpcApprovalHandler;
-use nca_common::config::NcaConfig;
+use nca_common::config::{NcaConfig, PermissionMode};
 use nca_common::event::{AgentEvent, EndReason};
 use nca_core::approval::ApprovalHandler;
 use nca_core::provider::ProviderError;
@@ -70,10 +70,40 @@ impl SessionRuntime {
         &self.supervisor.agent().messages
     }
 
+    pub fn request_cancel(&self) {
+        self.supervisor.request_cancel();
+    }
+
+    pub fn cancel_handle(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.supervisor.cancel_handle()
+    }
+
+    pub fn event_tx(&self) -> Option<tokio::sync::mpsc::Sender<AgentEvent>> {
+        self.supervisor.event_tx()
+    }
+
+    pub fn set_model(&mut self, model: impl Into<String>) {
+        let model = model.into();
+        self.supervisor.model = model.clone();
+        self.supervisor.agent_mut().model = model;
+    }
+
+    pub fn permission_mode(&self) -> PermissionMode {
+        self.supervisor.agent().approval.mode()
+    }
+
+    pub fn set_permission_mode(&mut self, mode: PermissionMode) {
+        self.supervisor.agent_mut().approval.set_mode(mode);
+    }
+
+    pub async fn list_session_ids(&self) -> Result<Vec<String>, String> {
+        let store = nca_runtime::session_store::SessionStore::new(
+            self.workspace_root().join(&self.config.session.history_dir),
+        );
+        store.list().await.map_err(|err| err.to_string())
+    }
+
     pub fn config(&self) -> &NcaConfig {
-        // We need access to config for child spawning; expose through supervisor
-        // For now, return a reference through the supervisor's stored config
-        // Actually the config isn't stored on the supervisor. We'll store it on SessionRuntime.
         &self.config
     }
 }
@@ -114,9 +144,14 @@ pub async fn build_resumed_session_runtime(
     interactive_approvals: bool,
     session_id: &str,
 ) -> Result<SessionRuntime, ProviderError> {
-    let mut supervisor =
-        Supervisor::resume(config.clone(), workspace_root, safe_mode, interactive_approvals, session_id)
-            .await?;
+    let mut supervisor = Supervisor::resume(
+        config.clone(),
+        workspace_root,
+        safe_mode,
+        interactive_approvals,
+        session_id,
+    )
+    .await?;
     let handle = supervisor.take_handle();
     Ok(SessionRuntime {
         supervisor,

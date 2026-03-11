@@ -33,6 +33,15 @@ pub fn spawn_stream_task(
         supervisor::spawn_command_consumer(crx, approval_pending, cancel_tx);
     }
 
+    spawn_event_fanout_task(rx, mode, log_path, event_tx_ipc)
+}
+
+pub fn spawn_event_fanout_task(
+    rx: tokio::sync::mpsc::Receiver<AgentEvent>,
+    mode: StreamMode,
+    log_path: std::path::PathBuf,
+    event_tx_ipc: Option<tokio::sync::broadcast::Sender<String>>,
+) -> tokio::task::JoinHandle<()> {
     let on_event: Option<Box<dyn Fn(&AgentEvent) + Send>> = match mode {
         StreamMode::Off => None,
         StreamMode::Ndjson => Some(Box::new(|event: &AgentEvent| {
@@ -45,9 +54,7 @@ pub fn spawn_stream_task(
         })),
     };
 
-    let ipc_handle_rebuilt = event_tx_ipc.map(|tx| {
-        IpcRebroadcast { event_tx: tx }
-    });
+    let ipc_handle_rebuilt = event_tx_ipc.map(|tx| IpcRebroadcast { event_tx: tx });
 
     tokio::spawn(async move {
         use nca_common::event::EventEnvelope;
@@ -93,7 +100,7 @@ struct IpcRebroadcast {
     event_tx: tokio::sync::broadcast::Sender<String>,
 }
 
-fn render_human_event(event: &AgentEvent) {
+pub(crate) fn render_human_event(event: &AgentEvent) {
     match event {
         AgentEvent::SessionStarted {
             session_id, model, ..
@@ -123,7 +130,9 @@ fn render_human_event(event: &AgentEvent) {
             eprintln!("[approval] resolved={approved}");
         }
         AgentEvent::Checkpoint {
-            phase, detail, turn,
+            phase,
+            detail,
+            turn,
         } => {
             eprintln!("[checkpoint] turn={turn} phase={phase} {detail}");
         }
@@ -132,6 +141,12 @@ fn render_human_event(event: &AgentEvent) {
         }
         AgentEvent::Error { message } => {
             eprintln!("[error] {message}");
+        }
+        AgentEvent::Response { response } => {
+            eprintln!(
+                "[response] {}",
+                serde_json::to_string(response).unwrap_or_default()
+            );
         }
         AgentEvent::ChildSessionSpawned {
             child_session_id,

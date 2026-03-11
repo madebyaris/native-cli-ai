@@ -6,8 +6,8 @@ impl StatusBar {
         Self
     }
 
-    pub fn render(&self, _model: &str, _safe_mode: bool, _cost_usd: f64) -> String {
-        // TODO: ratatui widget for bottom status bar
-        String::new()
+    pub fn render(&self, model: &str, safe_mode: bool, cost_usd: f64) -> String {
+        let mode = if safe_mode { "safe" } else { "default" };
+        format!("model={model} | mode={mode} | est_cost=${cost_usd:.4}")
     }
 }

@@ -1,6 +1,6 @@
 use std::path::Path;
 use std::process::Stdio;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 /// Manages PTY sessions for sandboxed command execution.
 pub struct PtyManager {
@@ -15,11 +15,7 @@ impl PtyManager {
     }
 
     /// Spawn a command in a new PTY, capture output, and return it.
-    pub async fn exec(
-        &self,
-        command: &str,
-        timeout_secs: u64,
-    ) -> Result<PtyOutput, PtyError> {
+    pub async fn exec(&self, command: &str, timeout_secs: u64) -> Result<PtyOutput, PtyError> {
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-lc")
             .arg(command)
