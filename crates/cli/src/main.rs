@@ -300,16 +300,45 @@ async fn main() -> anyhow::Result<()> {
         None => {
             if let Some(prompt) = cli.prompt.as_deref() {
                 config.permissions.mode = cli.permission_mode.into();
-                run_one_shot(
-                    config,
-                    &workspace_root,
-                    prompt,
-                    cli.stream,
-                    cli.json,
-                    cli.safe,
-                    cli.session_id,
-                )
-                .await?;
+                if cli.run {
+                    let ipc_approval = IpcApprovalHandler::new();
+                    let mut runtime = build_session_runtime(
+                        config.clone(),
+                        &workspace_root,
+                        cli.safe,
+                        true,
+                        cli.session_id,
+                        Some(ipc_approval.clone()),
+                    )
+                    .await
+                    .map_err(anyhow::Error::msg)?;
+                    if let Some(rx) = runtime.take_event_rx() {
+                        let ipc_handle = runtime.take_ipc_handle();
+                        let approval_pending = runtime.take_ipc_approval_pending();
+                        let _stream_task = spawn_stream_task(
+                            rx,
+                            cli.stream,
+                            runtime.event_log_path(),
+                            ipc_handle,
+                            approval_pending,
+                            None,
+                        );
+                        let _ = runtime.run_turn(prompt).await;
+                        let mut repl = Repl::new(runtime, cli.safe, true);
+                        repl.run().await?;
+                    }
+                } else {
+                    run_one_shot(
+                        config,
+                        &workspace_root,
+                        prompt,
+                        cli.stream,
+                        cli.json,
+                        cli.safe,
+                        cli.session_id,
+                    )
+                    .await?;
+                }
             } else if cli.resume {
                 println!("Use `nca sessions` and `nca resume <session_id>` to resume a session.");
             } else {
@@ -339,7 +368,7 @@ async fn main() -> anyhow::Result<()> {
                         approval_pending,
                         None,
                     );
-                    let mut repl = Repl::new(runtime, cli.safe);
+                    let mut repl = Repl::new(runtime, cli.safe, cli.run);
                     repl.run().await?;
                 }
             }
@@ -657,7 +686,7 @@ async fn resume_session(
                 .map_err(anyhow::Error::msg)?;
             println!("{output}");
         } else {
-            let mut repl = Repl::new(runtime, safe);
+            let mut repl = Repl::new(runtime, safe, true);
             repl.run().await?;
         }
     }
@@ -769,4 +798,36 @@ async fn print_log_file(
     };
     print!("{data}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_top_level_run_mode() {
+        let cli = Cli::try_parse_from(["nca", "--run"]).expect("should parse run mode");
+        assert!(cli.run);
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn parses_run_subcommand_model_override() {
+        let cli = Cli::try_parse_from([
+            "nca",
+            "run",
+            "--prompt",
+            "hello",
+            "--model",
+            "MiniMax-M2.5",
+        ])
+        .expect("should parse run subcommand");
+
+        match cli.command {
+            Some(Command::Run { model, .. }) => {
+                assert_eq!(model.as_deref(), Some("MiniMax-M2.5"));
+            }
+            _ => panic!("expected run subcommand"),
+        }
+    }
 }

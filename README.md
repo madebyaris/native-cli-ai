@@ -21,6 +21,9 @@ cargo run -p nca-cli
 # Run with explicit interactive profile
 cargo run -p nca-cli -- --run
 
+# Run mode supports slash commands
+# /help /status /model /permissions /sessions /exit
+
 # Run a one-shot MiniMax prompt
 cargo run -p nca-cli -- --prompt "Explain this repository"
 

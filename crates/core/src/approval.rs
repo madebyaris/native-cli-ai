@@ -111,4 +111,12 @@ impl ApprovalPolicy {
             None => false,
         }
     }
+
+    pub fn mode(&self) -> PermissionMode {
+        self.config.mode
+    }
+
+    pub fn set_mode(&mut self, mode: PermissionMode) {
+        self.config.mode = mode;
+    }
 }
