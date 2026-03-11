@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/common",
+    "crates/core",
+    "crates/runtime",
+    "crates/cli",
+    "crates/monitor",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/user/native-cli-ai"
+
+[workspace.dependencies]
+# Shared across multiple crates
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+anyhow = "1"
+
+# Common crate (internal)
+nca-common = { path = "crates/common" }
+nca-core = { path = "crates/core" }
+nca-runtime = { path = "crates/runtime" }

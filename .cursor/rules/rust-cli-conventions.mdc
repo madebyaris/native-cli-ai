@@ -1,0 +1,48 @@
+---
+description: Conventions for the CLI/TUI, provider abstraction, tool safety, and agent loop.
+globs: "**/*.rs"
+alwaysApply: false
+---
+
+# CLI and Agent Conventions
+
+## Provider Abstraction
+
+- All LLM calls go through the `Provider` trait defined in `core::provider`.
+- Adapters for specific providers (Anthropic, OpenAI, Gemini) implement this trait.
+- The `genai` crate is the default adapter. Direct clients (`anthropic-async`, `async-openai`) are used only when provider-specific features are needed.
+- Never hard-code a model name. Always read from config or CLI flags.
+
+## Tool Safety
+
+- Every tool call must pass through `core::approval::ApprovalPolicy` before execution.
+- Tools are classified into three tiers: `Allowed`, `Ask`, `Denied`.
+- File-write tools must canonicalize paths and verify they are inside the workspace root before writing.
+- Bash tools must run inside a PTY via `runtime::pty` with a timeout. Never use raw `std::process::Command` for user-facing execution.
+
+## Streaming
+
+- Provider responses are streamed via `tokio::sync::mpsc` channels.
+- The REPL renders partial markdown as tokens arrive.
+- Tool-use blocks are buffered until the closing tag is received before execution begins.
+- Cancellation (ESC / Ctrl+C) sends a cancel signal through the channel and drops the in-flight request.
+
+## TUI Rendering
+
+- Use `ratatui` widgets for all terminal UI. Never print raw ANSI escape codes directly.
+- Markdown rendering uses `pulldown-cmark` for parsing and `syntect` for syntax highlighting.
+- Diffs use `similar` for generation and colored output via ratatui styled spans.
+
+## Config Loading
+
+- Config resolution order: compiled defaults -> `~/.nca/config.toml` -> `.nca/config.local.toml` -> env vars -> CLI flags.
+- Use `clap` derive macros for CLI argument definitions.
+- Config structs live in `common::config` and are shared across all crates.
+
+## Testing
+
+- Unit tests go in the same file as the code under test (`#[cfg(test)] mod tests`).
+- Integration tests for the CLI go in `crates/cli/tests/`.
+- Use `tempfile` for any test that touches the filesystem.
+- Use `insta` for snapshot tests of rendered TUI output.
+- Never depend on network access in unit tests. Mock the `Provider` trait.

@@ -1,0 +1,38 @@
+---
+description: Enforces native-first architecture and crate boundary rules for the nca workspace.
+globs: "**/*.rs,**/Cargo.toml"
+alwaysApply: false
+---
+
+# Native-First Architecture
+
+## Crate Boundaries
+
+- `common` is the leaf crate. It has no internal dependencies. Every other crate may depend on it.
+- `core` depends on `common` only. It owns the agent loop, provider abstraction, tool registry, and approval policy.
+- `runtime` depends on `common` and `core`. It owns PTY management, sandboxed process execution, IPC, session persistence, and tmux integration.
+- `cli` depends on `common`, `core`, and `runtime`. It owns the TUI, REPL, rendering, and user input.
+- `monitor` depends on `common` only. It communicates with the runtime exclusively through the IPC event bus. It must never import `core`, `runtime`, or `cli`.
+
+## No JavaScript
+
+- Never introduce a dependency that requires Node.js, npm, or a JavaScript runtime.
+- Never use a webview-based framework (Tauri, Dioxus Desktop, Electron) in any crate.
+- The desktop monitor uses `egui` / `eframe` for native rendering.
+
+## Async Convention
+
+- All I/O (network, file, PTY, IPC) must be async via `tokio`.
+- Never call blocking I/O on the tokio runtime. Use `tokio::task::spawn_blocking` for unavoidable blocking work.
+- Prefer `tokio::sync::mpsc` for internal channels. Use `tokio::sync::broadcast` only when multiple consumers need the same stream.
+
+## Error Handling
+
+- Library crates (`common`, `core`, `runtime`) define typed errors with `thiserror`.
+- Application crates (`cli`, `monitor`) may use `anyhow` for top-level error propagation.
+- Never use `.unwrap()` or `.expect()` in library code. Application code may use `.expect()` only during startup for required config.
+
+## Public API Surface
+
+- Keep `pub` exports minimal. Default to `pub(crate)` and only promote to `pub` when another crate needs the item.
+- Every public type and trait must have a doc comment.

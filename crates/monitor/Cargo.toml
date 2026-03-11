@@ -1,0 +1,21 @@
+[package]
+name = "nca-monitor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native egui desktop monitor for nca agent sessions"
+
+[[bin]]
+name = "nca-monitor"
+path = "src/main.rs"
+
+[dependencies]
+nca-common = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+egui = "0.30"
+eframe = "0.30"
