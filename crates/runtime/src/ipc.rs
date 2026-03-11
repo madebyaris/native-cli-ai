@@ -82,6 +82,16 @@ impl IpcHandle {
     pub async fn recv_command(&mut self) -> Option<AgentCommand> {
         self.command_rx.recv().await
     }
+
+    /// Split into parts for separate tasks: event broadcast and command receiver.
+    pub fn into_parts(
+        self,
+    ) -> (
+        broadcast::Sender<String>,
+        mpsc::UnboundedReceiver<AgentCommand>,
+    ) {
+        (self.event_tx, self.command_rx)
+    }
 }
 
 /// IPC client used by the monitor app to connect to a running session.

@@ -7,6 +7,7 @@ mod runner;
 mod runtime_tooling;
 mod stream;
 
+use crate::approval_prompt::IpcApprovalHandler;
 use clap::Parser;
 use nca_common::config::{NcaConfig, PermissionMode};
 use nca_common::event::AgentCommand;
@@ -243,6 +244,7 @@ async fn main() -> anyhow::Result<()> {
                 println!("Use `nca sessions` and `nca resume <session_id>` to resume a session.");
             } else {
                 config.permissions.mode = cli.permission_mode.into();
+                let ipc_approval = IpcApprovalHandler::new();
                 let mut runtime =
                     build_session_runtime(
                         config.clone(),
@@ -250,13 +252,21 @@ async fn main() -> anyhow::Result<()> {
                         cli.safe,
                         true,
                         cli.session_id,
+                        Some(ipc_approval.clone()),
                     )
                     .await
                     .map_err(anyhow::Error::msg)?;
                 if let Some(rx) = runtime.take_event_rx() {
                     let ipc_handle = runtime.take_ipc_handle();
-                    let _stream_task =
-                        spawn_stream_task(rx, cli.stream, runtime.event_log_path(), ipc_handle);
+                    let approval_pending = runtime.take_ipc_approval_pending();
+                    let _stream_task = spawn_stream_task(
+                        rx,
+                        cli.stream,
+                        runtime.event_log_path(),
+                        ipc_handle,
+                        approval_pending,
+                        None,
+                    );
                     let mut repl = Repl::new(runtime, cli.safe);
                     repl.run().await?;
                 }
@@ -276,33 +286,74 @@ async fn run_one_shot(
     safe: bool,
     session_id: Option<String>,
 ) -> anyhow::Result<()> {
+    let ipc_approval = IpcApprovalHandler::new();
     let mut runtime =
-        build_session_runtime(config.clone(), workspace_root, safe, true, session_id)
-            .await
-            .map_err(anyhow::Error::msg)?;
+        build_session_runtime(
+            config.clone(),
+            workspace_root,
+            safe,
+            true,
+            session_id,
+            Some(ipc_approval.clone()),
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
     if let Some(rx) = runtime.take_event_rx() {
         let ipc_handle = runtime.take_ipc_handle();
-        let stream_task = spawn_stream_task(rx, stream, runtime.event_log_path(), ipc_handle);
-        let output = runtime.run_turn(prompt).await.map_err(anyhow::Error::msg)?;
-        runtime.finish(EndReason::Completed).await;
-        if matches!(stream, StreamMode::Off) {
-            if json {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "session_id": runtime.session_id,
-                        "model": runtime.model,
-                        "output": output,
-                    })
-                );
-            } else {
-                println!("{output}");
-            }
+        let approval_pending = runtime.take_ipc_approval_pending();
+        let stream_task = spawn_stream_task(
+            rx,
+            stream,
+            runtime.event_log_path(),
+            ipc_handle,
+            approval_pending,
+            None,
+        );
+
+        let spawn_task = if let Some(spawn_rx) = runtime.take_spawn_rx() {
+            Some(nca_runtime::supervisor::spawn_subagent_consumer(
+                spawn_rx,
+                runtime.session_id().to_string(),
+                runtime.workspace_root().to_path_buf(),
+                config.clone(),
+                runtime.messages().to_vec(),
+                None,
+            ))
         } else {
-            println!();
-            eprintln!("[session] {}", runtime.session_id);
+            None
+        };
+
+        let result = runtime.run_turn(prompt).await;
+        match result {
+            Ok(output) => {
+                runtime.finish(EndReason::Completed).await;
+                if matches!(stream, StreamMode::Off) {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "session_id": runtime.session_id(),
+                                "model": runtime.model(),
+                                "output": output,
+                            })
+                        );
+                    } else {
+                        println!("{output}");
+                    }
+                } else {
+                    println!();
+                    eprintln!("[session] {}", runtime.session_id());
+                }
+            }
+            Err(e) => {
+                eprintln!("[session:error] {e}");
+                runtime.finish(EndReason::Error).await;
+            }
         }
         stream_task.abort();
+        if let Some(st) = spawn_task {
+            st.abort();
+        }
     }
     Ok(())
 }
@@ -370,7 +421,15 @@ async fn resume_session(
             .map_err(anyhow::Error::msg)?;
     if let Some(rx) = runtime.take_event_rx() {
         let ipc_handle = runtime.take_ipc_handle();
-        let _stream_task = spawn_stream_task(rx, stream, runtime.event_log_path(), ipc_handle);
+        let approval_pending = runtime.take_ipc_approval_pending();
+        let _stream_task = spawn_stream_task(
+            rx,
+            stream,
+            runtime.event_log_path(),
+            ipc_handle,
+            approval_pending,
+            None,
+        );
         if let Some(prompt) = prompt {
             let output = runtime.run_turn(&prompt).await.map_err(anyhow::Error::msg)?;
             println!("{output}");

@@ -62,6 +62,9 @@ impl AgentLoop {
         .await;
 
         let mut turn = 0_u32;
+        let mut empty_retries = 0_u32;
+        const MAX_EMPTY_RETRIES: u32 = 2;
+
         let final_text = loop {
             turn += 1;
             if turn > self.max_turns {
@@ -84,6 +87,7 @@ impl AgentLoop {
 
             let mut assistant_text = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
+            let mut got_usage = false;
 
             while let Some(chunk) = stream.recv().await {
                 match chunk {
@@ -104,6 +108,7 @@ impl AgentLoop {
                         input_tokens,
                         output_tokens,
                     } => {
+                        got_usage = true;
                         self.cost_tracker.add(input_tokens, output_tokens);
                         self.emit(AgentEvent::CostUpdated {
                             input_tokens: self.cost_tracker.input_tokens,
@@ -117,6 +122,26 @@ impl AgentLoop {
             }
 
             if tool_calls.is_empty() {
+                if assistant_text.trim().is_empty() {
+                    empty_retries += 1;
+                    if empty_retries <= MAX_EMPTY_RETRIES && got_usage {
+                        self.emit(AgentEvent::Error {
+                            message: format!(
+                                "Provider returned empty response (retry {empty_retries}/{MAX_EMPTY_RETRIES})"
+                            ),
+                        })
+                        .await;
+                        continue;
+                    }
+                    self.emit(AgentEvent::Error {
+                        message: "Provider returned empty response with no tool calls".into(),
+                    })
+                    .await;
+                    return Err(ProviderError::Other(
+                        "Provider returned empty response with no tool calls after retries"
+                            .into(),
+                    ));
+                }
                 self.messages.push(Message::assistant(assistant_text.clone()));
                 self.emit(AgentEvent::MessageReceived {
                     role: "assistant".into(),

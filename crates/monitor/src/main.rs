@@ -1,6 +1,11 @@
 mod app;
+mod controller;
+mod ingest;
 mod ipc_client;
 mod panels;
+mod session_index;
+mod state;
+mod workspaces;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {

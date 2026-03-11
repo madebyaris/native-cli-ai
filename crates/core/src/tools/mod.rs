@@ -13,6 +13,7 @@ pub mod move_path;
 pub mod rename_path;
 pub mod run_validation;
 pub mod search;
+pub mod spawn_subagent;
 pub mod types;
 pub mod web_search;
 pub mod write_file;

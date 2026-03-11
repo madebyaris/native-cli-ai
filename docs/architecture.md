@@ -110,9 +110,40 @@ flowchart TD
   Cli --> Core
   Cli --> Runtime
   Monitor --> Common
+  Monitor --> Runtime
 ```
 
-Key constraint: `monitor` depends only on `common`. It never imports `core`, `runtime`, or `cli`. All communication goes through the IPC event bus.
+Key constraint: `monitor` depends on `common` and `runtime` (for `IpcClient`, `WorktreeManager`, and `WorkspaceRegistry`). It never imports `core` or `cli`. The CLI delegates session lifecycle to the runtime `Supervisor`.
+
+## Desktop-First Architecture
+
+The desktop app (`nca-monitor`) is the primary user interface. The CLI remains as a secondary/debug interface.
+
+```mermaid
+flowchart LR
+  DesktopApp[Desktop App] --> WorkspaceRegistry
+  DesktopApp --> SessionHub[Session Index]
+  DesktopApp --> ReviewWorkbench
+  WorkspaceRegistry --> LocalMetadata["~/.nca/workspaces.json"]
+  SessionHub --> RuntimeService[Supervisor]
+  RuntimeService --> AgentRuns[AgentLoop]
+  RuntimeService --> EventStore[EventEnvelope logs]
+  RuntimeService --> WorktreeManager
+  ReviewWorkbench --> GitInspector[git diff/status]
+  ReviewWorkbench --> MergeActions[git merge/worktree]
+  CliSecondary[CLI] --> RuntimeService
+```
+
+### Key modules
+
+- **`runtime::supervisor`**: Reusable session lifecycle manager. Both CLI and desktop use this.
+- **`runtime::workspace_registry`**: Persisted workspace index at `~/.nca/workspaces.json`.
+- **`runtime::worktree`**: Isolated git worktree creation, cleanup, and merge per agent run.
+- **`runtime::bash_tool`**: PTY-backed bash execution, registered by the supervisor.
+- **`monitor::workspaces`**: Desktop workspace view-model and navigation.
+- **`monitor::panels::review`**: Review workbench with changed files, diff viewer, and merge actions.
+- **`monitor::panels::files`**: Changed files browser.
+- **`monitor::panels::diff`**: Unified diff viewer with syntax coloring.
 
 ---
 
