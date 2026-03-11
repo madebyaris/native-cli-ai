@@ -240,6 +240,9 @@ pub enum AgentEvent {
     Checkpoint { phase: String, detail: String, turn: u32 },
     SessionEnded { reason: EndReason },
     Error { message: String },
+    Response { response: AgentResponse },
+    ChildSessionSpawned { parent_session_id: String, child_session_id: String, task: String, workspace: PathBuf, branch: Option<String> },
+    ChildSessionCompleted { parent_session_id: String, child_session_id: String, status: String },
 }
 ```
 
@@ -286,6 +289,8 @@ User request -> Agent proposes bash tool call
 The CLI now exposes multiple session surfaces on top of the same engine:
 
 - `run` for explicit one-shot execution
+- `--run` for Claude-style interactive run mode
+- `serve` for long-lived IPC-controlled sessions (used by the desktop app)
 - `spawn` for background execution
 - `sessions` for saved-session listing
 - `resume` for continuing a saved session
