@@ -23,6 +23,9 @@ cargo run -p nca-cli -- run --prompt "Build a login page" --stream human
 # Run in safe mode (read/search/list only)
 cargo run -p nca-cli -- --safe
 
+# Inspect only, no edits or shell execution
+cargo run -p nca-cli -- run --permission-mode plan --prompt "Review this repo"
+
 # Spawn a background session
 cargo run -p nca-cli -- spawn --prompt "Inspect the repo and draft a plan"
 
@@ -30,6 +33,9 @@ cargo run -p nca-cli -- spawn --prompt "Inspect the repo and draft a plan"
 cargo run -p nca-cli -- sessions
 cargo run -p nca-cli -- resume <session_id>
 cargo run -p nca-cli -- logs <session_id>
+cargo run -p nca-cli -- status <session_id>
+cargo run -p nca-cli -- attach <session_id>
+cargo run -p nca-cli -- cancel <session_id>
 
 # Run the desktop monitor (Phase 2)
 cargo run -p nca-monitor
@@ -61,6 +67,15 @@ Current tool-running path supports:
 - `git_status`
 - `git_diff`
 - `query_symbols` (fast local code-intel)
+- `web_search`
+- `fetch_url`
+- `apply_patch`
+- `edit_file`
+- `rename_path`
+- `move_path`
+- `copy_path`
+- `delete_path`
+- `run_validation`
 - `execute_bash` (runtime-backed command execution; denied in `--safe`)
 
 ## Modes
@@ -70,7 +85,21 @@ Current tool-running path supports:
 - Background `spawn`
 - Session `resume`
 - Event `logs`
+- Live `attach`
+- Per-session `status`
+- `cancel` for spawned work
 - Stream modes: `off`, `human`, `ndjson`
+- Permission modes: `default`, `plan`, `accept-edits`, `dont-ask`, `bypass-permissions`
+
+## Claude Code Parity Roadmap
+
+Follow-up parity work is planned for:
+
+- slash-command style task presets
+- custom subagents / agent profiles
+- MCP integration
+- multi-directory context similar to `--add-dir`
+- durable memory and session summaries
 
 ## Project Structure
 

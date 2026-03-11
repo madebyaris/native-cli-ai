@@ -36,7 +36,11 @@ native-cli-ai/
 │   │       │   ├── filesystem.rs
 │   │       │   ├── bash.rs
 │   │       │   ├── search.rs
-│   │       │   └── types.rs
+│   │       │   ├── web_search.rs
+│   │       │   ├── fetch_url.rs
+│   │       │   ├── apply_patch.rs
+│   │       │   ├── edit_file.rs
+│   │       │   └── ... other path/validation tools
 │   │       ├── approval.rs     # ApprovalPolicy: allowed / ask / denied
 │   │       └── cost.rs         # Token counting and cost estimation
 │   │
@@ -146,7 +150,8 @@ sequenceDiagram
       Tools->>Runtime: execute tool
       Runtime-->>Tools: tool result
     else ask
-      Agent->>Agent: inject approval-required tool result (current behavior)
+      Agent->>User: request approval via CLI handler
+      User-->>Agent: approve or deny
     else denied
       Agent->>Agent: inject denial message
     end
@@ -158,7 +163,7 @@ sequenceDiagram
 
 ### Streaming
 
-Provider responses are streamed token-by-token via `tokio::sync::mpsc`. The CLI can render:
+Provider responses are streamed token-by-token via `tokio::sync::mpsc` using MiniMax SSE. The CLI can render:
 
 - human-readable live progress
 - NDJSON event stream mode
@@ -170,7 +175,7 @@ Tool-use blocks are collected, executed by the registry, and replayed to MiniMax
 
 ## IPC and Event Bus
 
-The runtime exposes a Unix domain socket at `$XDG_RUNTIME_DIR/nca/<session-id>.sock` (or `/tmp/nca/` as fallback).
+The runtime exposes a Unix domain socket at `$XDG_RUNTIME_DIR/nca/<session-id>.sock` (or `/tmp/nca/` as fallback). Running sessions persist status, PID, and socket path in session metadata.
 
 ### Protocol
 
@@ -240,7 +245,7 @@ User request -> Agent proposes bash tool call
      allowed_commands: ["cargo", "npm", "go", "ls", "cat", "grep", "git status", ...]
      denied_commands:  ["rm", "sudo", "chmod", "kill", "shutdown", ...]
      ask_commands:     [everything else]
-  -> If "ask": return an approval-required tool result (current behavior)
+  -> If "ask": prompt through the active approval handler
   -> If approved: runtime-backed bash executor runs command in workspace
   -> Result streamed back as ToolResult
 ```
@@ -254,6 +259,19 @@ The CLI now exposes multiple session surfaces on top of the same engine:
 - `sessions` for saved-session listing
 - `resume` for continuing a saved session
 - `logs` for replaying structured event output
+- `attach` for live event replay over IPC
+- `status` for session metadata
+- `cancel` for stopping a running session
+
+## Permission Modes
+
+The CLI supports explicit permission handling modes:
+
+- `default` for read/web tools auto-allowed, edits and commands ask
+- `plan` for analysis/research only
+- `accept-edits` for auto-accepted file edits with command caution
+- `dont-ask` for readonly-only automatic execution
+- `bypass-permissions` for fully trusted environments
 
 ---
 

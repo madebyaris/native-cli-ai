@@ -3,6 +3,7 @@ use nca_common::message::{Message, MessageToolCall};
 use nca_common::tool::{PermissionTier, ToolCall, ToolDefinition};
 
 use crate::approval::ApprovalPolicy;
+use crate::cost::CostTracker;
 use crate::provider::{Provider, ProviderError, StreamChunk};
 use crate::tools::ToolRegistry;
 
@@ -13,6 +14,7 @@ pub struct AgentLoop {
     pub approval: ApprovalPolicy,
     pub messages: Vec<Message>,
     pub model: String,
+    pub cost_tracker: CostTracker,
     event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
     max_turns: u32,
     max_tool_calls_per_turn: u32,
@@ -36,6 +38,7 @@ impl AgentLoop {
             approval,
             messages: Vec::new(),
             model,
+            cost_tracker: CostTracker::default(),
             event_tx,
             max_turns,
             max_tool_calls_per_turn,
@@ -96,6 +99,18 @@ impl AgentLoop {
                         })
                         .await;
                         tool_calls.push(call);
+                    }
+                    StreamChunk::Usage {
+                        input_tokens,
+                        output_tokens,
+                    } => {
+                        self.cost_tracker.add(input_tokens, output_tokens);
+                        self.emit(AgentEvent::CostUpdated {
+                            input_tokens: self.cost_tracker.input_tokens,
+                            output_tokens: self.cost_tracker.output_tokens,
+                            estimated_cost_usd: self.cost_tracker.estimated_cost_usd(),
+                        })
+                        .await;
                     }
                     StreamChunk::Done => break,
                 }
@@ -164,32 +179,46 @@ impl AgentLoop {
                 }
 
                 if tier == PermissionTier::Ask {
+                    let description = format!("Tool `{}` requires approval", call.name);
                     self.emit(AgentEvent::ApprovalRequested {
                         call_id: call.id.clone(),
                         tool: call.name.clone(),
-                        description: format!("Tool `{}` requires approval", call.name),
+                        description: description.clone(),
                     })
                     .await;
 
-                    // Current default behavior in non-interactive loop: deny ask-tier calls.
-                    let result = nca_common::tool::ToolResult {
-                        call_id: call.id.clone(),
-                        success: false,
-                        output: String::new(),
-                        error: Some(format!(
-                            "tool `{}` requires approval; allow in config to proceed",
-                            call.name
-                        )),
-                    };
-                    self.messages.push(Message::tool(
-                        call.id.clone(),
-                        format_tool_result(&result),
-                    ));
+                    let approved = self.approval.resolve(&call, &description).await;
                     self.emit(AgentEvent::ApprovalResolved {
                         call_id: call.id.clone(),
-                        approved: false,
+                        approved,
                     })
                     .await;
+
+                    if !approved {
+                        let result = nca_common::tool::ToolResult {
+                            call_id: call.id.clone(),
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!(
+                                "tool `{}` requires approval; request was denied",
+                                call.name
+                            )),
+                        };
+                        self.messages.push(Message::tool(
+                            call.id.clone(),
+                            format_tool_result(&result),
+                        ));
+                        self.emit(AgentEvent::ToolCallCompleted {
+                            call_id: result.call_id.clone(),
+                            output: result,
+                        })
+                        .await;
+                        continue;
+                    }
+
+                    let result = self.tools.execute(&call).await;
+                    self.messages
+                        .push(Message::tool(call.id.clone(), format_tool_result(&result)));
                     self.emit(AgentEvent::ToolCallCompleted {
                         call_id: result.call_id.clone(),
                         output: result,
@@ -208,6 +237,23 @@ impl AgentLoop {
                 .await;
             }
         };
+
+        if self.cost_tracker.input_tokens == 0 && self.cost_tracker.output_tokens == 0 {
+            let estimated_input = (self
+                .messages
+                .iter()
+                .map(|message| message.content.len())
+                .sum::<usize>()
+                / 4) as u64;
+            let estimated_output = (final_text.len() / 4) as u64;
+            self.cost_tracker.add(estimated_input, estimated_output);
+            self.emit(AgentEvent::CostUpdated {
+                input_tokens: self.cost_tracker.input_tokens,
+                output_tokens: self.cost_tracker.output_tokens,
+                estimated_cost_usd: self.cost_tracker.estimated_cost_usd(),
+            })
+            .await;
+        }
 
         Ok(final_text)
     }

@@ -1,8 +1,10 @@
 use nca_common::config::{MiniMaxConfig, NcaConfig};
 use nca_common::message::{Message, Role};
 use nca_common::tool::{ToolCall, ToolDefinition};
+use futures_util::StreamExt;
 use reqwest::header::AUTHORIZATION;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use super::{Provider, ProviderError, StreamChunk};
 
@@ -64,19 +66,20 @@ impl Provider for MiniMaxProvider {
         tools: &[ToolDefinition],
         model: &str,
     ) -> Result<tokio::sync::mpsc::Receiver<StreamChunk>, ProviderError> {
+        let model = if model.is_empty() {
+            self.config.model.clone()
+        } else {
+            model.to_string()
+        };
         let body = MiniMaxRequest {
-            model: if model.is_empty() {
-                self.config.model.clone()
-            } else {
-                model.to_string()
-            },
+            model,
             messages: messages.iter().map(MiniMaxRequestMessage::from).collect(),
             tools: if tools.is_empty() {
                 None
             } else {
                 Some(tools.iter().map(MiniMaxToolSpec::from).collect())
             },
-            stream: false,
+            stream: true,
             max_tokens: self.max_tokens,
             temperature: self.config.temperature,
         };
@@ -102,52 +105,106 @@ impl Provider for MiniMaxProvider {
             };
         }
 
-        let payload: MiniMaxResponse = response
-            .json()
-            .await
-            .map_err(|err| ProviderError::RequestFailed(err.to_string()))?;
+        let mut stream = response.bytes_stream();
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        tokio::spawn(async move {
+            let mut buffer = String::new();
+            let mut pending_tools: BTreeMap<usize, PendingToolCall> = BTreeMap::new();
 
-        let choice = payload
-            .choices
-            .into_iter()
-            .next()
-            .ok_or_else(|| ProviderError::Other("MiniMax returned no choices".into()))?;
+            while let Some(item) = stream.next().await {
+                let chunk = match item {
+                    Ok(chunk) => chunk,
+                    Err(err) => {
+                        let _ = tx
+                            .send(StreamChunk::TextDelta(format!(
+                                "\n[provider stream error: {err}]"
+                            )))
+                            .await;
+                        break;
+                    }
+                };
 
-        let message = choice
-            .message
-            .ok_or_else(|| ProviderError::Other("MiniMax returned no message".into()))?;
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                while let Some(newline_idx) = buffer.find('\n') {
+                    let line = buffer[..newline_idx].trim().to_string();
+                    buffer.drain(..=newline_idx);
 
-        let (tx, rx) = tokio::sync::mpsc::channel(16);
+                    if line.is_empty() || !line.starts_with("data:") {
+                        continue;
+                    }
 
-        if !message.content.trim().is_empty() {
-            tx.send(StreamChunk::TextDelta(message.content))
-                .await
-                .map_err(|_| ProviderError::Other("failed to emit MiniMax text chunk".into()))?;
-        }
+                    let data = line.trim_start_matches("data:").trim();
+                    if data == "[DONE]" {
+                        break;
+                    }
 
-        if let Some(tool_calls) = message.tool_calls {
-            for call in tool_calls {
-                let input = serde_json::from_str(&call.function.arguments).map_err(|err| {
-                    ProviderError::Other(format!(
-                        "failed to parse MiniMax tool arguments for {}: {err}",
-                        call.function.name
-                    ))
-                })?;
+                    let parsed = serde_json::from_str::<MiniMaxStreamEvent>(data);
+                    let Ok(event) = parsed else {
+                        continue;
+                    };
 
-                tx.send(StreamChunk::ToolUse(ToolCall {
-                    id: call.id,
-                    name: call.function.name,
-                    input,
-                }))
-                .await
-                .map_err(|_| ProviderError::Other("failed to emit MiniMax tool call".into()))?;
+                    if let Some(usage) = event.usage {
+                        let input_tokens = usage.prompt_tokens.unwrap_or(0);
+                        let output_tokens = usage.completion_tokens.unwrap_or(0);
+                        if input_tokens == 0 && output_tokens == 0 {
+                            continue;
+                        }
+                        let _ = tx
+                            .send(StreamChunk::Usage {
+                                input_tokens,
+                                output_tokens,
+                            })
+                            .await;
+                    }
+
+                    for choice in event.choices {
+                        if let Some(delta) = choice.delta {
+                            if let Some(content) = delta.content {
+                                if !content.is_empty() {
+                                    let _ = tx.send(StreamChunk::TextDelta(content)).await;
+                                }
+                            }
+
+                            if let Some(tool_calls) = delta.tool_calls {
+                                for tool_call in tool_calls {
+                                    let entry = pending_tools
+                                        .entry(tool_call.index.unwrap_or(0))
+                                        .or_insert_with(PendingToolCall::default);
+                                    if let Some(id) = tool_call.id {
+                                        entry.id = id;
+                                    }
+                                    if let Some(function) = tool_call.function {
+                                        if let Some(name) = function.name {
+                                            entry.name = name;
+                                        }
+                                        if let Some(arguments) = function.arguments {
+                                            entry.arguments.push_str(&arguments);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
-        }
 
-        tx.send(StreamChunk::Done)
-            .await
-            .map_err(|_| ProviderError::Other("failed to emit MiniMax completion event".into()))?;
+            for pending in pending_tools.into_values() {
+                if pending.name.is_empty() {
+                    continue;
+                }
+                if let Ok(input) = serde_json::from_str(&pending.arguments) {
+                    let _ = tx
+                        .send(StreamChunk::ToolUse(ToolCall {
+                            id: pending.id,
+                            name: pending.name,
+                            input,
+                        }))
+                        .await;
+                }
+            }
 
+            let _ = tx.send(StreamChunk::Done).await;
+        });
         Ok(rx)
     }
 }
@@ -241,32 +298,57 @@ struct MiniMaxFunctionSpec {
     parameters: serde_json::Value,
 }
 
-#[derive(Debug, Deserialize)]
-struct MiniMaxResponse {
-    choices: Vec<MiniMaxChoice>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MiniMaxChoice {
-    message: Option<MiniMaxResponseMessage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MiniMaxResponseMessage {
-    #[serde(default)]
-    content: String,
-    #[serde(default)]
-    tool_calls: Option<Vec<MiniMaxToolCall>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MiniMaxToolCall {
+#[derive(Debug, Default)]
+struct PendingToolCall {
     id: String,
-    function: MiniMaxToolFunction,
-}
-
-#[derive(Debug, Deserialize)]
-struct MiniMaxToolFunction {
     name: String,
     arguments: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MiniMaxStreamEvent {
+    #[serde(default)]
+    choices: Vec<MiniMaxStreamChoice>,
+    #[serde(default)]
+    usage: Option<MiniMaxUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MiniMaxStreamChoice {
+    #[serde(default)]
+    delta: Option<MiniMaxDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MiniMaxDelta {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<MiniMaxDeltaToolCall>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MiniMaxDeltaToolCall {
+    #[serde(default)]
+    index: Option<usize>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<MiniMaxDeltaFunction>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MiniMaxDeltaFunction {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MiniMaxUsage {
+    #[serde(default)]
+    prompt_tokens: Option<u64>,
+    #[serde(default)]
+    completion_tokens: Option<u64>,
 }

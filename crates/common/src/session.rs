@@ -12,6 +12,9 @@ pub struct SessionMeta {
     pub updated_at: DateTime<Utc>,
     pub workspace: PathBuf,
     pub model: String,
+    pub status: SessionStatus,
+    pub pid: Option<u32>,
+    pub socket_path: Option<PathBuf>,
 }
 
 /// Full session state, including conversation history and cost tracking.
@@ -22,4 +25,13 @@ pub struct SessionState {
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub estimated_cost_usd: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionStatus {
+    Running,
+    Completed,
+    Error,
+    Cancelled,
 }

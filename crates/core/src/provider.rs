@@ -10,6 +10,10 @@ use nca_common::tool::{ToolCall, ToolDefinition};
 pub enum StreamChunk {
     TextDelta(String),
     ToolUse(ToolCall),
+    Usage {
+        input_tokens: u64,
+        output_tokens: u64,
+    },
     Done,
 }
 

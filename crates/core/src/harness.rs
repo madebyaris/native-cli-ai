@@ -1,4 +1,4 @@
-use nca_common::config::NcaConfig;
+use nca_common::config::{NcaConfig, PermissionMode};
 use std::path::Path;
 
 const BUILT_IN_SYSTEM_PROMPT: &str = r#"You are nca, a native Rust coding assistant running in a terminal workspace.
@@ -32,6 +32,9 @@ pub fn build_system_prompt(config: &NcaConfig, workspace_root: &Path) -> String 
 
     if config.harness.built_in_enabled {
         sections.push(BUILT_IN_SYSTEM_PROMPT.trim().to_string());
+        if let Some(mode_section) = permission_mode_section(config.permissions.mode) {
+            sections.push(mode_section);
+        }
     }
 
     if let Some(text) = read_if_exists(&workspace_root.join(&config.harness.project_instructions_path)) {
@@ -54,4 +57,26 @@ fn read_if_exists(path: &Path) -> Option<String> {
         return None;
     }
     std::fs::read_to_string(path).ok()
+}
+
+fn permission_mode_section(mode: PermissionMode) -> Option<String> {
+    match mode {
+        PermissionMode::Plan => Some(
+            "Permission Mode: plan\n- You must not modify files or run shell commands.\n- Inspect, search, read, research the web, and propose the next steps only.\n- If asked to change code, explain what would change instead of claiming it was done."
+                .into(),
+        ),
+        PermissionMode::DontAsk => Some(
+            "Permission Mode: dont-ask\n- Only use automatically allowed tools.\n- If a task needs blocked tools, explain the limitation instead of pretending it succeeded."
+                .into(),
+        ),
+        PermissionMode::AcceptEdits => Some(
+            "Permission Mode: accept-edits\n- File edits are allowed automatically.\n- Destructive actions and shell execution may still require caution."
+                .into(),
+        ),
+        PermissionMode::BypassPermissions => Some(
+            "Permission Mode: bypass-permissions\n- Tools are broadly available, but still work carefully and verify before claiming success."
+                .into(),
+        ),
+        PermissionMode::Default => None,
+    }
 }

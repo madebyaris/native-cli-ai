@@ -1,13 +1,23 @@
+pub mod apply_patch;
 pub mod bash;
 pub mod code_intel_tool;
+pub mod copy_path;
 pub mod create_directory;
+pub mod delete_path;
+pub mod edit_file;
 pub mod filesystem;
+pub mod fetch_url;
 pub mod git;
 pub mod list_directory;
+pub mod move_path;
+pub mod rename_path;
+pub mod run_validation;
 pub mod search;
 pub mod types;
+pub mod web_search;
 pub mod write_file;
 
+use nca_common::config::WebConfig;
 use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
 
 /// Registry of available tools the agent can invoke.
@@ -24,7 +34,10 @@ impl ToolRegistry {
         self.tools.push(tool);
     }
 
-    pub fn with_default_readonly_tools(workspace_root: std::path::PathBuf) -> Self {
+    pub fn with_default_readonly_tools(
+        workspace_root: std::path::PathBuf,
+        web_config: WebConfig,
+    ) -> Self {
         let mut registry = Self::new();
         registry.register(Box::new(filesystem::ReadFileTool::new(
             workspace_root.clone(),
@@ -37,11 +50,16 @@ impl ToolRegistry {
         )));
         registry.register(Box::new(git::GitStatusTool::new(workspace_root.clone())));
         registry.register(Box::new(git::GitDiffTool::new(workspace_root)));
+        registry.register(Box::new(web_search::WebSearchTool::new(web_config.clone())));
+        registry.register(Box::new(fetch_url::FetchUrlTool::new(web_config)));
         registry
     }
 
-    pub fn with_default_full_tools(workspace_root: std::path::PathBuf) -> Self {
-        let mut registry = Self::with_default_readonly_tools(workspace_root.clone());
+    pub fn with_default_full_tools(
+        workspace_root: std::path::PathBuf,
+        web_config: WebConfig,
+    ) -> Self {
+        let mut registry = Self::with_default_readonly_tools(workspace_root.clone(), web_config);
         registry.register(Box::new(code_intel_tool::CodeIntelTool::new(
             crate::code_intel::FastLocalCodeIntel::new(workspace_root.clone()),
         )));
@@ -49,6 +67,25 @@ impl ToolRegistry {
             workspace_root.clone(),
         )));
         registry.register(Box::new(create_directory::CreateDirectoryTool::new(
+            workspace_root.clone(),
+        )));
+        registry.register(Box::new(apply_patch::ApplyPatchTool::new(
+            workspace_root.clone(),
+        )));
+        registry.register(Box::new(edit_file::EditFileTool::new(workspace_root.clone())));
+        registry.register(Box::new(rename_path::RenamePathTool::new(
+            workspace_root.clone(),
+        )));
+        registry.register(Box::new(move_path::MovePathTool::new(
+            workspace_root.clone(),
+        )));
+        registry.register(Box::new(copy_path::CopyPathTool::new(
+            workspace_root.clone(),
+        )));
+        registry.register(Box::new(delete_path::DeletePathTool::new(
+            workspace_root.clone(),
+        )));
+        registry.register(Box::new(run_validation::RunValidationTool::new(
             workspace_root,
         )));
         registry

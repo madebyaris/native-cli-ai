@@ -24,3 +24,7 @@ Thumbs.db
 
 # Logs
 *.log
+
+
+# for testing agent build stuff
+for-test/

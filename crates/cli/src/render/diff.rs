@@ -7,8 +7,11 @@ impl DiffRenderer {
     }
 
     /// Render a unified diff between old and new content.
-    pub fn render(&self, _old: &str, _new: &str) -> String {
-        // TODO: use `similar` crate for diff generation, ratatui styled spans for output
-        String::new()
+    pub fn render(&self, old: &str, new: &str) -> String {
+        let diff = similar::TextDiff::from_lines(old, new);
+        diff.unified_diff()
+            .context_radius(3)
+            .header("before", "after")
+            .to_string()
     }
 }

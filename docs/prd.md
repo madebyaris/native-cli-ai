@@ -88,9 +88,11 @@ A separate `nca-monitor` binary (egui) connects to one or more running nca sessi
 - Provider abstraction supporting Anthropic Claude and OpenAI
 - MiniMax-first provider path with direct API integration
 - Tool loop: read file, write file, list directory, code search (ripgrep), bash execution
+- Web research tools: `web_search`, `fetch_url`
+- Rich edit tools: patch/edit/move/copy/delete/validation
 - Git helpers and fast local symbol query support
 - Layered harness loading from built-in + `.ncarc` + `.nca/instructions.md`
-- Permission/approval system: allowed, denied, ask-user tiers
+- Permission/approval system with explicit modes: `default`, `plan`, `accept-edits`, `dont-ask`, `bypass-permissions`
 - Sandboxed file operations (workspace-only writes by default)
 - Session persistence and resume
 - Safe/read-only mode
@@ -110,7 +112,6 @@ A separate `nca-monitor` binary (egui) connects to one or more running nca sessi
 - Image/vision input (Phase 4)
 - Multi-agent orchestration (Phase 4)
 - Plugin/extension system (Phase 4)
-- Web search tool (Phase 2)
 - Remote/SSH agent execution (Future)
 
 ---
@@ -186,14 +187,28 @@ nca spawn --prompt "..."     # Background session
 nca sessions                 # List sessions
 nca resume <session-id>      # Resume a saved session
 nca logs <session-id>        # Show structured event log
+nca attach <session-id>      # Attach to session output
+nca status <session-id>      # Show session metadata
+nca cancel <session-id>      # Cancel a running session
 nca --safe                   # Read-only mode
 nca --resume                 # Resume last session
 nca --model MiniMax-M2.5     # Override model
 nca --stream ndjson          # NDJSON event streaming
+nca --permission-mode plan   # Analysis only, no edits or shell execution
 nca --verbose                # Debug logging
 nca --json                   # Structured JSON output (for CI)
 nca-monitor                  # Launch desktop monitor (separate binary)
 ```
+
+## Post-MVP Parity Roadmap
+
+After the current parity batch, the next Claude Code-like features to add are:
+
+- slash-command style task presets
+- custom subagents / agent profiles
+- MCP integration
+- multi-directory context
+- durable memory and session summaries
 
 ---
 

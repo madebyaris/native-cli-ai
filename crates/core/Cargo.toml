@@ -17,6 +17,8 @@ genai = "0.5"
 similar = "2"
 globset = "0.4"
 async-trait = "0.1"
+scraper = "0.23"
+futures-util = "0.3"
 
 [dev-dependencies]
 tempfile = "3"

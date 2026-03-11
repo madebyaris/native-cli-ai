@@ -10,6 +10,7 @@ pub struct NcaConfig {
     pub permissions: PermissionConfig,
     pub session: SessionConfig,
     pub harness: HarnessConfig,
+    pub web: WebConfig,
 }
 
 impl Default for NcaConfig {
@@ -20,6 +21,7 @@ impl Default for NcaConfig {
             permissions: PermissionConfig::default(),
             session: SessionConfig::default(),
             harness: HarnessConfig::default(),
+            web: WebConfig::default(),
         }
     }
 }
@@ -65,6 +67,9 @@ impl NcaConfig {
         if let Some(harness) = partial.harness {
             self.harness.merge(harness);
         }
+        if let Some(web) = partial.web {
+            self.web.merge(web);
+        }
     }
 
     fn apply_env(&mut self) {
@@ -87,6 +92,18 @@ impl NcaConfig {
 
         if let Ok(model) = env::var("MINIMAX_MODEL") {
             self.provider.minimax.model = model;
+        }
+
+        if let Ok(timeout_secs) = env::var("NCA_WEB_TIMEOUT_SECS") {
+            if let Ok(timeout_secs) = timeout_secs.parse() {
+                self.web.timeout_secs = timeout_secs;
+            }
+        }
+
+        if let Ok(max_fetch_chars) = env::var("NCA_WEB_MAX_FETCH_CHARS") {
+            if let Ok(max_fetch_chars) = max_fetch_chars.parse() {
+                self.web.max_fetch_chars = max_fetch_chars;
+            }
         }
     }
 }
@@ -253,6 +270,7 @@ impl ModelConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PermissionConfig {
+    pub mode: PermissionMode,
     pub allow: Vec<String>,
     pub deny: Vec<String>,
     pub ask: Vec<String>,
@@ -260,6 +278,9 @@ pub struct PermissionConfig {
 
 impl PermissionConfig {
     fn merge(&mut self, partial: PartialPermissionConfig) {
+        if let Some(mode) = partial.mode {
+            self.mode = mode;
+        }
         if let Some(allow) = partial.allow {
             self.allow = allow;
         }
@@ -269,6 +290,22 @@ impl PermissionConfig {
         if let Some(ask) = partial.ask {
             self.ask = ask;
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PermissionMode {
+    Default,
+    Plan,
+    AcceptEdits,
+    DontAsk,
+    BypassPermissions,
+}
+
+impl Default for PermissionMode {
+    fn default() -> Self {
+        Self::Default
     }
 }
 
@@ -296,6 +333,42 @@ pub struct HarnessConfig {
     pub built_in_enabled: bool,
     pub project_instructions_path: PathBuf,
     pub local_instructions_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebConfig {
+    pub timeout_secs: u64,
+    pub max_fetch_chars: usize,
+    pub default_search_limit: usize,
+    pub user_agent: String,
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            timeout_secs: 15,
+            max_fetch_chars: 25_000,
+            default_search_limit: 5,
+            user_agent: "nca/0.1 (+https://github.com/user/native-cli-ai)".into(),
+        }
+    }
+}
+
+impl WebConfig {
+    fn merge(&mut self, partial: PartialWebConfig) {
+        if let Some(timeout_secs) = partial.timeout_secs {
+            self.timeout_secs = timeout_secs;
+        }
+        if let Some(max_fetch_chars) = partial.max_fetch_chars {
+            self.max_fetch_chars = max_fetch_chars;
+        }
+        if let Some(default_search_limit) = partial.default_search_limit {
+            self.default_search_limit = default_search_limit;
+        }
+        if let Some(user_agent) = partial.user_agent {
+            self.user_agent = user_agent;
+        }
+    }
 }
 
 impl Default for HarnessConfig {
@@ -346,6 +419,7 @@ struct PartialNcaConfig {
     permissions: Option<PartialPermissionConfig>,
     session: Option<PartialSessionConfig>,
     harness: Option<PartialHarnessConfig>,
+    web: Option<PartialWebConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -373,6 +447,7 @@ struct PartialModelConfig {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct PartialPermissionConfig {
+    mode: Option<PermissionMode>,
     allow: Option<Vec<String>>,
     deny: Option<Vec<String>>,
     ask: Option<Vec<String>>,
@@ -391,4 +466,12 @@ struct PartialHarnessConfig {
     built_in_enabled: Option<bool>,
     project_instructions_path: Option<PathBuf>,
     local_instructions_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialWebConfig {
+    timeout_secs: Option<u64>,
+    max_fetch_chars: Option<usize>,
+    default_search_limit: Option<usize>,
+    user_agent: Option<String>,
 }
