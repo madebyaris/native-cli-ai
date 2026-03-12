@@ -546,7 +546,7 @@ impl DesktopApp {
 
                 // Project list (scrollable)
                 egui::ScrollArea::vertical()
-                    .max_height(ui.available_height() - 52.0)
+                    .max_height((ui.available_height() - 52.0).max(20.0))
                     .show(ui, |ui| {
                         if self.workspace_mgr.workspaces.is_empty() {
                             ui.horizontal(|ui| {
@@ -575,7 +575,7 @@ impl DesktopApp {
                             };
 
                             let outer_rect = ui.available_rect_before_wrap();
-                            let desired = egui::vec2(outer_rect.width() - 16.0, 48.0);
+                            let desired = egui::vec2((outer_rect.width() - 16.0).max(40.0), 48.0);
 
                             let resp = ui.allocate_ui_with_layout(
                                 egui::vec2(ui.available_width(), 52.0),
@@ -752,7 +752,7 @@ impl DesktopApp {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false; 2])
                     .show(ui, |ui| {
-                        let max_w = 820.0_f32.min(ui.available_width() - 48.0);
+                        let max_w = 820.0_f32.min((ui.available_width() - 48.0).max(200.0));
                         ui.allocate_ui_with_layout(
                             egui::vec2(ui.available_width(), ui.available_height()),
                             egui::Layout::top_down(egui::Align::Center),
@@ -1102,7 +1102,7 @@ impl DesktopApp {
                     .auto_shrink([false; 2])
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
-                        let max_w = 780.0_f32.min(ui.available_width() - 48.0);
+                        let max_w = 780.0_f32.min((ui.available_width() - 48.0).max(200.0));
                         ui.allocate_ui_with_layout(
                             egui::vec2(ui.available_width(), ui.available_height()),
                             egui::Layout::top_down(egui::Align::Center),
@@ -1164,7 +1164,7 @@ impl DesktopApp {
                             .stroke(egui::Stroke::new(1.0, palette::BORDER)),
                     )
                     .show_inside(ui, |ui| {
-                        let max_w = 780.0_f32.min(ui.available_width() - 48.0);
+                        let max_w = 780.0_f32.min((ui.available_width() - 48.0).max(200.0));
                         ui.allocate_ui_with_layout(
                             egui::vec2(ui.available_width(), ui.available_height()),
                             egui::Layout::top_down(egui::Align::Center),
@@ -1179,7 +1179,7 @@ impl DesktopApp {
                                     let resp = ui.add(
                                         egui::TextEdit::singleline(&mut session.composer)
                                             .font(egui::FontId::monospace(13.0))
-                                            .desired_width(ui.available_width() - 160.0)
+                                            .desired_width((ui.available_width() - 160.0).max(100.0))
                                             .hint_text("Type a command or message to dispatch..."),
                                     );
 
