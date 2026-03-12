@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quest Two | Audio</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg: #0d0d0d;
+            --card-bg: #1a1a1a;
+            --text: #ffffff;
+            --text-muted: #888888;
+            --accent: #ff6b35;
+            --accent-glow: rgba(255, 107, 53, 0.3);
+        }
+
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            min-height: 100vh;
+        }
+
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: 
+                radial-gradient(circle at 20% 20%, rgba(255, 107, 53, 0.08) 0%, transparent 50%),
+                radial-gradient(circle at 80% 80%, rgba(255, 107, 53, 0.05) 0%, transparent 40%);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 0 2rem;
+            position: relative;
+            z-index: 1;
+        }
+
+        nav {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 2rem 0;
+        }
+
+        .logo {
+            font-size: 1.3rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+        }
+
+        .logo span {
+            color: var(--accent);
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 2rem;
+        }
+
+        .nav-links a {
+            color: var(--text-muted);
+            text-decoration: none;
+            font-size: 0.9rem;
+            transition: color 0.3s;
+        }
+
+        .nav-links a:hover {
+            color: var(--text);
+        }
+
+        main {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 4rem;
+            padding: 3rem 0 6rem;
+            align-items: center;
+        }
+
+        .product-card {
+            background: var(--card-bg);
+            border-radius: 24px;
+            padding: 3rem;
+            position: relative;
+            overflow: hidden;
+            box-shadow: 
+                0 25px 50px -12px rgba(0, 0, 0, 0.5),
+                0 0 0 1px rgba(255, 255, 255, 0.05);
+        }
+
+        .product-card::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: radial-gradient(circle, var(--accent-glow) 0%, transparent 60%);
+            opacity: 0.5;
+        }
+
+        .product-image {
+            position: relative;
+            z-index: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .headphone-icon {
+            width: 180px;
+            height: 200px;
+            position: relative;
+        }
+
+        .headband {
+            width: 160px;
+            height: 80px;
+            border: 8px solid #2a2a2a;
+            border-bottom: none;
+            border-radius: 80px 80px 0 0;
+            position: absolute;
+            top: 0;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+
+        .earcup {
+            width: 60px;
+            height: 80px;
+            background: linear-gradient(180deg, #333 0%, #1a1a1a 100%);
+            border-radius: 20px;
+            position: absolute;
+            top: 50px;
+            box-shadow: 0 0 30px var(--accent-glow);
+        }
+
+        .earcup.left {
+            left: 10px;
+        }
+
+        .earcup.right {
+            right: 10px;
+        }
+
+        .earcup::after {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 30px;
+            height: 40px;
+            background: radial-gradient(circle, var(--accent) 0%, rgba(255, 107, 53, 0.5) 100%);
+            border-radius: 50%;
+            animation: pulse 3s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+            50% { opacity: 0.8; transform: translate(-50%, -50%) scale(1.1); }
+        }
+
+        .product-info {
+            padding: 1rem 0;
+        }
+
+        .tag {
+            display: inline-block;
+            background: rgba(255, 107, 53, 0.15);
+            color: var(--accent);
+            padding: 0.4rem 1rem;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            margin-bottom: 1.5rem;
+        }
+
+        .product-info h1 {
+            font-size: 3rem;
+            font-weight: 700;
+            line-height: 1.1;
+            margin-bottom: 1rem;
+            letter-spacing: -0.03em;
+        }
+
+        .product-info > p {
+            color: var(--text-muted);
+            font-size: 1.1rem;
+            margin-bottom: 2rem;
+        }
+
+        .price {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 2rem;
+        }
+
+        .price span {
+            font-size: 1rem;
+            color: var(--text-muted);
+            font-weight: 400;
+        }
+
+        .features {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 1.5rem;
+            margin-bottom: 2.5rem;
+        }
+
+        .feature {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+            padding: 1.2rem;
+        }
+
+        .feature h3 {
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.3rem;
+            color: var(--accent);
+        }
+
+        .feature p {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+
+        .cta-btn {
+            display: inline-block;
+            background: var(--accent);
+            color: #000;
+            padding: 1rem 2.5rem;
+            border-radius: 50px;
+            font-weight: 600;
+            font-size: 1rem;
+            text-decoration: none;
+            transition: all 0.3s;
+            box-shadow: 0 0 30px var(--accent-glow);
+        }
+
+        .cta-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 0 50px var(--accent-glow);
+        }
+
+        @media (max-width: 900px) {
+            main {
+                grid-template-columns: 1fr;
+                gap: 3rem;
+            }
+            
+            .product-info h1 {
+                font-size: 2.2rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <nav>
+            <div class="logo">Sonic<span>Pro</span></div>
+            <div class="nav-links">
+                <a href="#">Features</a>
+                <a href="#">Specs</a>
+                <a href="#">Reviews</a>
+            </div>
+        </nav>
+
+        <main>
+            <div class="product-info">
+                <span class="tag">Premium Audio</span>
+                <h1>Wireless<br>Headphones</h1>
+                <p>Experience sound like never before. Crystal clear audio with active noise cancellation and 40-hour battery life.</p>
+                
+                <div class="price">$249 <span>+ free shipping</span></div>
+
+                <div class="features">
+                    <div class="feature">
+                        <h3>ANC</h3>
+                        <p>Active noise cancellation</p>
+                    </div>
+                    <div class="feature">
+                        <h3>40hr Battery</h3>
+                        <p>All-day listening</p>
+                    </div>
+                    <div class="feature">
+                        <h3>Hi-Res Audio</h3>
+                        <p>Studio-quality sound</p>
+                    </div>
+                    <div class="feature">
+                        <h3>Quick Charge</h3>
+                        <p>10min = 3hr playback</p>
+                    </div>
+                </div>
+
+                <a href="#" class="cta-btn">Order Now — $249</a>
+            </div>
+
+            <div class="product-card">
+                <div class="product-image">
+                    <div class="headphone-icon">
+                        <div class="headband"></div>
+                        <div class="earcup left"></div>
+                        <div class="earcup right"></div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+</body>
+</html>

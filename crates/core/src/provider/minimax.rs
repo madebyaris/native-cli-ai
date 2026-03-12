@@ -2,13 +2,19 @@ use futures_util::StreamExt;
 use nca_common::config::{MiniMaxConfig, NcaConfig};
 use nca_common::message::{Message, Role};
 use nca_common::tool::{ToolCall, ToolDefinition};
-use reqwest::header::AUTHORIZATION;
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use serde_json::json;
 
 use super::{Provider, ProviderError, StreamChunk};
 
-/// MiniMax provider implementation using the native chat completion API.
+/// MiniMax provider using the Anthropic-compatible endpoint.
+/// Endpoint: <base_url>/v1/messages
+/// Auth: Authorization: Bearer <api_key>
+///
+/// The Anthropic format gives reliable streaming for reasoning models:
+/// thinking blocks are separate from text/tool_use blocks, and tool use
+/// is represented as typed content blocks rather than a parallel JSON field.
 pub struct MiniMaxProvider {
     client: reqwest::Client,
     config: MiniMaxConfig,
@@ -25,22 +31,34 @@ impl MiniMaxProvider {
             ))
         })?;
 
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|err| {
+                ProviderError::Configuration(format!(
+                    "failed to build MiniMax authorization header: {err}"
+                ))
+            })?,
+        );
+        // Anthropic-compatible endpoint also accepts x-api-key
+        headers.insert(
+            "x-api-key",
+            HeaderValue::from_str(&api_key).map_err(|err| {
+                ProviderError::Configuration(format!(
+                    "failed to build x-api-key header: {err}"
+                ))
+            })?,
+        );
+        headers.insert(
+            "anthropic-version",
+            HeaderValue::from_static("2023-06-01"),
+        );
+
         let client = reqwest::Client::builder()
-            .default_headers({
-                let mut headers = reqwest::header::HeaderMap::new();
-                headers.insert(
-                    AUTHORIZATION,
-                    format!("Bearer {api_key}").parse().map_err(|err| {
-                        ProviderError::Configuration(format!(
-                            "failed to build MiniMax authorization header: {err}"
-                        ))
-                    })?,
-                );
-                headers
-            })
+            .default_headers(headers)
             .build()
             .map_err(|err| {
-                ProviderError::Configuration(format!("failed to build MiniMax HTTP client: {err}"))
+                ProviderError::Configuration(format!("failed to build HTTP client: {err}"))
             })?;
 
         Ok(Self {
@@ -52,11 +70,141 @@ impl MiniMaxProvider {
 
     fn endpoint(&self) -> String {
         format!(
-            "{}/v1/text/chatcompletion_v2",
+            "{}/v1/messages",
             self.config.base_url.trim_end_matches('/')
         )
     }
 }
+
+// ── Anthropic request types ──────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct AnthropicRequest {
+    model: String,
+    max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<String>,
+    messages: Vec<AnthropicMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<AnthropicTool>>,
+    stream: bool,
+    temperature: f32,
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicMessage {
+    role: String,
+    content: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicTool {
+    name: String,
+    description: String,
+    input_schema: serde_json::Value,
+}
+
+// ── Message conversion ────────────────────────────────────────────────────────
+
+/// Convert nca internal messages to Anthropic format.
+/// Returns `(system_prompt, anthropic_messages)`.
+///
+/// Rules:
+/// - System messages at the front are extracted into a separate `system` field.
+/// - Assistant messages with tool calls are encoded as multi-part content blocks.
+/// - Consecutive Tool messages are grouped into a single user message of
+///   `tool_result` content blocks (Anthropic API requirement).
+fn to_anthropic_messages(
+    messages: &[Message],
+) -> (Option<String>, Vec<AnthropicMessage>) {
+    let mut system_parts: Vec<String> = Vec::new();
+    let mut out: Vec<AnthropicMessage> = Vec::new();
+    let mut i = 0;
+
+    // Collect leading system messages
+    while i < messages.len() && messages[i].role == Role::System {
+        system_parts.push(messages[i].content.clone());
+        i += 1;
+    }
+
+    while i < messages.len() {
+        let msg = &messages[i];
+        match msg.role {
+            Role::User => {
+                out.push(AnthropicMessage {
+                    role: "user".into(),
+                    content: json!(msg.content),
+                });
+                i += 1;
+            }
+
+            Role::Assistant => {
+                let mut blocks: Vec<serde_json::Value> = Vec::new();
+
+                if !msg.content.is_empty() {
+                    blocks.push(json!({"type": "text", "text": msg.content}));
+                }
+
+                if let Some(calls) = &msg.tool_calls {
+                    for tc in calls {
+                        blocks.push(json!({
+                            "type": "tool_use",
+                            "id": tc.id,
+                            "name": tc.name,
+                            "input": tc.arguments,
+                        }));
+                    }
+                }
+
+                let content = if blocks.is_empty() {
+                    json!(msg.content)
+                } else {
+                    json!(blocks)
+                };
+
+                out.push(AnthropicMessage {
+                    role: "assistant".into(),
+                    content,
+                });
+                i += 1;
+            }
+
+            Role::Tool => {
+                // Group all consecutive Tool messages into one user message
+                let mut results: Vec<serde_json::Value> = Vec::new();
+                while i < messages.len() && messages[i].role == Role::Tool {
+                    let tm = &messages[i];
+                    results.push(json!({
+                        "type": "tool_result",
+                        "tool_use_id": tm.tool_call_id.as_deref().unwrap_or(""),
+                        "content": tm.content,
+                    }));
+                    i += 1;
+                }
+                out.push(AnthropicMessage {
+                    role: "user".into(),
+                    content: json!(results),
+                });
+            }
+
+            // System messages after the leading block are folded into the
+            // preceding assistant message's text or appended as user context.
+            Role::System => {
+                i += 1;
+            }
+        }
+    }
+
+    let system = if system_parts.is_empty() {
+        None
+    } else {
+        Some(system_parts.join("\n\n"))
+    };
+
+    (system, out)
+}
+
+// ── Provider implementation ──────────────────────────────────────────────────
 
 #[async_trait::async_trait]
 impl Provider for MiniMaxProvider {
@@ -71,18 +219,42 @@ impl Provider for MiniMaxProvider {
         } else {
             model.to_string()
         };
-        let body = MiniMaxRequest {
-            model,
-            messages: messages.iter().map(MiniMaxRequestMessage::from).collect(),
-            tools: if tools.is_empty() {
-                None
-            } else {
-                Some(tools.iter().map(MiniMaxToolSpec::from).collect())
-            },
-            stream: true,
-            max_tokens: self.max_tokens,
-            temperature: self.config.temperature,
+
+        let (system, anthropic_messages) = to_anthropic_messages(messages);
+
+        let anthropic_tools: Option<Vec<AnthropicTool>> = if tools.is_empty() {
+            None
+        } else {
+            Some(
+                tools
+                    .iter()
+                    .map(|t| AnthropicTool {
+                        name: t.name.clone(),
+                        description: t.description.clone(),
+                        input_schema: t.parameters.clone(),
+                    })
+                    .collect(),
+            )
         };
+
+        let body = AnthropicRequest {
+            model,
+            max_tokens: self.max_tokens,
+            system,
+            messages: anthropic_messages,
+            tools: anthropic_tools,
+            stream: true,
+            // Anthropic requires temperature=1 when extended thinking is active.
+            // MiniMax-M2.5 is a reasoning model; using 1.0 avoids API errors.
+            temperature: 1.0,
+        };
+
+        if std::env::var("NCA_DEBUG_REQUEST").is_ok() {
+            eprintln!(
+                "[minimax:request] {}",
+                serde_json::to_string_pretty(&body).unwrap_or_default()
+            );
+        }
 
         let response = self
             .client
@@ -94,30 +266,38 @@ impl Provider for MiniMaxProvider {
 
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body_text = response.text().await.unwrap_or_default();
             return match status.as_u16() {
-                401 | 403 => Err(ProviderError::AuthError(body)),
-                404 => Err(ProviderError::ModelNotFound(body)),
+                401 | 403 => Err(ProviderError::AuthError(body_text)),
+                404 => Err(ProviderError::ModelNotFound(body_text)),
                 429 => Err(ProviderError::RateLimited {
                     retry_after_ms: 1000,
                 }),
-                _ => Err(ProviderError::RequestFailed(body)),
+                _ => Err(ProviderError::RequestFailed(body_text)),
             };
         }
 
-        let mut stream = response.bytes_stream();
+        let mut byte_stream = response.bytes_stream();
         let (tx, rx) = tokio::sync::mpsc::channel(64);
+
         tokio::spawn(async move {
             let mut buffer = String::new();
-            let mut pending_tools: BTreeMap<usize, PendingToolCall> = BTreeMap::new();
+            // Current SSE event type (from `event:` lines)
+            let mut event_type = String::new();
+            // Tool-use block being assembled
+            let mut tool_id = String::new();
+            let mut tool_name = String::new();
+            let mut tool_input = String::new();
+            // Tokens from message_start (input) and message_delta (output)
+            let mut input_tokens: u64 = 0;
 
-            while let Some(item) = stream.next().await {
+            while let Some(item) = byte_stream.next().await {
                 let chunk = match item {
-                    Ok(chunk) => chunk,
+                    Ok(c) => c,
                     Err(err) => {
                         let _ = tx
                             .send(StreamChunk::TextDelta(format!(
-                                "\n[provider stream error: {err}]"
+                                "\n[stream error: {err}]"
                             )))
                             .await;
                         break;
@@ -125,230 +305,126 @@ impl Provider for MiniMaxProvider {
                 };
 
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
-                while let Some(newline_idx) = buffer.find('\n') {
-                    let line = buffer[..newline_idx].trim().to_string();
-                    buffer.drain(..=newline_idx);
 
-                    if line.is_empty() || !line.starts_with("data:") {
+                // Process complete lines
+                while let Some(nl) = buffer.find('\n') {
+                    let raw = buffer[..nl].to_string();
+                    buffer.drain(..=nl);
+                    let line = raw.trim_end_matches('\r').trim();
+
+                    if line.is_empty() {
+                        // Blank line resets event type (SSE event boundary)
+                        event_type.clear();
                         continue;
                     }
 
-                    let data = line.trim_start_matches("data:").trim();
+                    if let Some(ev) = line.strip_prefix("event:") {
+                        event_type = ev.trim().to_string();
+                        continue;
+                    }
+
+                    if !line.starts_with("data:") {
+                        continue;
+                    }
+
+                    let data = line["data:".len()..].trim();
                     if data == "[DONE]" {
                         break;
                     }
 
-                    let parsed = serde_json::from_str::<MiniMaxStreamEvent>(data);
-                    let Ok(event) = parsed else {
+                    let Ok(ev) = serde_json::from_str::<serde_json::Value>(data) else {
                         continue;
                     };
 
-                    if let Some(usage) = event.usage {
-                        let input_tokens = usage.prompt_tokens.unwrap_or(0);
-                        let output_tokens = usage.completion_tokens.unwrap_or(0);
-                        if input_tokens == 0 && output_tokens == 0 {
-                            continue;
+                    match event_type.as_str() {
+                        "message_start" => {
+                            input_tokens = ev["message"]["usage"]["input_tokens"]
+                                .as_u64()
+                                .unwrap_or(0);
                         }
-                        let _ = tx
-                            .send(StreamChunk::Usage {
-                                input_tokens,
-                                output_tokens,
-                            })
-                            .await;
-                    }
 
-                    for choice in event.choices {
-                        if let Some(delta) = choice.delta {
-                            if let Some(content) = delta.content {
-                                if !content.is_empty() {
-                                    let _ = tx.send(StreamChunk::TextDelta(content)).await;
-                                }
+                        "content_block_start" => {
+                            let block = &ev["content_block"];
+                            let btype = block["type"].as_str().unwrap_or("");
+                            if btype == "tool_use" {
+                                tool_id = block["id"].as_str().unwrap_or("").to_string();
+                                tool_name = block["name"].as_str().unwrap_or("").to_string();
+                                tool_input.clear();
                             }
+                        }
 
-                            if let Some(tool_calls) = delta.tool_calls {
-                                for tool_call in tool_calls {
-                                    let entry = pending_tools
-                                        .entry(tool_call.index.unwrap_or(0))
-                                        .or_insert_with(PendingToolCall::default);
-                                    if let Some(id) = tool_call.id {
-                                        entry.id = id;
-                                    }
-                                    if let Some(function) = tool_call.function {
-                                        if let Some(name) = function.name {
-                                            entry.name = name;
-                                        }
-                                        if let Some(arguments) = function.arguments {
-                                            entry.arguments.push_str(&arguments);
+                        "content_block_delta" => {
+                            let delta = &ev["delta"];
+                            match delta["type"].as_str().unwrap_or("") {
+                                "text_delta" => {
+                                    if let Some(text) = delta["text"].as_str() {
+                                        if !text.is_empty() {
+                                            let _ = tx
+                                                .send(StreamChunk::TextDelta(text.to_string()))
+                                                .await;
                                         }
                                     }
                                 }
+                                "input_json_delta" => {
+                                    if let Some(partial) = delta["partial_json"].as_str() {
+                                        tool_input.push_str(partial);
+                                    }
+                                }
+                                // thinking_delta — ignore; we don't surface raw thinking
+                                _ => {}
                             }
                         }
-                    }
-                }
-            }
 
-            for pending in pending_tools.into_values() {
-                if pending.name.is_empty() {
-                    continue;
-                }
-                if let Ok(input) = serde_json::from_str(&pending.arguments) {
-                    let _ = tx
-                        .send(StreamChunk::ToolUse(ToolCall {
-                            id: pending.id,
-                            name: pending.name,
-                            input,
-                        }))
-                        .await;
+                        "content_block_stop" => {
+                            if !tool_name.is_empty() {
+                                if let Ok(input) = serde_json::from_str(&tool_input) {
+                                    let _ = tx
+                                        .send(StreamChunk::ToolUse(ToolCall {
+                                            id: tool_id.clone(),
+                                            name: tool_name.clone(),
+                                            input,
+                                        }))
+                                        .await;
+                                }
+                                tool_id.clear();
+                                tool_name.clear();
+                                tool_input.clear();
+                            }
+                        }
+
+                        "message_delta" => {
+                            let output_tokens = ev["usage"]["output_tokens"]
+                                .as_u64()
+                                .unwrap_or(0);
+                            if input_tokens > 0 || output_tokens > 0 {
+                                let _ = tx
+                                    .send(StreamChunk::Usage {
+                                        input_tokens,
+                                        output_tokens,
+                                    })
+                                    .await;
+                                // Reset so a second message_delta doesn't double-count
+                                input_tokens = 0;
+                            }
+                        }
+
+                        _ => {}
+                    }
                 }
             }
 
             let _ = tx.send(StreamChunk::Done).await;
         });
+
         Ok(rx)
     }
 }
 
-#[derive(Debug, Serialize)]
-struct MiniMaxRequest {
-    model: String,
-    messages: Vec<MiniMaxRequestMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<MiniMaxToolSpec>>,
-    stream: bool,
-    max_tokens: u32,
-    temperature: f32,
-}
-
-#[derive(Debug, Serialize)]
-struct MiniMaxRequestMessage {
-    role: String,
-    content: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<MiniMaxReplayToolCall>>,
-}
-
-impl From<&Message> for MiniMaxRequestMessage {
-    fn from(message: &Message) -> Self {
-        Self {
-            role: match message.role {
-                Role::User => "user",
-                Role::Assistant => "assistant",
-                Role::System => "system",
-                Role::Tool => "tool",
-            }
-            .to_string(),
-            content: message.content.clone(),
-            tool_call_id: message.tool_call_id.clone(),
-            tool_calls: message.tool_calls.as_ref().map(|calls| {
-                calls
-                    .iter()
-                    .map(|c| MiniMaxReplayToolCall {
-                        id: c.id.clone(),
-                        r#type: "function".into(),
-                        function: MiniMaxReplayToolFunction {
-                            name: c.name.clone(),
-                            arguments: c.arguments.to_string(),
-                        },
-                    })
-                    .collect()
-            }),
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct MiniMaxReplayToolCall {
-    id: String,
-    r#type: String,
-    function: MiniMaxReplayToolFunction,
-}
-
-#[derive(Debug, Serialize)]
-struct MiniMaxReplayToolFunction {
-    name: String,
-    arguments: String,
-}
-
-#[derive(Debug, Serialize)]
-struct MiniMaxToolSpec {
-    r#type: String,
-    function: MiniMaxFunctionSpec,
-}
-
-impl From<&ToolDefinition> for MiniMaxToolSpec {
-    fn from(tool: &ToolDefinition) -> Self {
-        Self {
-            r#type: "function".into(),
-            function: MiniMaxFunctionSpec {
-                name: tool.name.clone(),
-                description: tool.description.clone(),
-                parameters: tool.parameters.clone(),
-            },
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct MiniMaxFunctionSpec {
-    name: String,
-    description: String,
-    parameters: serde_json::Value,
-}
-
-#[derive(Debug, Default)]
-struct PendingToolCall {
-    id: String,
-    name: String,
-    arguments: String,
-}
+// ── Deserialization helpers (unused but kept for optional introspection) ──────
 
 #[derive(Debug, Deserialize)]
-struct MiniMaxStreamEvent {
-    #[serde(default)]
-    choices: Vec<MiniMaxStreamChoice>,
-    #[serde(default)]
-    usage: Option<MiniMaxUsage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MiniMaxStreamChoice {
-    #[serde(default)]
-    delta: Option<MiniMaxDelta>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MiniMaxDelta {
-    #[serde(default)]
-    content: Option<String>,
-    #[serde(default)]
-    tool_calls: Option<Vec<MiniMaxDeltaToolCall>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MiniMaxDeltaToolCall {
-    #[serde(default)]
-    index: Option<usize>,
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    function: Option<MiniMaxDeltaFunction>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MiniMaxDeltaFunction {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    arguments: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MiniMaxUsage {
-    #[serde(default)]
-    prompt_tokens: Option<u64>,
-    #[serde(default)]
-    completion_tokens: Option<u64>,
+#[allow(dead_code)]
+struct AnthropicStreamEvent {
+    #[serde(rename = "type")]
+    event_type: String,
 }

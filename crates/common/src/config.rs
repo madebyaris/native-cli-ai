@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Top-level configuration, merged from global, workspace, env, and CLI sources.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +29,16 @@ impl Default for NcaConfig {
 impl NcaConfig {
     /// Load config from defaults, global file, workspace file, and environment.
     pub fn load() -> Result<Self, ConfigError> {
+        let workspace_root = env::current_dir().map_err(|source| ConfigError::Io {
+            action: "read current directory",
+            path: PathBuf::from("."),
+            source,
+        })?;
+        Self::load_for_workspace(&workspace_root)
+    }
+
+    /// Load config for an explicit workspace root.
+    pub fn load_for_workspace(workspace_root: &Path) -> Result<Self, ConfigError> {
         let mut config = Self::default();
 
         if let Some(path) = global_config_path() {
@@ -38,7 +48,7 @@ impl NcaConfig {
             }
         }
 
-        let local_path = PathBuf::from(".nca/config.local.toml");
+        let local_path = workspace_config_path(workspace_root);
         if local_path.exists() {
             let partial = load_partial(&local_path)?;
             config.merge(partial);
@@ -46,6 +56,54 @@ impl NcaConfig {
 
         config.apply_env();
         Ok(config)
+    }
+
+    /// Load only the persisted global config file layered over defaults.
+    pub fn load_global_file() -> Result<Self, ConfigError> {
+        let mut config = Self::default();
+        if let Some(path) = global_config_path() {
+            if path.exists() {
+                let partial = load_partial(&path)?;
+                config.merge(partial);
+            }
+        }
+        Ok(config)
+    }
+
+    /// Load only the persisted workspace-local config layered over defaults.
+    pub fn load_workspace_file(workspace_root: &Path) -> Result<Self, ConfigError> {
+        let mut config = Self::default();
+        let local_path = workspace_config_path(workspace_root);
+        if local_path.exists() {
+            let partial = load_partial(&local_path)?;
+            config.merge(partial);
+        }
+        Ok(config)
+    }
+
+    /// Save the full config as the user's global defaults.
+    pub fn save_global(&self) -> Result<(), ConfigError> {
+        let path = global_config_path().ok_or_else(|| ConfigError::NoHomeDir)?;
+        save_config_to_path(self, &path)
+    }
+
+    /// Save the full config as the workspace-local override file.
+    pub fn save_workspace_file(&self, workspace_root: &Path) -> Result<(), ConfigError> {
+        let path = workspace_config_path(workspace_root);
+        save_config_to_path(self, &path)
+    }
+
+    /// Remove the workspace-local config file, if present.
+    pub fn clear_workspace_file(workspace_root: &Path) -> Result<(), ConfigError> {
+        let path = workspace_config_path(workspace_root);
+        if !path.exists() {
+            return Ok(());
+        }
+        std::fs::remove_file(&path).map_err(|source| ConfigError::Io {
+            action: "remove config file",
+            path,
+            source,
+        })
     }
 
     fn merge(&mut self, partial: PartialNcaConfig) {
@@ -108,24 +166,51 @@ impl NcaConfig {
     }
 }
 
-fn global_config_path() -> Option<PathBuf> {
+pub fn global_config_path() -> Option<PathBuf> {
     env::var_os("HOME").map(|home| PathBuf::from(home).join(".nca/config.toml"))
 }
 
-fn load_partial(path: &PathBuf) -> Result<PartialNcaConfig, ConfigError> {
+pub fn workspace_config_path(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(".nca").join("config.local.toml")
+}
+
+fn load_partial(path: &Path) -> Result<PartialNcaConfig, ConfigError> {
     let raw = std::fs::read_to_string(path).map_err(|source| ConfigError::ReadFile {
-        path: path.clone(),
+        path: path.to_path_buf(),
         source,
     })?;
 
     toml::from_str(&raw).map_err(|source| ConfigError::ParseToml {
-        path: path.clone(),
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn save_config_to_path(config: &NcaConfig, path: &Path) -> Result<(), ConfigError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| ConfigError::Io {
+            action: "create config directory",
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+
+    let raw = toml::to_string_pretty(config).map_err(|source| ConfigError::SerializeToml {
+        path: path.to_path_buf(),
+        source,
+    })?;
+
+    std::fs::write(path, raw).map_err(|source| ConfigError::Io {
+        action: "write config file",
+        path: path.to_path_buf(),
         source,
     })
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    #[error("unable to determine the home directory for global config")]
+    NoHomeDir,
     #[error("failed to read config file {path}: {source}")]
     ReadFile {
         path: PathBuf,
@@ -135,6 +220,17 @@ pub enum ConfigError {
     ParseToml {
         path: PathBuf,
         source: toml::de::Error,
+    },
+    #[error("failed to serialize config file {path}: {source}")]
+    SerializeToml {
+        path: PathBuf,
+        source: toml::ser::Error,
+    },
+    #[error("failed to {action} at {path}: {source}")]
+    Io {
+        action: &'static str,
+        path: PathBuf,
+        source: std::io::Error,
     },
 }
 
@@ -199,7 +295,10 @@ impl Default for MiniMaxConfig {
         Self {
             api_key_env: "MINIMAX_API_KEY".into(),
             api_key: None,
-            base_url: "https://api.minimax.io".into(),
+            // Anthropic-compatible endpoint (recommended for agentic/coding use).
+            // International: https://api.minimax.io/anthropic
+            // China:         https://api.minimaxi.com/anthropic
+            base_url: "https://api.minimax.io/anthropic".into(),
             model: "MiniMax-M2.5".into(),
             temperature: 0.7,
         }

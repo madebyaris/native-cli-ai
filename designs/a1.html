@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Portfolio | Minimal</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg: #faf9f7;
+            --text: #1a1a1a;
+            --accent: #c9a87c;
+            --muted: #6b6b6b;
+        }
+
+        body {
+            font-family: 'Georgia', serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.7;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 0 2rem;
+        }
+
+        /* Header */
+        header {
+            padding: 3rem 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logo {
+            font-size: 1.2rem;
+            font-weight: 600;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+        }
+
+        nav a {
+            color: var(--muted);
+            text-decoration: none;
+            margin-left: 2rem;
+            font-size: 0.9rem;
+            transition: color 0.3s;
+        }
+
+        nav a:hover {
+            color: var(--text);
+        }
+
+        /* Hero */
+        .hero {
+            padding: 8rem 0 6rem;
+        }
+
+        .hero h1 {
+            font-size: 4rem;
+            font-weight: 400;
+            line-height: 1.2;
+            margin-bottom: 2rem;
+            letter-spacing: -0.02em;
+        }
+
+        .hero h1 span {
+            color: var(--accent);
+        }
+
+        .hero p {
+            font-size: 1.2rem;
+            color: var(--muted);
+            max-width: 500px;
+            font-family: system-ui, sans-serif;
+        }
+
+        /* About Section */
+        .about {
+            padding: 4rem 0;
+            border-top: 1px solid #e5e5e5;
+        }
+
+        .about h2 {
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.2em;
+            color: var(--muted);
+            margin-bottom: 1.5rem;
+            font-weight: 400;
+        }
+
+        .about p {
+            font-size: 1.1rem;
+            max-width: 600px;
+            color: var(--text);
+        }
+
+        /* Contact */
+        .contact {
+            padding: 4rem 0 8rem;
+        }
+
+        .contact-link {
+            display: inline-flex;
+            align-items: center;
+            font-size: 1.5rem;
+            color: var(--text);
+            text-decoration: none;
+            border-bottom: 2px solid var(--accent);
+            padding-bottom: 0.3rem;
+            transition: all 0.3s;
+        }
+
+        .contact-link:hover {
+            color: var(--accent);
+        }
+
+        .contact-link::after {
+            content: '→';
+            margin-left: 0.5rem;
+            transition: transform 0.3s;
+        }
+
+        .contact-link:hover::after {
+            transform: translateX(5px);
+        }
+
+        /* Footer */
+        footer {
+            padding: 2rem 0;
+            border-top: 1px solid #e5e5e5;
+            font-size: 0.85rem;
+            color: var(--muted);
+            font-family: system-ui, sans-serif;
+        }
+
+        @media (max-width: 600px) {
+            .hero h1 {
+                font-size: 2.5rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo">Alex Chen</div>
+            <nav>
+                <a href="#about">About</a>
+                <a href="#contact">Contact</a>
+            </nav>
+        </header>
+
+        <section class="hero">
+            <h1>Digital designer<br><span>crafting experiences</span></h1>
+            <p>I create thoughtful digital products that balance aesthetics with functionality.</p>
+        </section>
+
+        <section class="about" id="about">
+            <h2>About</h2>
+            <p>With over 8 years of experience in design and development, I help startups and brands build meaningful connections through their digital presence. Currently available for select projects.</p>
+        </section>
+
+        <section class="contact" id="contact">
+            <a href="mailto:hello@alexchen.design" class="contact-link">Get in touch</a>
+        </section>
+
+        <footer>
+            <p>© 2024 Alex Chen. Based in San Francisco.</p>
+        </footer>
+    </div>
+</body>
+</html>

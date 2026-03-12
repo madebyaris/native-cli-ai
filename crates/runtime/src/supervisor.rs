@@ -227,6 +227,7 @@ impl Supervisor {
         sup.session_id = loaded.meta.id.clone();
         sup.workspace_root = loaded.meta.workspace.clone();
         sup.model = loaded.meta.model.clone();
+        sup.agent.model = loaded.meta.model.clone();
         sup.created_at = loaded.meta.created_at;
         sup.status = loaded.meta.status;
         sup.pid = Some(std::process::id());
@@ -701,68 +702,77 @@ pub fn spawn_subagent_consumer(
     event_tx: Option<tokio::sync::mpsc::Sender<AgentEvent>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let parent_store = SessionStore::new(workspace_root.join(&config.session.history_dir));
+        let parent_sessions_dir = workspace_root.join(&config.session.history_dir);
+        let parent_summary = build_parent_summary(&parent_messages);
 
         while let Some(req) = spawn_rx.recv().await {
-            let summary = build_parent_summary(&parent_messages);
+            let parent_session_id = parent_session_id.clone();
+            let workspace_root = workspace_root.clone();
+            let config = config.clone();
+            let event_tx = event_tx.clone();
+            let parent_store = SessionStore::new(parent_sessions_dir.clone());
+            let parent_summary = parent_summary.clone();
+
             let child_cfg = ChildSessionConfig {
                 parent_session_id: parent_session_id.clone(),
                 task: req.task.clone(),
                 workspace_root: workspace_root.clone(),
-                config: config.clone(),
-                parent_summary: summary,
+                config,
+                parent_summary,
                 use_worktree: req.use_worktree,
                 focus_files: req.focus_files,
             };
 
-            let result = spawn_child_session(child_cfg, event_tx.clone()).await;
-            match result {
-                Ok(res) => {
-                    append_child_to_parent(
-                        &parent_store,
-                        &parent_session_id,
-                        &res.child_session_id,
-                    )
-                    .await;
+            tokio::spawn(async move {
+                let result = spawn_child_session(child_cfg, event_tx.clone()).await;
+                match result {
+                    Ok(res) => {
+                        append_child_to_parent(
+                            &parent_store,
+                            &parent_session_id,
+                            &res.child_session_id,
+                        )
+                        .await;
 
-                    if let Some(ref tx) = event_tx {
-                        let _ = tx
-                            .send(AgentEvent::ChildSessionCompleted {
-                                parent_session_id: parent_session_id.clone(),
-                                child_session_id: res.child_session_id.clone(),
-                                status: res.status.clone(),
-                            })
-                            .await;
+                        if let Some(ref tx) = event_tx {
+                            let _ = tx
+                                .send(AgentEvent::ChildSessionCompleted {
+                                    parent_session_id: parent_session_id.clone(),
+                                    child_session_id: res.child_session_id.clone(),
+                                    status: res.status.clone(),
+                                })
+                                .await;
+                        }
+                        let response = nca_core::tools::spawn_subagent::SpawnResponse {
+                            child_session_id: res.child_session_id,
+                            status: res.status,
+                            output: res.output,
+                            workspace: res.workspace,
+                            branch: res.branch,
+                            worktree_path: res.worktree_path,
+                        };
+                        let _ = req.reply.send(response);
                     }
-                    let response = nca_core::tools::spawn_subagent::SpawnResponse {
-                        child_session_id: res.child_session_id,
-                        status: res.status,
-                        output: res.output,
-                        workspace: res.workspace,
-                        branch: res.branch,
-                        worktree_path: res.worktree_path,
-                    };
-                    let _ = req.reply.send(response);
-                }
-                Err(e) => {
-                    if let Some(ref tx) = event_tx {
-                        let _ = tx
-                            .send(AgentEvent::Error {
-                                message: format!("Failed to spawn child session: {e}"),
-                            })
-                            .await;
+                    Err(e) => {
+                        if let Some(ref tx) = event_tx {
+                            let _ = tx
+                                .send(AgentEvent::Error {
+                                    message: format!("Failed to spawn child session: {e}"),
+                                })
+                                .await;
+                        }
+                        let response = nca_core::tools::spawn_subagent::SpawnResponse {
+                            child_session_id: String::new(),
+                            status: "error".into(),
+                            output: e,
+                            workspace: workspace_root.display().to_string(),
+                            branch: None,
+                            worktree_path: None,
+                        };
+                        let _ = req.reply.send(response);
                     }
-                    let response = nca_core::tools::spawn_subagent::SpawnResponse {
-                        child_session_id: String::new(),
-                        status: "error".into(),
-                        output: e,
-                        workspace: workspace_root.display().to_string(),
-                        branch: None,
-                        worktree_path: None,
-                    };
-                    let _ = req.reply.send(response);
                 }
-            }
+            });
         }
     })
 }
@@ -844,8 +854,14 @@ pub async fn spawn_child_session(
     cfg: ChildSessionConfig,
     event_tx: Option<tokio::sync::mpsc::Sender<AgentEvent>>,
 ) -> Result<ChildSessionResult, String> {
+    // Child sessions are non-interactive and already authorized by the parent
+    // approval. Elevate to BypassPermissions so sub-agents can write files,
+    // run tools, and spawn their own children without being auto-denied.
+    let mut child_config = cfg.config.clone();
+    child_config.permissions.mode = nca_common::config::PermissionMode::BypassPermissions;
+
     let mut sup = Supervisor::create(SupervisorConfig {
-        config: cfg.config.clone(),
+        config: child_config,
         workspace_root: cfg.workspace_root.clone(),
         safe_mode: false,
         interactive_approvals: false,

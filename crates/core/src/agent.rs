@@ -1,6 +1,7 @@
+use futures_util::future::join_all;
 use nca_common::event::AgentEvent;
 use nca_common::message::{Message, MessageToolCall};
-use nca_common::tool::{PermissionTier, ToolCall, ToolDefinition};
+use nca_common::tool::{PermissionTier, ToolCall, ToolDefinition, ToolResult};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -192,93 +193,132 @@ impl AgentLoop {
                 )));
             }
 
-            for (index, call) in tool_calls.into_iter().enumerate() {
-                if self.is_cancelled() {
-                    self.emit(AgentEvent::Error {
-                        message: "Run cancelled before tool execution".into(),
-                    })
-                    .await;
-                    return Err(ProviderError::Other("run cancelled".into()));
-                }
-                if self.checkpoint_interval > 0
-                    && (index as u32 + 1) % self.checkpoint_interval == 0
-                {
-                    self.emit(AgentEvent::Checkpoint {
-                        phase: "tool_execution".into(),
-                        detail: format!("Executed {} tool calls in turn {turn}", index + 1),
-                        turn,
-                    })
-                    .await;
-                }
+            // ── Phase 1: permission checks (sequential — approvals may be interactive) ──
+            //
+            // Produces, in original order, either a pre-resolved result (denied /
+            // approval-denied) or a ticket to execute concurrently in phase 2.
+            enum Ticket {
+                Resolved(ToolResult),
+                Execute(ToolCall),
+            }
+
+            if self.is_cancelled() {
+                self.emit(AgentEvent::Error {
+                    message: "Run cancelled before tool execution".into(),
+                })
+                .await;
+                return Err(ProviderError::Other("run cancelled".into()));
+            }
+
+            let mut tickets: Vec<Ticket> = Vec::with_capacity(tool_calls.len());
+
+            for call in &tool_calls {
                 let tier = self.approval.check(&call.name, &call.input.to_string());
 
-                if tier == PermissionTier::Denied {
-                    let result = nca_common::tool::ToolResult {
-                        call_id: call.id.clone(),
-                        success: false,
-                        output: String::new(),
-                        error: Some(format!("tool `{}` denied by policy", call.name)),
-                    };
-                    self.messages
-                        .push(Message::tool(call.id.clone(), format_tool_result(&result)));
-                    self.emit(AgentEvent::ToolCallCompleted {
-                        call_id: result.call_id.clone(),
-                        output: result,
-                    })
-                    .await;
-                    continue;
-                }
-
-                if tier == PermissionTier::Ask {
-                    let description = format!("Tool `{}` requires approval", call.name);
-                    self.emit(AgentEvent::ApprovalRequested {
-                        call_id: call.id.clone(),
-                        tool: call.name.clone(),
-                        description: description.clone(),
-                    })
-                    .await;
-
-                    let approved = self.approval.resolve(&call, &description).await;
-                    self.emit(AgentEvent::ApprovalResolved {
-                        call_id: call.id.clone(),
-                        approved,
-                    })
-                    .await;
-
-                    if !approved {
-                        let result = nca_common::tool::ToolResult {
+                match tier {
+                    PermissionTier::Denied => {
+                        tickets.push(Ticket::Resolved(ToolResult {
                             call_id: call.id.clone(),
                             success: false,
                             output: String::new(),
-                            error: Some(format!(
-                                "tool `{}` requires approval; request was denied",
-                                call.name
-                            )),
-                        };
-                        self.messages
-                            .push(Message::tool(call.id.clone(), format_tool_result(&result)));
-                        self.emit(AgentEvent::ToolCallCompleted {
-                            call_id: result.call_id.clone(),
-                            output: result,
-                        })
-                        .await;
-                        continue;
+                            error: Some(format!("tool `{}` denied by policy", call.name)),
+                        }));
                     }
 
-                    let result = self.tools.execute(&call).await;
-                    self.messages
-                        .push(Message::tool(call.id.clone(), format_tool_result(&result)));
-                    self.emit(AgentEvent::ToolCallCompleted {
-                        call_id: result.call_id.clone(),
-                        output: result,
-                    })
-                    .await;
-                    continue;
-                }
+                    PermissionTier::Ask => {
+                        let description = format!("Tool `{}` requires approval", call.name);
+                        self.emit(AgentEvent::ApprovalRequested {
+                            call_id: call.id.clone(),
+                            tool: call.name.clone(),
+                            description: description.clone(),
+                        })
+                        .await;
+                        let approved = self.approval.resolve(call, &description).await;
+                        self.emit(AgentEvent::ApprovalResolved {
+                            call_id: call.id.clone(),
+                            approved,
+                        })
+                        .await;
 
-                let result = self.tools.execute(&call).await;
-                self.messages
-                    .push(Message::tool(call.id.clone(), format_tool_result(&result)));
+                        if approved {
+                            tickets.push(Ticket::Execute(call.clone()));
+                        } else {
+                            tickets.push(Ticket::Resolved(ToolResult {
+                                call_id: call.id.clone(),
+                                success: false,
+                                output: String::new(),
+                                error: Some(format!(
+                                    "tool `{}` requires approval; request was denied",
+                                    call.name
+                                )),
+                            }));
+                        }
+                    }
+
+                    PermissionTier::Allowed => {
+                        tickets.push(Ticket::Execute(call.clone()));
+                    }
+                }
+            }
+
+            // ── Phase 2: concurrent execution ────────────────────────────────────────
+            //
+            // All approved calls run simultaneously. `ToolRegistry::execute` takes
+            // `&self` so multiple concurrent borrows are safe.
+            //
+            // We keep a parallel `Option<ToolResult>` vec (None = still executing)
+            // and fill it from the join results.
+            let n = tickets.len();
+            let mut results: Vec<Option<ToolResult>> = (0..n).map(|_| None).collect();
+
+            // Gather indices and refs for calls that actually need execution
+            let to_execute: Vec<(usize, &ToolCall)> = tickets
+                .iter()
+                .enumerate()
+                .filter_map(|(i, t)| {
+                    if let Ticket::Execute(call) = t {
+                        Some((i, call))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            if !to_execute.is_empty() {
+                let futs = to_execute
+                    .iter()
+                    .map(|(i, call)| {
+                        let fut = self.tools.execute(call);
+                        async move { (*i, fut.await) }
+                    });
+                let executed: Vec<(usize, ToolResult)> = join_all(futs).await;
+                for (i, result) in executed {
+                    results[i] = Some(result);
+                }
+            }
+
+            // Fill pre-resolved slots
+            for (i, ticket) in tickets.into_iter().enumerate() {
+                if let Ticket::Resolved(result) = ticket {
+                    results[i] = Some(result);
+                }
+            }
+
+            // ── Phase 3: push results to history + emit events (in original order) ──
+            if self.checkpoint_interval > 0 && n as u32 >= self.checkpoint_interval {
+                self.emit(AgentEvent::Checkpoint {
+                    phase: "tool_execution".into(),
+                    detail: format!("Executed {n} tool calls in turn {turn}"),
+                    turn,
+                })
+                .await;
+            }
+
+            for result in results.into_iter().flatten() {
+                self.messages.push(Message::tool(
+                    result.call_id.clone(),
+                    format_tool_result(&result),
+                ));
                 self.emit(AgentEvent::ToolCallCompleted {
                     call_id: result.call_id.clone(),
                     output: result,

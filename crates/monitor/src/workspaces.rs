@@ -108,10 +108,6 @@ impl WorkspaceManager {
             .map(|w| &w.path)
     }
 
-    pub fn workspace_paths(&self) -> Vec<PathBuf> {
-        self.workspaces.iter().map(|w| w.path.clone()).collect()
-    }
-
     /// Sort workspaces by most recently opened.
     pub fn sort_by_recent(&mut self) {
         self.workspaces

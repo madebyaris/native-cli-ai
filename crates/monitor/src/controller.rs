@@ -94,11 +94,6 @@ impl LiveAttachController {
         }
     }
 
-    /// Try to receive events without blocking. Call from the UI thread each frame.
-    pub fn try_recv(&self) -> Option<AgentEvent> {
-        self.event_rx.try_recv().ok()
-    }
-
     /// Drain all pending events.
     pub fn drain(&self) -> Vec<AgentEvent> {
         let mut out = Vec::new();

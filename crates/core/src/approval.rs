@@ -62,6 +62,9 @@ impl ApprovalPolicy {
                 | "rename_path"
                 | "move_path"
                 | "copy_path"
+                // Spawning a sub-agent is a coordination action equivalent to
+                // delegating file-edit work; auto-approve at AcceptEdits and above.
+                | "spawn_subagent"
         );
         let destructive = matches!(tool_name, "delete_path");
         let execution = matches!(tool_name, "execute_bash" | "run_validation");

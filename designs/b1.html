@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Le Petit Café | Menu</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg: #1c1c1c;
+            --card-bg: #252525;
+            --text: #f5f0e8;
+            --accent: #d4a574;
+            --accent-light: #e8c9a8;
+            --muted: #8a8580;
+        }
+
+        body {
+            font-family: 'Palatino Linotype', 'Book Antiqua', Palatino, serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            min-height: 100vh;
+            background-image: 
+                radial-gradient(ellipse at 20% 0%, rgba(212, 165, 116, 0.08) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 100%, rgba(212, 165, 116, 0.05) 0%, transparent 50%);
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 0 2rem;
+        }
+
+        /* Header */
+        header {
+            padding: 3rem 0;
+            text-align: center;
+            border-bottom: 1px solid rgba(212, 165, 116, 0.2);
+        }
+
+        .logo {
+            font-size: 2.5rem;
+            font-weight: 400;
+            letter-spacing: 0.15em;
+            color: var(--accent);
+            margin-bottom: 0.5rem;
+        }
+
+        .tagline {
+            font-family: system-ui, sans-serif;
+            font-size: 0.85rem;
+            color: var(--muted);
+            letter-spacing: 0.3em;
+            text-transform: uppercase;
+        }
+
+        /* Menu Sections */
+        .menu-section {
+            padding: 3rem 0;
+        }
+
+        .section-title {
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 0.25em;
+            color: var(--accent);
+            margin-bottom: 2rem;
+            text-align: center;
+            font-family: system-ui, sans-serif;
+        }
+
+        /* Menu Items */
+        .menu-grid {
+            display: grid;
+            gap: 1.5rem;
+        }
+
+        .menu-item {
+            background: var(--card-bg);
+            padding: 1.5rem 2rem;
+            border-radius: 4px;
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            border: 1px solid rgba(255,255,255,0.03);
+            transition: all 0.3s ease;
+        }
+
+        .menu-item:hover {
+            border-color: rgba(212, 165, 116, 0.3);
+            transform: translateY(-2px);
+        }
+
+        .item-info {
+            flex: 1;
+        }
+
+        .item-name {
+            font-size: 1.2rem;
+            font-weight: 500;
+            margin-bottom: 0.3rem;
+            color: var(--text);
+        }
+
+        .item-desc {
+            font-size: 0.85rem;
+            color: var(--muted);
+            font-style: italic;
+            font-family: system-ui, sans-serif;
+        }
+
+        .item-price {
+            font-size: 1.3rem;
+            color: var(--accent-light);
+            font-weight: 500;
+            white-space: nowrap;
+            margin-left: 2rem;
+        }
+
+        .item-price::before {
+            content: '$';
+            font-size: 0.9rem;
+            opacity: 0.7;
+        }
+
+        /* Drinks Section */
+        .drinks-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 1.5rem;
+        }
+
+        .drink-card {
+            background: var(--card-bg);
+            padding: 2rem;
+            border-radius: 4px;
+            text-align: center;
+            border: 1px solid rgba(255,255,255,0.03);
+            transition: all 0.3s ease;
+        }
+
+        .drink-card:hover {
+            border-color: rgba(212, 165, 116, 0.3);
+        }
+
+        .drink-icon {
+            font-size: 2rem;
+            margin-bottom: 1rem;
+        }
+
+        .drink-name {
+            font-size: 1.1rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .drink-desc {
+            font-size: 0.8rem;
+            color: var(--muted);
+            margin-bottom: 1rem;
+            font-family: system-ui, sans-serif;
+        }
+
+        .drink-price {
+            color: var(--accent);
+            font-weight: 500;
+        }
+
+        /* Footer */
+        footer {
+            padding: 3rem 0;
+            text-align: center;
+            border-top: 1px solid rgba(212, 165, 116, 0.2);
+            margin-top: 2rem;
+        }
+
+        .hours {
+            font-family: system-ui, sans-serif;
+            font-size: 0.9rem;
+            color: var(--muted);
+            line-height: 2;
+        }
+
+        .hours strong {
+            color: var(--accent-light);
+        }
+
+        @media (max-width: 600px) {
+            .drinks-grid {
+                grid-template-columns: 1fr;
+            }
+            .menu-item {
+                flex-direction: column;
+                gap: 0.5rem;
+            }
+            .item-price {
+                margin-left: 0;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo">Le Petit Café</div>
+            <div class="tagline">Artisan Coffee & Fine Dining</div>
+        </header>
+
+        <section class="menu-section">
+            <div class="section-title">Starters</div>
+            <div class="menu-grid">
+                <div class="menu-item">
+                    <div class="item-info">
+                        <div class="item-name">Truffle Arancini</div>
+                        <div class="item-desc">Crispy risotto balls with black truffle and parmesan</div>
+                    </div>
+                    <div class="item-price">14</div>
+                </div>
+                <div class="menu-item">
+                    <div class="item-info">
+                        <div class="item-name">Burrata Caprese</div>
+                        <div class="item-desc">Fresh burrata, heirloom tomatoes, basil pesto</div>
+                    </div>
+                    <div class="item-price">18</div>
+                </div>
+                <div class="menu-item">
+                    <div class="item-info">
+                        <div class="item-name">Seared Scallops</div>
+                        <div class="item-desc">Pan-seared scallops with cauliflower purée</div>
+                    </div>
+                    <div class="item-price">24</div>
+                </div>
+            </div>
+        </section>
+
+        <section class="menu-section">
+            <div class="section-title">Mains</div>
+            <div class="menu-grid">
+                <div class="menu-item">
+                    <div class="item-info">
+                        <div class="item-name">Herb-Crusted Lamb Rack</div>
+                        <div class="item-desc">Served with rosemary potatoes and red wine jus</div>
+                    </div>
+                    <div class="item-price">42</div>
+                </div>
+                <div class="menu-item">
+                    <div class="item-info">
+                        <div class="item-name">Wild Mushroom Risotto</div>
+                        <div class="item-desc">Arborio rice with porcini, chanterelles, truffle oil</div>
+                    </div>
+                    <div class="item-price">28</div>
+                </div>
+                <div class="menu-item">
+                    <div class="item-info">
+                        <div class="item-name">Pan-Roasted Salmon</div>
+                        <div class="item-desc">Atlantic salmon with citrus beurre blanc</div>
+                    </div>
+                    <div class="item-price">36</div>
+                </div>
+                <div class="menu-item">
+                    <div class="item-info">
+                        <div class="item-name">Duck Confit</div>
+                        <div class="item-desc">Slow-cooked duck leg with cherry gastrique</div>
+                    </div>
+                    <div class="item-price">38</div>
+                </div>
+            </div>
+        </section>
+
+        <section class="menu-section">
+            <div class="section-title">Coffee & Beverages</div>
+            <div class="drinks-grid">
+                <div class="drink-card">
+                    <div class="drink-icon">☕</div>
+                    <div class="drink-name">Signature Espresso</div>
+                    <div class="drink-desc">House blend, single or double</div>
+                    <div class="drink-price">4</div>
+                </div>
+                <div class="drink-card">
+                    <div class="drink-icon">🥛</div>
+                    <div class="drink-name">Cortado</div>
+                    <div class="drink-desc">Equal parts espresso and steamed milk</div>
+                    <div class="drink-price">5</div>
+                </div>
+                <div class="drink-card">
+                    <div class="drink-icon">🍵</div>
+                    <div class="drink-name">Matcha Latte</div>
+                    <div class="drink-desc">Premium Japanese matcha with oat milk</div>
+                    <div class="drink-price">6</div>
+                </div>
+                <div class="drink-card">
+                    <div class="drink-icon">🫖</div>
+                    <div class="drink-name">French Press</div>
+                    <div class="drink-desc">Single origin, served tableside</div>
+                    <div class="drink-price">5</div>
+                </div>
+            </div>
+        </section>
+
+        <footer>
+            <div class="hours">
+                <strong>Open Daily</strong> · 7:00 AM - 10:00 PM<br>
+                Reservations: (555) 123-4567
+            </div>
+        </footer>
+    </div>
+</body>
+</html>

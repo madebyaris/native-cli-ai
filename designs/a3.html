@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Art of Slow Living</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=Source+Serif+4:wght@400;500&display=swap');
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg: #fdf8f3;
+            --text: #2c2417;
+            --accent: #b85c38;
+            --muted: #7a7067;
+            --line: #e8e2dc;
+        }
+
+        body {
+            font-family: 'Source Serif 4', Georgia, serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.8;
+            min-height: 100vh;
+        }
+
+        /* Subtle pattern background */
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-image: 
+                radial-gradient(circle at 25% 25%, rgba(184, 92, 56, 0.03) 0%, transparent 50%),
+                radial-gradient(circle at 75% 75%, rgba(184, 92, 56, 0.02) 0%, transparent 50%);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .container {
+            max-width: 720px;
+            margin: 0 auto;
+            padding: 0 2rem;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* Header */
+        header {
+            padding: 3rem 0;
+            border-bottom: 1px solid var(--line);
+            margin-bottom: 4rem;
+        }
+
+        .back-link {
+            display: inline-flex;
+            align-items: center;
+            color: var(--muted);
+            text-decoration: none;
+            font-size: 0.9rem;
+            font-family: system-ui, sans-serif;
+            transition: color 0.3s;
+            margin-bottom: 2rem;
+        }
+
+        .back-link:hover {
+            color: var(--accent);
+        }
+
+        .back-link::before {
+            content: '←';
+            margin-right: 0.5rem;
+        }
+
+        .site-name {
+            font-family: 'Playfair Display', serif;
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        /* Article Meta */
+        .article-meta {
+            margin-bottom: 3rem;
+        }
+
+        .category {
+            display: inline-block;
+            color: var(--accent);
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.15em;
+            font-family: system-ui, sans-serif;
+            margin-bottom: 1rem;
+        }
+
+        h1 {
+            font-family: 'Playfair Display', serif;
+            font-size: 3.2rem;
+            font-weight: 700;
+            line-height: 1.2;
+            margin-bottom: 1.5rem;
+            color: var(--text);
+        }
+
+        .article-info {
+            display: flex;
+            align-items: center;
+            gap: 1.5rem;
+            color: var(--muted);
+            font-size: 0.95rem;
+            font-family: system-ui, sans-serif;
+        }
+
+        .article-info .author {
+            color: var(--text);
+            font-weight: 500;
+        }
+
+        .divider {
+            width: 40px;
+            height: 2px;
+            background: var(--accent);
+            margin: 2rem 0 3rem;
+        }
+
+        /* Article Content */
+        .article-content {
+            padding-bottom: 4rem;
+        }
+
+        .article-content p {
+            font-size: 1.15rem;
+            margin-bottom: 2rem;
+            color: var(--text);
+        }
+
+        .article-content p:first-of-type::first-letter {
+            font-family: 'Playfair Display', serif;
+            font-size: 4rem;
+            float: left;
+            line-height: 0.8;
+            margin-right: 0.75rem;
+            margin-top: 0.2rem;
+            color: var(--accent);
+        }
+
+        .article-content h2 {
+            font-family: 'Playfair Display', serif;
+            font-size: 1.8rem;
+            margin-top: 3rem;
+            margin-bottom: 1.5rem;
+            color: var(--text);
+        }
+
+        .article-content blockquote {
+            border-left: 3px solid var(--accent);
+            padding-left: 1.5rem;
+            margin: 2.5rem 0;
+            font-style: italic;
+            font-size: 1.3rem;
+            color: var(--muted);
+        }
+
+        .article-content a {
+            color: var(--accent);
+            text-decoration: underline;
+            text-underline-offset: 3px;
+        }
+
+        /* Pull quote */
+        .pull-quote {
+            background: linear-gradient(135deg, rgba(184, 92, 56, 0.08) 0%, rgba(184, 92, 56, 0.03) 100%);
+            padding: 2.5rem;
+            border-radius: 8px;
+            margin: 3rem 0;
+            text-align: center;
+        }
+
+        .pull-quote p {
+            font-family: 'Playfair Display', serif;
+            font-size: 1.6rem;
+            font-style: italic;
+            color: var(--text);
+            margin: 0;
+        }
+
+        .pull-quote p::first-letter {
+            font-size: inherit;
+            float: none;
+            margin: 0;
+        }
+
+        /* Tags */
+        .tags {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+            margin-top: 3rem;
+            padding-top: 2rem;
+            border-top: 1px solid var(--line);
+        }
+
+        .tag {
+            background: transparent;
+            border: 1px solid var(--line);
+            color: var(--muted);
+            padding: 0.4rem 1rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-family: system-ui, sans-serif;
+            text-decoration: none;
+            transition: all 0.3s;
+        }
+
+        .tag:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        /* Newsletter */
+        .newsletter {
+            background: var(--text);
+            color: var(--bg);
+            padding: 3rem;
+            border-radius: 12px;
+            margin: 4rem 0;
+            text-align: center;
+        }
+
+        .newsletter h3 {
+            font-family: 'Playfair Display', serif;
+            font-size: 1.5rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .newsletter p {
+            color: rgba(253, 248, 243, 0.7);
+            font-size: 0.95rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .newsletter-form {
+            display: flex;
+            gap: 0.5rem;
+            max-width: 400px;
+            margin: 0 auto;
+        }
+
+        .newsletter-form input {
+            flex: 1;
+            padding: 0.8rem 1rem;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.9rem;
+        }
+
+        .newsletter-form button {
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 0.8rem 1.5rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: background 0.3s;
+        }
+
+        .newsletter-form button:hover {
+            background: #a04e2e;
+        }
+
+        /* Footer */
+        footer {
+            text-align: center;
+            padding: 3rem 0;
+            border-top: 1px solid var(--line);
+            color: var(--muted);
+            font-size: 0.85rem;
+            font-family: system-ui, sans-serif;
+        }
+
+        @media (max-width: 600px) {
+            h1 {
+                font-size: 2.2rem;
+            }
+            
+            .article-content p {
+                font-size: 1.05rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <a href="#" class="back-link">Back to articles</a>
+            <div class="site-name">The Quiet Journal</div>
+        </header>
+
+        <article>
+            <div class="article-meta">
+                <span class="category">Lifestyle</span>
+                <h1>The Art of Slow Living</h1>
+                <div class="article-info">
+                    <span class="author">Eleanor Vance</span>
+                    <span>·</span>
+                    <span>December 14, 2024</span>
+                    <span>·</span>
+                    <span>8 min read</span>
+                </div>
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="article-content">
+                <p>In a world that celebrates speed, productivity, and constant connectivity, there's a quiet revolution taking place. People are beginning to question the relentless pace of modern life and discovering the profound beauty in slowing down.</p>
+
+                <p>Slow living isn't about doing everything at a snail's pace or abandoning ambition. Rather, it's about being intentional with your time and attention. It's choosing quality over quantity, depth over breadth, and presence over rushing.</p>
+
+                <h2>The Morning Ritual</h2>
+                <p>Start your day without reaching for your phone. Let the first moments of consciousness be spent in quiet observation—a cup of tea, the light changing through the window, the sound of birds. These small pauses set the tone for everything that follows.</p>
+
+                <blockquote>
+                    "Nature does not hurry, yet everything is accomplished."
+                </blockquote>
+
+                <p>When we rush, we miss the subtle textures of life. The way coffee smells as it brews. The feeling of a warm mug between your hands. The slight resistance of turning a page. These aren't insignificant moments—they're what life is made of.</p>
+
+                <div class="pull-quote">
+                    <p>"The greatest gift you can give yourself is the permission to move at your own pace."</p>
+                </div>
+
+                <h2>Finding Your Rhythm</h2>
+                <p>Slow living looks different for everyone. For some, it means limiting social media to 30 minutes a day. For others, it means cooking meals from scratch or walking instead of driving. The key is finding what brings you back to yourself.</p>
+
+                <p>Notice what happens when you do less. Do you feel the pull to fill every silence? That's okay—awareness is the first step. The goal isn't perfection but presence.</p>
+
+                <p>As you embrace slowness, you may find that you're actually more productive, more creative, and more at peace. Paradoxically, the path to doing more often leads through doing less.</p>
+
+                <div class="tags">
+                    <a href="#" class="tag">#slowliving</a>
+                    <a href="#" class="tag">#mindfulness</a>
+                    <a href="#" class="tag">#simplicity</a>
+                    <a href="#" class="tag">#wellbeing</a>
+                </div>
+            </div>
+        </article>
+
+        <div class="newsletter">
+            <h3>Join the conversation</h3>
+            <p>Get weekly essays on mindful living delivered to your inbox.</p>
+            <form class="newsletter-form">
+                <input type="email" placeholder="your@email.com">
+                <button type="submit">Subscribe</button>
+            </form>
+        </div>
+
+        <footer>
+            <p>© 2024 The Quiet Journal. Crafted with care.</p>
+        </footer>
+    </div>
+</body>
+</html>
