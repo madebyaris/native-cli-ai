@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+
+<html class="h-full" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>nca desktop | AI Orchestrator</title>
+<!-- Tailwind CSS CDN with Plugins -->
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            'dev-bg': '#0a0a0a',
+            'dev-sidebar': '#111111',
+            'dev-card': '#1a1a1a',
+            'dev-border': '#2d2d2d',
+            'dev-accent': '#0070f3',
+            'dev-text-dim': '#888888',
+            'dev-success': '#10b981',
+            'dev-warning': '#f59e0b'
+          }
+        }
+      }
+    }
+  </script>
+<style data-purpose="custom-scrollbars">
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #333;
+      border-radius: 3px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #444;
+    }
+  </style>
+<style data-purpose="animations">
+    @keyframes pulse-soft {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(0.9); }
+    }
+    .animate-pulse-soft {
+      animation: pulse-soft 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+    }
+  </style>
+</head>
+<body class="h-full bg-dev-bg text-gray-200 font-sans antialiased overflow-hidden">
+<!-- BEGIN: Main Application Layout -->
+<div class="flex h-full w-full" id="app-container">
+<!-- BEGIN: Sidebar Navigation -->
+<aside class="w-64 flex-shrink-0 bg-dev-sidebar border-r border-dev-border flex flex-col" data-purpose="sidebar">
+<!-- App Header -->
+<div class="p-4 flex items-center gap-3 border-b border-dev-border">
+<div class="flex gap-1.5">
+<div class="w-3 h-3 rounded-full bg-red-500"></div>
+<div class="w-3 h-3 rounded-full bg-yellow-500"></div>
+<div class="w-3 h-3 rounded-full bg-green-500"></div>
+</div>
+<span class="font-bold text-sm tracking-tight text-white">nca desktop</span>
+</div>
+<!-- Navigation Links -->
+<nav class="p-2 space-y-1" data-purpose="primary-nav">
+<a class="flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md bg-dev-accent/10 text-dev-accent group" href="#">
+<svg class="w-4 h-4" fill="none" stroke="currentColor" viewbox="0 0 24 24"><path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+          Projects
+        </a>
+<a class="flex items-center gap-3 px-3 py-2 text-sm font-medium text-dev-text-dim hover:text-white hover:bg-white/5 rounded-md transition-colors group" href="#">
+<svg class="w-4 h-4" fill="none" stroke="currentColor" viewbox="0 0 24 24"><path d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+          Chat History
+        </a>
+<a class="flex items-center gap-3 px-3 py-2 text-sm font-medium text-dev-text-dim hover:text-white hover:bg-white/5 rounded-md transition-colors group" href="#">
+<svg class="w-4 h-4" fill="none" stroke="currentColor" viewbox="0 0 24 24"><path d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path><path d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+          Settings
+        </a>
+</nav>
+<!-- Project List Section -->
+<div class="mt-8 px-4">
+<div class="flex items-center justify-between mb-3">
+<h3 class="text-xs font-semibold text-dev-text-dim uppercase tracking-wider">Your Projects</h3>
+<button class="p-1 hover:bg-white/10 rounded transition-colors" title="Add Project">
+<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewbox="0 0 24 24"><path d="M12 4v16m8-8H4" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+</button>
+</div>
+<div class="space-y-2 overflow-y-auto max-h-[40vh]" data-purpose="project-list">
+<!-- Active Project -->
+<div class="p-2.5 rounded-lg border border-dev-accent bg-dev-accent/5 group relative">
+<div class="text-sm font-medium text-white truncate">test-makan</div>
+<div class="text-[10px] text-dev-text-dim truncate">/Volumes/app/test-makan</div>
+<button class="absolute top-2 right-2 opacity-0 group-hover:opacity-100 p-1 hover:bg-red-500/20 text-red-400 rounded transition-all">
+<svg class="w-3 h-3" fill="none" stroke="currentColor" viewbox="0 0 24 24"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+</button>
+</div>
+<!-- Other Project -->
+<div class="p-2.5 rounded-lg border border-dev-border hover:border-white/20 transition-colors group cursor-pointer">
+<div class="text-sm font-medium text-dev-text-dim group-hover:text-gray-200">api-gateway-v2</div>
+<div class="text-[10px] text-dev-text-dim/60">~/dev/projects/gateway</div>
+</div>
+</div>
+</div>
+<div class="mt-auto p-4 border-t border-dev-border">
+<button class="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs bg-white/5 hover:bg-white/10 rounded-md transition-colors border border-dev-border">
+<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewbox="0 0 24 24"><path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+          Open Folder
+        </button>
+</div>
+</aside>
+<!-- END: Sidebar Navigation -->
+<!-- BEGIN: Main Dashboard Content -->
+<main class="flex-1 flex flex-col overflow-y-auto bg-dev-bg" data-purpose="main-stage">
+<!-- Top Bar -->
+<header class="h-14 border-b border-dev-border flex items-center justify-between px-8 shrink-0">
+<div class="flex items-center gap-2">
+<span class="text-dev-text-dim text-sm">Project /</span>
+<span class="text-white font-medium text-sm">test-makan</span>
+</div>
+<div class="flex items-center gap-4">
+<div class="flex items-center gap-2 text-xs text-dev-text-dim">
+<span class="inline-block w-2 h-2 rounded-full bg-dev-success"></span>
+            Agent Online
+          </div>
+<button class="text-dev-text-dim hover:text-white transition-colors">
+<svg class="w-5 h-5" fill="none" stroke="currentColor" viewbox="0 0 24 24"><path d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+</button>
+</div>
+</header>
+<div class="max-w-5xl w-full mx-auto p-8 space-y-10">
+<!-- BEGIN: Start A New Chat Section -->
+<section data-purpose="composer-section">
+<div class="flex items-end justify-between mb-4">
+<div>
+<h1 class="text-xl font-semibold text-white">Start a New Chat</h1>
+<p class="text-sm text-dev-text-dim mt-1">Initialize an AI agent to perform tasks within your project directory.</p>
+</div>
+<div class="flex items-center gap-2 bg-dev-card p-1 rounded-lg border border-dev-border">
+<button class="px-3 py-1 text-xs font-medium text-white bg-white/10 rounded">Standard</button>
+<button class="px-3 py-1 text-xs font-medium text-dev-text-dim hover:text-white transition-colors">Advanced</button>
+</div>
+</div>
+<div class="bg-dev-card rounded-xl border border-dev-border overflow-hidden shadow-2xl">
+<!-- Composer Input Area -->
+<div class="relative group">
+<textarea class="w-full bg-transparent border-none focus:ring-0 text-gray-200 placeholder-dev-text-dim/50 p-6 resize-none font-mono text-sm leading-relaxed" placeholder="Describe the task you want the agent to work on..." rows="4"></textarea>
+<div class="absolute bottom-4 right-4 text-[10px] text-dev-text-dim font-mono">
+                ⌘ + Enter to dispatch
+              </div>
+</div>
+<!-- Configuration Footer -->
+<div class="bg-black/20 px-6 py-4 flex items-center justify-between border-t border-dev-border">
+<div class="flex items-center gap-6">
+<!-- Model Select -->
+<div class="space-y-1">
+<label class="block text-[10px] font-bold text-dev-text-dim uppercase tracking-widest">Model</label>
+<select class="bg-dev-bg border border-dev-border rounded text-xs py-1 pl-2 pr-8 text-white focus:border-dev-accent outline-none appearance-none cursor-pointer">
+<option>MiniMax-M2.5 (Recommended)</option>
+<option>GPT-4o (Legacy)</option>
+<option>Claude 3.5 Sonnet</option>
+</select>
+</div>
+<!-- Permission Mode -->
+<div class="space-y-1">
+<label class="block text-[10px] font-bold text-dev-text-dim uppercase tracking-widest">Permission Mode</label>
+<div class="flex items-center gap-3 mt-1">
+<div class="flex items-center gap-2 cursor-pointer group">
+<div class="w-4 h-4 rounded-full border border-dev-border flex items-center justify-center group-hover:border-dev-accent">
+<div class="w-2 h-2 rounded-full bg-dev-accent"></div>
+</div>
+<span class="text-xs text-white">Standard</span>
+</div>
+<div class="flex items-center gap-2 cursor-pointer group opacity-50 hover:opacity-100">
+<div class="w-4 h-4 rounded-full border border-dev-border flex items-center justify-center group-hover:border-dev-warning"></div>
+<span class="text-xs text-dev-text-dim">Unrestricted</span>
+</div>
+</div>
+</div>
+<!-- Safe Mode Toggle -->
+<div class="flex items-center gap-2 mt-4">
+<input checked="" class="w-4 h-4 rounded bg-dev-bg border-dev-border text-dev-accent focus:ring-0 focus:ring-offset-0" id="safe-mode" type="checkbox"/>
+<label class="text-xs text-dev-text-dim cursor-pointer hover:text-white transition-colors" for="safe-mode">Safe Mode (Read-only)</label>
+</div>
+</div>
+<button class="bg-dev-accent hover:bg-blue-600 text-white px-6 py-2.5 rounded-lg text-sm font-semibold transition-all shadow-lg shadow-dev-accent/20 flex items-center gap-2">
+                Launch Agent
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewbox="0 0 24 24"><path d="M13 10V3L4 14h7v7l9-11h-7z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+</button>
+</div>
+</div>
+</section>
+<!-- END: Start A New Chat Section -->
+<!-- BEGIN: Recent Sessions Section -->
+<section data-purpose="sessions-list">
+<div class="flex items-center justify-between mb-6">
+<h2 class="text-lg font-semibold text-white">Recent Sessions</h2>
+<button class="text-xs text-dev-accent hover:underline">View all history</button>
+</div>
+<div class="grid gap-4" data-purpose="sessions-grid">
+<!-- Running Session Card -->
+<div class="bg-dev-card border border-dev-accent/30 rounded-xl p-5 hover:border-dev-accent/60 transition-all group relative overflow-hidden">
+<!-- Pulsing indicator for running state -->
+<div class="absolute top-0 left-0 w-1 h-full bg-dev-accent"></div>
+<div class="flex justify-between items-start">
+<div class="space-y-1">
+<div class="flex items-center gap-3">
+<span class="text-sm font-mono font-bold text-white">session-1773279004490272-0</span>
+<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-dev-accent/20 text-dev-accent flex items-center gap-1.5 uppercase">
+<span class="w-1.5 h-1.5 rounded-full bg-dev-accent animate-pulse-soft"></span>
+                      Running
+                    </span>
+</div>
+<div class="flex items-center gap-4 text-[11px] text-dev-text-dim">
+<span class="flex items-center gap-1">
+<svg class="w-3 h-3" fill="none" stroke="currentColor" viewbox="0 0 24 24"><path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+                      Updated 2 minutes ago
+                    </span>
+<span class="flex items-center gap-1">
+<svg class="w-3 h-3" fill="none" stroke="currentColor" viewbox="0 0 24 24"><path d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+                      MiniMax-M2.5
+                    </span>
+</div>
+</div>
+<div class="flex gap-2">
+<button class="p-2 hover:bg-white/5 rounded text-dev-text-dim hover:text-white transition-colors" title="Copy CLI Command">
+<svg class="w-4 h-4" fill="none" stroke="currentColor" viewbox="0 0 24 24"><path d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+</button>
+<button class="bg-dev-accent text-white px-4 py-1.5 rounded-md text-xs font-semibold hover:bg-blue-600 transition-colors">
+                    Open Running Chat
+                  </button>
+</div>
+</div>
+</div>
+<!-- Completed Session Card -->
+<div class="bg-dev-card border border-dev-border rounded-xl p-5 hover:border-white/20 transition-all group">
+<div class="flex justify-between items-start">
+<div class="space-y-1">
+<div class="flex items-center gap-3">
+<span class="text-sm font-mono font-bold text-gray-400">session-1773279032615305-1</span>
+<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-white/5 text-dev-text-dim flex items-center gap-1.5 uppercase">
+                      Completed
+                    </span>
+</div>
+<div class="flex items-center gap-4 text-[11px] text-dev-text-dim">
+<span class="flex items-center gap-1">
+<svg class="w-3 h-3" fill="none" stroke="currentColor" viewbox="0 0 24 24"><path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+                      March 12, 01:36 UTC
+                    </span>
+<span class="flex items-center gap-1">
+<svg class="w-3 h-3" fill="none" stroke="currentColor" viewbox="0 0 24 24"><path d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+                      MiniMax-M2.5
+                    </span>
+</div>
+</div>
+<div class="flex gap-2">
+<button class="p-2 hover:bg-white/5 rounded text-dev-text-dim hover:text-white transition-colors" title="View Logs">
+<svg class="w-4 h-4" fill="none" stroke="currentColor" viewbox="0 0 24 24"><path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+</button>
+<button class="text-white bg-white/10 px-4 py-1.5 rounded-md text-xs font-semibold hover:bg-white/20 transition-colors">
+                    Resume in Desktop
+                  </button>
+<button class="p-2 hover:bg-red-500/20 rounded text-red-400 opacity-0 group-hover:opacity-100 transition-all" title="Delete Session">
+<svg class="w-4 h-4" fill="none" stroke="currentColor" viewbox="0 0 24 24"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+</button>
+</div>
+</div>
+</div>
+<!-- Another Completed Session Card -->
+<div class="bg-dev-card border border-dev-border rounded-xl p-5 hover:border-white/20 transition-all group">
+<div class="flex justify-between items-start">
+<div class="space-y-1">
+<div class="flex items-center gap-3">
+<span class="text-sm font-mono font-bold text-gray-400">session-1773279032616686-4</span>
+<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-white/5 text-dev-text-dim flex items-center gap-1.5 uppercase">
+                      Completed
+                    </span>
+</div>
+<div class="flex items-center gap-4 text-[11px] text-dev-text-dim">
+<span class="flex items-center gap-1">
+<svg class="w-3 h-3" fill="none" stroke="currentColor" viewbox="0 0 24 24"><path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+                      March 12, 01:35 UTC
+                    </span>
+<span class="flex items-center gap-1">
+<svg class="w-3 h-3" fill="none" stroke="currentColor" viewbox="0 0 24 24"><path d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+                      MiniMax-M2.5
+                    </span>
+</div>
+</div>
+<div class="flex gap-2">
+<button class="p-2 hover:bg-white/5 rounded text-dev-text-dim hover:text-white transition-colors" title="View Logs">
+<svg class="w-4 h-4" fill="none" stroke="currentColor" viewbox="0 0 24 24"><path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+</button>
+<button class="text-white bg-white/10 px-4 py-1.5 rounded-md text-xs font-semibold hover:bg-white/20 transition-colors">
+                    Resume in Desktop
+                  </button>
+<button class="p-2 hover:bg-red-500/20 rounded text-red-400 opacity-0 group-hover:opacity-100 transition-all" title="Delete Session">
+<svg class="w-4 h-4" fill="none" stroke="currentColor" viewbox="0 0 24 24"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+</button>
+</div>
+</div>
+</div>
+</div>
+</section>
+<!-- END: Recent Sessions Section -->
+</div>
+</main>
+<!-- END: Main Dashboard Content -->
+</div>
+<!-- END: Main Application Layout -->
+<script data-purpose="simple-ui-logic">
+    // Add basic click handlers for interactivity
+    document.querySelectorAll('[data-purpose="project-list"] > div').forEach(project => {
+      project.addEventListener('click', () => {
+        // Simple visual feedback for project selection
+        console.log('Project selected:', project.querySelector('.text-sm').innerText);
+      });
+    });
+
+    // Keyboard shortcut listener for textarea
+    const textarea = document.querySelector('textarea');
+    textarea.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        alert('Launching Agent with prompt: ' + textarea.value);
+      }
+    });
+  </script>
+</body></html>

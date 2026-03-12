@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@300;400;500;600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "primary": "#ec5b13",
+                        "background-light": "#f8f6f6",
+                        "background-dark": "#1a120e",
+                        "neutral-dark": "#2a1e17",
+                        "border-dark": "#3d2b21",
+                    },
+                    fontFamily: {
+                        "display": ["Public Sans", "sans-serif"],
+                        "mono": ["Fira Code", "monospace"]
+                    },
+                    borderRadius: {"DEFAULT": "0.25rem", "lg": "0.5rem", "xl": "0.75rem", "full": "9999px"},
+                },
+            },
+        }
+    </script>
+<style>
+        body { font-family: 'Public Sans', sans-serif; }
+        .terminal-glow { box-shadow: 0 0 20px rgba(236, 91, 19, 0.1); }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #3d2b21; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #ec5b13; }
+    </style>
+</head>
+<body class="bg-background-light dark:bg-background-dark text-slate-900 dark:text-slate-100 font-display">
+<div class="flex h-screen overflow-hidden">
+<!-- Sidebar -->
+<aside class="w-72 flex-shrink-0 flex flex-col border-r border-slate-200 dark:border-border-dark bg-white dark:bg-background-dark">
+<div class="p-6 flex items-center gap-3">
+<div class="w-10 h-10 rounded-lg bg-primary flex items-center justify-center text-white">
+<span class="material-symbols-outlined">terminal</span>
+</div>
+<div>
+<h1 class="font-bold text-lg leading-none">CLI Orchestrator</h1>
+<p class="text-xs text-primary font-medium mt-1">v2.4.0-stable</p>
+</div>
+</div>
+<nav class="flex-1 px-4 space-y-1 overflow-y-auto">
+<div class="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider px-3 mb-2 mt-4">Workspace</div>
+<a class="flex items-center gap-3 px-3 py-2 rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-neutral-dark transition-colors" href="#">
+<span class="material-symbols-outlined text-xl">folder</span>
+<span class="text-sm font-medium">Projects</span>
+</a>
+<a class="flex items-center gap-3 px-3 py-2 rounded-xl bg-primary/10 text-primary transition-colors border border-primary/20" href="#">
+<span class="material-symbols-outlined text-xl">chat</span>
+<span class="text-sm font-semibold">Active Sessions</span>
+</a>
+<div class="pl-9 space-y-1 mt-1">
+<div class="flex items-center justify-between px-3 py-1.5 rounded-lg bg-primary/5 text-primary text-xs font-medium border-l-2 border-primary">
+<span class="truncate">session-1773...-0</span>
+<span class="w-1.5 h-1.5 rounded-full bg-primary animate-pulse"></span>
+</div>
+<div class="px-3 py-1.5 rounded-lg text-slate-500 dark:text-slate-500 text-xs hover:text-slate-300 transition-colors cursor-pointer">
+<span class="truncate">session-1773...-1</span>
+</div>
+</div>
+<a class="flex items-center gap-3 px-3 py-2 rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-neutral-dark transition-colors" href="#">
+<span class="material-symbols-outlined text-xl">hub</span>
+<span class="text-sm font-medium">Integrations</span>
+</a>
+<a class="flex items-center gap-3 px-3 py-2 rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-neutral-dark transition-colors" href="#">
+<span class="material-symbols-outlined text-xl">memory</span>
+<span class="text-sm font-medium">Models</span>
+</a>
+<div class="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider px-3 mb-2 mt-8">Configuration</div>
+<a class="flex items-center gap-3 px-3 py-2 rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-neutral-dark transition-colors" href="#">
+<span class="material-symbols-outlined text-xl">settings</span>
+<span class="text-sm font-medium">System Settings</span>
+</a>
+</nav>
+<div class="p-4 border-t border-slate-200 dark:border-border-dark">
+<button class="w-full flex items-center justify-center gap-2 bg-primary hover:bg-primary/90 text-white font-bold py-3 rounded-xl shadow-lg shadow-primary/20 transition-all">
+<span class="material-symbols-outlined text-lg">add</span>
+<span>New Session</span>
+</button>
+</div>
+</aside>
+<!-- Main Content Area -->
+<main class="flex-1 flex flex-col bg-background-light dark:bg-background-dark overflow-hidden">
+<!-- Header -->
+<header class="h-16 flex items-center justify-between px-8 border-b border-slate-200 dark:border-border-dark bg-white/50 dark:bg-background-dark/50 backdrop-blur-md z-10">
+<div class="flex items-center gap-4">
+<span class="material-symbols-outlined text-primary">auto_awesome</span>
+<h2 class="font-bold text-slate-900 dark:text-slate-100">session-1773279004490272-0</h2>
+<div class="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-primary/10 border border-primary/30 text-[10px] font-bold text-primary uppercase tracking-widest">
+<span class="w-1.5 h-1.5 rounded-full bg-primary"></span>
+                    Running
+                </div>
+</div>
+<div class="flex items-center gap-6">
+<nav class="hidden md:flex items-center gap-6 text-sm font-medium text-slate-500 dark:text-slate-400">
+<a class="text-primary border-b-2 border-primary py-5" href="#">Overview</a>
+<a class="hover:text-primary transition-colors py-5" href="#">Logs</a>
+<a class="hover:text-primary transition-colors py-5" href="#">Artifacts</a>
+</nav>
+<div class="h-6 w-[1px] bg-slate-200 dark:border-border-dark mx-2"></div>
+<div class="flex items-center gap-3">
+<button class="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-neutral-dark text-slate-500 transition-colors">
+<span class="material-symbols-outlined">search</span>
+</button>
+<button class="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-neutral-dark text-slate-500 transition-colors">
+<span class="material-symbols-outlined">more_horiz</span>
+</button>
+</div>
+</div>
+</header>
+<!-- Chat View -->
+<div class="flex-1 overflow-y-auto p-8 space-y-8 scroll-smooth">
+<!-- User Message -->
+<div class="flex justify-end items-start gap-4">
+<div class="flex flex-col items-end gap-2 max-w-2xl">
+<div class="text-[10px] font-bold text-slate-500 uppercase tracking-widest px-2">Developer</div>
+<div class="bg-primary text-white p-4 rounded-2xl rounded-tr-none shadow-md">
+<p class="text-sm font-medium leading-relaxed">Help me create 15 dashboard designs</p>
+</div>
+</div>
+<div class="w-10 h-10 rounded-full bg-slate-200 dark:bg-neutral-dark overflow-hidden flex-shrink-0 border-2 border-primary/20">
+<img class="w-full h-full object-cover" data-alt="User profile avatar portrait" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBG6N7ngaKrVTa1KQOYgQp-TuSsHrhO8p64bNJenpLLDTZPtVeuDRZCxuTLdzPSW3ykMovcchPEaDgaNdb2f1USUFUEYCxZbdFXin7h3susy_VCk-2A_s4ePcUHByQR4Nawi_LYXsvhcZ5Iu2pK5pIcRazLqQW3M7MKsDAJoSkvaMdr0GFCty68Jj6l5VWgqMXJd00VWgcS3S5tTZYwAVS6ktF1uRbI8yvREX2VRARDLmNPMdfdq3yNLEx0Kaq7f-tSUaSb_jT0TAA"/>
+</div>
+</div>
+<!-- Agent Message -->
+<div class="flex justify-start items-start gap-4">
+<div class="w-10 h-10 rounded-full bg-primary flex items-center justify-center text-white flex-shrink-0 border-2 border-primary/20">
+<span class="material-symbols-outlined">smart_toy</span>
+</div>
+<div class="flex flex-col items-start gap-2 max-w-3xl">
+<div class="text-[10px] font-bold text-primary uppercase tracking-widest px-2">Orchestrator</div>
+<div class="bg-white dark:bg-neutral-dark border border-slate-200 dark:border-border-dark p-5 rounded-2xl rounded-tl-none shadow-sm">
+<p class="text-sm text-slate-700 dark:text-slate-300 leading-relaxed mb-4">
+                            Acknowledged. Initializing dashboard generation sequence. Spawning 15 worker agents to handle individual UI layouts. Tracking progress in <code class="bg-primary/10 text-primary px-1.5 py-0.5 rounded font-mono text-xs">worker_status.json</code>.
+                        </p>
+<!-- System Logs Terminal -->
+<div class="mt-6 rounded-xl overflow-hidden border border-slate-200 dark:border-border-dark bg-slate-900 shadow-2xl terminal-glow">
+<div class="bg-slate-800 px-4 py-2 flex items-center justify-between border-b border-slate-700">
+<div class="flex items-center gap-2">
+<div class="w-3 h-3 rounded-full bg-red-500/80"></div>
+<div class="w-3 h-3 rounded-full bg-amber-500/80"></div>
+<div class="w-3 h-3 rounded-full bg-emerald-500/80"></div>
+<span class="ml-2 text-[10px] font-bold text-slate-400 uppercase tracking-widest font-display">System Logs</span>
+</div>
+<span class="text-[10px] font-mono text-slate-500">zsh — 80x24</span>
+</div>
+<div class="p-4 font-mono text-xs space-y-1.5">
+<p class="text-emerald-400">[2023-10-27 14:22:01] INFO: Initializing orchestrator kernel...</p>
+<p class="text-slate-400">[2023-10-27 14:22:02] INFO: Target directory /outputs/dashboards created successfully.</p>
+<p class="text-amber-400">[2023-10-27 14:22:03] WARN: Memory pressure detected, optimizing agent allocation.</p>
+<p class="text-slate-300">[2023-10-27 14:22:05] EXEC: spawn agent_001..agent_015</p>
+<div class="flex items-center gap-2 text-primary pt-1">
+<span class="animate-pulse">_</span>
+<span class="text-slate-500">Listening for worker updates...</span>
+</div>
+</div>
+</div>
+<!-- Code Block -->
+<div class="mt-4 rounded-xl overflow-hidden border border-slate-200 dark:border-border-dark bg-[#1e1e1e]">
+<div class="bg-[#2d2d2d] px-4 py-2 flex items-center justify-between border-b border-white/5">
+<span class="text-[10px] font-mono text-slate-400">worker_status.json</span>
+<span class="material-symbols-outlined text-sm text-slate-500 cursor-pointer hover:text-white transition-colors">content_copy</span>
+</div>
+<pre class="p-4 font-mono text-xs overflow-x-auto text-emerald-300"><code>{
+  "session_id": "1773279004490272-0",
+  "total_agents": 15,
+  "active_agents": 15,
+  "status": "PROVISIONING",
+  "workers": [
+    { "id": "W-001", "task": "Analytics Dashboard", "progress": 12 },
+    { "id": "W-002", "task": "E-commerce CRM", "progress": 8 },
+    { "id": "W-003", "task": "SaaS Platform", "progress": 0 }
+  ]
+}</code></pre>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- Input Area -->
+<div class="p-6 bg-white dark:bg-background-dark border-t border-slate-200 dark:border-border-dark">
+<div class="max-w-4xl mx-auto">
+<div class="relative flex items-center bg-slate-100 dark:bg-neutral-dark rounded-2xl border border-slate-200 dark:border-border-dark focus-within:border-primary transition-all p-2 pr-3">
+<div class="flex items-center gap-3 pl-4 pr-2 text-primary">
+<span class="material-symbols-outlined text-xl">terminal</span>
+<span class="font-mono text-sm font-bold opacity-50">$</span>
+</div>
+<input class="flex-1 bg-transparent border-none focus:ring-0 text-sm font-mono text-slate-700 dark:text-slate-300 placeholder:text-slate-500" placeholder="Type a command or message to dispatch..." type="text"/>
+<div class="flex items-center gap-2">
+<button class="p-2 text-slate-400 hover:text-primary transition-colors">
+<span class="material-symbols-outlined">attach_file</span>
+</button>
+<button class="bg-primary hover:bg-primary/90 text-white flex items-center gap-2 px-5 py-2.5 rounded-xl font-bold text-sm shadow-lg shadow-primary/20 transition-all">
+<span>Dispatch</span>
+<span class="material-symbols-outlined text-sm">send</span>
+</button>
+</div>
+</div>
+<div class="mt-3 flex items-center justify-center gap-6">
+<div class="flex items-center gap-1.5 text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+<kbd class="px-1.5 py-0.5 bg-slate-200 dark:bg-neutral-dark rounded text-slate-600 dark:text-slate-400">⌘</kbd>
+<kbd class="px-1.5 py-0.5 bg-slate-200 dark:bg-neutral-dark rounded text-slate-600 dark:text-slate-400">Enter</kbd>
+<span>to send</span>
+</div>
+<div class="flex items-center gap-1.5 text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+<kbd class="px-1.5 py-0.5 bg-slate-200 dark:bg-neutral-dark rounded text-slate-600 dark:text-slate-400">/</kbd>
+<span>for commands</span>
+</div>
+</div>
+</div>
+</div>
+</main>
+</div>
+</body></html>
