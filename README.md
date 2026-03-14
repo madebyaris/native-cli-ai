@@ -106,6 +106,16 @@ Current tool-running path supports:
 - Stream modes: `off`, `human`, `ndjson`
 - Permission modes: `default`, `plan`, `accept-edits`, `dont-ask`, `bypass-permissions`
 
+## Use As An Orchestrated Worker
+
+`nca` can be launched as a subprocess by external orchestrators such as Paperclip wrappers.
+
+- Use `run --stream off --json` for a final structured result.
+- Use `run --stream ndjson` or `attach` for live event envelopes on stdout.
+- Use `spawn --json`, `status --json`, `sessions --json`, and `cancel --json` for machine-readable session control.
+- Prefer `--permission-mode dont-ask` or `--permission-mode bypass-permissions` for headless runs. If a headless run hits a tool that would require approval, `nca` now fails loudly instead of hanging.
+- Optional orchestration metadata can be injected through `NCA_ORCH_*` environment variables. See `docs/orchestration.md` for the exact contract.
+
 ## Claude Code Parity Roadmap
 
 Follow-up parity work is planned for:
@@ -131,6 +141,7 @@ Follow-up parity work is planned for:
 - [Product Requirements](docs/prd.md)
 - [Tech Stack](docs/tech-stack.md)
 - [Architecture](docs/architecture.md)
+- [Orchestration Contract](docs/orchestration.md)
 
 ## License
 

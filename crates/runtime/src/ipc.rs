@@ -1,4 +1,4 @@
-use nca_common::event::{AgentCommand, AgentEvent};
+use nca_common::event::{AgentCommand, EventEnvelope};
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -72,7 +72,7 @@ impl IpcHandle {
         &self.socket_path
     }
 
-    pub async fn broadcast(&self, event: &AgentEvent) -> Result<(), IpcError> {
+    pub async fn broadcast(&self, event: &EventEnvelope) -> Result<(), IpcError> {
         let line = serde_json::to_string(event)
             .map_err(|err| IpcError::ConnectionFailed(err.to_string()))?;
         let _ = self.event_tx.send(line);
@@ -104,7 +104,7 @@ impl IpcClient {
         Self { socket_path }
     }
 
-    pub async fn connect(&self) -> Result<mpsc::Receiver<AgentEvent>, IpcError> {
+    pub async fn connect(&self) -> Result<mpsc::Receiver<EventEnvelope>, IpcError> {
         let stream = UnixStream::connect(&self.socket_path)
             .await
             .map_err(|err| IpcError::ConnectionFailed(err.to_string()))?;
@@ -113,7 +113,7 @@ impl IpcClient {
             let reader = BufReader::new(stream);
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                if let Ok(event) = serde_json::from_str::<AgentEvent>(&line) {
+                if let Ok(event) = serde_json::from_str::<EventEnvelope>(&line) {
                     if tx.send(event).await.is_err() {
                         break;
                     }

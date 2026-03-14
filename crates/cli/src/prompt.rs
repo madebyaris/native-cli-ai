@@ -23,4 +23,8 @@ impl NcaPrompt {
             "nca> "
         }
     }
+
+    pub fn multiline_prompt_string(&self) -> &str {
+        "... "
+    }
 }

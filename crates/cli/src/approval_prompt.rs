@@ -56,10 +56,6 @@ impl IpcApprovalHandler {
             pending: Arc::new(Mutex::new(HashMap::new())),
         })
     }
-
-    pub fn pending(&self) -> Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>> {
-        self.pending.clone()
-    }
 }
 
 #[async_trait::async_trait]
@@ -82,20 +78,5 @@ impl ApprovalHandler for IpcApprovalHandler {
                 stdio.resolve(call, description).await
             }
         }
-    }
-}
-
-pub struct AutoDenyApprovalHandler;
-
-impl AutoDenyApprovalHandler {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self)
-    }
-}
-
-#[async_trait::async_trait]
-impl ApprovalHandler for AutoDenyApprovalHandler {
-    async fn resolve(&self, _call: &ToolCall, _description: &str) -> bool {
-        false
     }
 }

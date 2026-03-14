@@ -19,6 +19,8 @@ globset = "0.4"
 async-trait = "0.1"
 scraper = "0.23"
 futures-util = "0.3"
+serde_yaml = "0.9.34"
+mcpr = "0.2.3"
 
 [dev-dependencies]
 tempfile = "3"

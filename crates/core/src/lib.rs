@@ -3,5 +3,7 @@ pub mod approval;
 pub mod code_intel;
 pub mod cost;
 pub mod harness;
+pub mod hooks;
 pub mod provider;
+pub mod skills;
 pub mod tools;

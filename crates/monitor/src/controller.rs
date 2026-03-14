@@ -1,6 +1,6 @@
 //! Live attach to running sessions: connect, stream events to UI thread, reconnect with backoff.
 
-use nca_common::event::{AgentCommand, AgentEvent};
+use nca_common::event::{AgentCommand, AgentEvent, EventEnvelope};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -75,7 +75,7 @@ impl LiveAttachController {
             match client.connect().await {
                 Ok(mut rx) => {
                     backoff_secs = 1;
-                    while let Some(event) = rx.recv().await {
+                    while let Some(EventEnvelope { event, .. }) = rx.recv().await {
                         if stop.load(Ordering::SeqCst) {
                             break;
                         }

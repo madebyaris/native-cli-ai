@@ -14,6 +14,16 @@ pub struct EventEnvelope {
     pub event: AgentEvent,
 }
 
+impl EventEnvelope {
+    pub fn new(id: u64, event: AgentEvent) -> Self {
+        Self {
+            id,
+            ts: Some(Utc::now()),
+            event,
+        }
+    }
+}
+
 /// Events emitted by the agent runtime, broadcast over IPC to CLI and monitor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]

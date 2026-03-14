@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -10,6 +11,9 @@ pub struct NcaConfig {
     pub permissions: PermissionConfig,
     pub session: SessionConfig,
     pub harness: HarnessConfig,
+    pub mcp: McpConfig,
+    pub memory: MemoryConfig,
+    pub hooks: HookConfig,
     pub web: WebConfig,
 }
 
@@ -21,6 +25,9 @@ impl Default for NcaConfig {
             permissions: PermissionConfig::default(),
             session: SessionConfig::default(),
             harness: HarnessConfig::default(),
+            mcp: McpConfig::default(),
+            memory: MemoryConfig::default(),
+            hooks: HookConfig::default(),
             web: WebConfig::default(),
         }
     }
@@ -125,6 +132,15 @@ impl NcaConfig {
         if let Some(harness) = partial.harness {
             self.harness.merge(harness);
         }
+        if let Some(mcp) = partial.mcp {
+            self.mcp.merge(mcp);
+        }
+        if let Some(memory) = partial.memory {
+            self.memory.merge(memory);
+        }
+        if let Some(hooks) = partial.hooks {
+            self.hooks.merge(hooks);
+        }
         if let Some(web) = partial.web {
             self.web.merge(web);
         }
@@ -136,8 +152,9 @@ impl NcaConfig {
         }
 
         if let Ok(model) = env::var("NCA_MODEL") {
-            self.model.default_model = model.clone();
-            self.provider.minimax.model = model;
+            let resolved = self.model.resolve_alias(&model);
+            self.model.default_model = resolved.clone();
+            self.provider.minimax.model = resolved;
         }
 
         if let Ok(api_key) = env::var("MINIMAX_API_KEY") {
@@ -150,6 +167,10 @@ impl NcaConfig {
 
         if let Ok(model) = env::var("MINIMAX_MODEL") {
             self.provider.minimax.model = model;
+        }
+
+        if let Ok(memory_path) = env::var("NCA_MEMORY_PATH") {
+            self.memory.file_path = PathBuf::from(memory_path);
         }
 
         if let Ok(timeout_secs) = env::var("NCA_WEB_TIMEOUT_SECS") {
@@ -337,6 +358,8 @@ pub struct ModelConfig {
     pub max_tokens: u32,
     pub enable_thinking: bool,
     pub thinking_budget: u32,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub aliases: BTreeMap<String, String>,
 }
 
 impl Default for ModelConfig {
@@ -346,6 +369,7 @@ impl Default for ModelConfig {
             max_tokens: 8192,
             enable_thinking: false,
             thinking_budget: 5120,
+            aliases: default_model_aliases(),
         }
     }
 }
@@ -364,6 +388,22 @@ impl ModelConfig {
         if let Some(thinking_budget) = partial.thinking_budget {
             self.thinking_budget = thinking_budget;
         }
+        if let Some(aliases) = partial.aliases {
+            self.aliases = aliases;
+        }
+    }
+
+    pub fn resolve_alias(&self, raw: &str) -> String {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return self.default_model.clone();
+        }
+
+        let lowered = trimmed.to_ascii_lowercase();
+        self.aliases
+            .get(&lowered)
+            .cloned()
+            .unwrap_or_else(|| trimmed.to_string())
     }
 }
 
@@ -432,6 +472,67 @@ pub struct HarnessConfig {
     pub built_in_enabled: bool,
     pub project_instructions_path: PathBuf,
     pub local_instructions_path: PathBuf,
+    pub skill_directories: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpConfig {
+    #[serde(default)]
+    pub expose_in_safe_mode: bool,
+    #[serde(default)]
+    pub servers: Vec<McpServerConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryConfig {
+    pub file_path: PathBuf,
+    #[serde(default = "default_max_memory_notes")]
+    pub max_notes: usize,
+    #[serde(default)]
+    pub auto_compact_on_finish: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HookConfig {
+    #[serde(default)]
+    pub session_start: Vec<HookCommand>,
+    #[serde(default)]
+    pub session_end: Vec<HookCommand>,
+    #[serde(default)]
+    pub pre_tool_use: Vec<HookCommand>,
+    #[serde(default)]
+    pub post_tool_use: Vec<HookCommand>,
+    #[serde(default)]
+    pub post_tool_failure: Vec<HookCommand>,
+    #[serde(default)]
+    pub approval_requested: Vec<HookCommand>,
+    #[serde(default)]
+    pub subagent_start: Vec<HookCommand>,
+    #[serde(default)]
+    pub subagent_stop: Vec<HookCommand>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookCommand {
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matcher: Option<String>,
+    #[serde(default)]
+    pub blocking: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -476,6 +577,7 @@ impl Default for HarnessConfig {
             built_in_enabled: true,
             project_instructions_path: PathBuf::from(".ncarc"),
             local_instructions_path: PathBuf::from(".nca/instructions.md"),
+            skill_directories: default_skill_directories(),
         }
     }
 }
@@ -490,6 +592,82 @@ impl HarnessConfig {
         }
         if let Some(path) = partial.local_instructions_path {
             self.local_instructions_path = path;
+        }
+        if let Some(skill_directories) = partial.skill_directories {
+            self.skill_directories = skill_directories;
+        }
+    }
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            expose_in_safe_mode: false,
+            servers: Vec::new(),
+        }
+    }
+}
+
+impl McpConfig {
+    fn merge(&mut self, partial: PartialMcpConfig) {
+        if let Some(expose_in_safe_mode) = partial.expose_in_safe_mode {
+            self.expose_in_safe_mode = expose_in_safe_mode;
+        }
+        if let Some(servers) = partial.servers {
+            self.servers = servers;
+        }
+    }
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            file_path: PathBuf::from(".nca/memory.json"),
+            max_notes: default_max_memory_notes(),
+            auto_compact_on_finish: false,
+        }
+    }
+}
+
+impl MemoryConfig {
+    fn merge(&mut self, partial: PartialMemoryConfig) {
+        if let Some(file_path) = partial.file_path {
+            self.file_path = file_path;
+        }
+        if let Some(max_notes) = partial.max_notes {
+            self.max_notes = max_notes;
+        }
+        if let Some(auto_compact_on_finish) = partial.auto_compact_on_finish {
+            self.auto_compact_on_finish = auto_compact_on_finish;
+        }
+    }
+}
+
+impl HookConfig {
+    fn merge(&mut self, partial: PartialHookConfig) {
+        if let Some(session_start) = partial.session_start {
+            self.session_start = session_start;
+        }
+        if let Some(session_end) = partial.session_end {
+            self.session_end = session_end;
+        }
+        if let Some(pre_tool_use) = partial.pre_tool_use {
+            self.pre_tool_use = pre_tool_use;
+        }
+        if let Some(post_tool_use) = partial.post_tool_use {
+            self.post_tool_use = post_tool_use;
+        }
+        if let Some(post_tool_failure) = partial.post_tool_failure {
+            self.post_tool_failure = post_tool_failure;
+        }
+        if let Some(approval_requested) = partial.approval_requested {
+            self.approval_requested = approval_requested;
+        }
+        if let Some(subagent_start) = partial.subagent_start {
+            self.subagent_start = subagent_start;
+        }
+        if let Some(subagent_stop) = partial.subagent_stop {
+            self.subagent_stop = subagent_stop;
         }
     }
 }
@@ -518,6 +696,9 @@ struct PartialNcaConfig {
     permissions: Option<PartialPermissionConfig>,
     session: Option<PartialSessionConfig>,
     harness: Option<PartialHarnessConfig>,
+    mcp: Option<PartialMcpConfig>,
+    memory: Option<PartialMemoryConfig>,
+    hooks: Option<PartialHookConfig>,
     web: Option<PartialWebConfig>,
 }
 
@@ -542,6 +723,7 @@ struct PartialModelConfig {
     max_tokens: Option<u32>,
     enable_thinking: Option<bool>,
     thinking_budget: Option<u32>,
+    aliases: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -565,6 +747,32 @@ struct PartialHarnessConfig {
     built_in_enabled: Option<bool>,
     project_instructions_path: Option<PathBuf>,
     local_instructions_path: Option<PathBuf>,
+    skill_directories: Option<Vec<PathBuf>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialMcpConfig {
+    expose_in_safe_mode: Option<bool>,
+    servers: Option<Vec<McpServerConfig>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialMemoryConfig {
+    file_path: Option<PathBuf>,
+    max_notes: Option<usize>,
+    auto_compact_on_finish: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialHookConfig {
+    session_start: Option<Vec<HookCommand>>,
+    session_end: Option<Vec<HookCommand>>,
+    pre_tool_use: Option<Vec<HookCommand>>,
+    post_tool_use: Option<Vec<HookCommand>>,
+    post_tool_failure: Option<Vec<HookCommand>>,
+    approval_requested: Option<Vec<HookCommand>>,
+    subagent_start: Option<Vec<HookCommand>>,
+    subagent_stop: Option<Vec<HookCommand>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -573,4 +781,29 @@ struct PartialWebConfig {
     max_fetch_chars: Option<usize>,
     default_search_limit: Option<usize>,
     user_agent: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_max_memory_notes() -> usize {
+    128
+}
+
+fn default_model_aliases() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("default".into(), "MiniMax-M2.5".into()),
+        ("minimax".into(), "MiniMax-M2.5".into()),
+        ("m2.5".into(), "MiniMax-M2.5".into()),
+        ("coding".into(), "MiniMax-M2.5".into()),
+        ("reasoning".into(), "MiniMax-M2.5".into()),
+    ])
+}
+
+fn default_skill_directories() -> Vec<PathBuf> {
+    vec![
+        PathBuf::from(".nca/skills"),
+        PathBuf::from(".claude/skills"),
+    ]
 }

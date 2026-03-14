@@ -1,6 +1,7 @@
 use crate::approval_prompt::IpcApprovalHandler;
 use nca_common::config::{NcaConfig, PermissionMode};
 use nca_common::event::{AgentEvent, EndReason};
+use nca_common::session::{OrchestrationContext, SessionSnapshot};
 use nca_core::approval::ApprovalHandler;
 use nca_core::provider::ProviderError;
 use nca_core::tools::spawn_subagent::SpawnRequest;
@@ -70,18 +71,6 @@ impl SessionRuntime {
         &self.supervisor.agent().messages
     }
 
-    pub fn request_cancel(&self) {
-        self.supervisor.request_cancel();
-    }
-
-    pub fn cancel_handle(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
-        self.supervisor.cancel_handle()
-    }
-
-    pub fn event_tx(&self) -> Option<tokio::sync::mpsc::Sender<AgentEvent>> {
-        self.supervisor.event_tx()
-    }
-
     pub fn set_model(&mut self, model: impl Into<String>) {
         let model = model.into();
         self.supervisor.model = model.clone();
@@ -106,6 +95,26 @@ impl SessionRuntime {
     pub fn config(&self) -> &NcaConfig {
         &self.config
     }
+
+    pub fn snapshot(&self) -> SessionSnapshot {
+        self.supervisor.snapshot()
+    }
+
+    pub fn compact_summary(&self) -> String {
+        self.supervisor.compact_summary()
+    }
+
+    pub fn set_session_summary(&mut self, summary: Option<String>) {
+        self.supervisor.set_session_summary(summary);
+    }
+
+    pub async fn append_memory_note(&self, kind: &str, content: Option<String>) -> Result<(), String> {
+        self.supervisor.append_memory_note(kind, content).await
+    }
+
+    pub fn memory_store_path(&self) -> std::path::PathBuf {
+        self.supervisor.memory_store_path()
+    }
 }
 
 pub async fn build_session_runtime(
@@ -115,6 +124,7 @@ pub async fn build_session_runtime(
     interactive_approvals: bool,
     session_id: Option<String>,
     ipc_approval_handler: Option<Arc<IpcApprovalHandler>>,
+    orchestration_context: Option<OrchestrationContext>,
 ) -> Result<SessionRuntime, ProviderError> {
     let approval_handler: Option<Arc<dyn ApprovalHandler>> =
         ipc_approval_handler.map(|h| h as Arc<dyn ApprovalHandler>);
@@ -126,6 +136,7 @@ pub async fn build_session_runtime(
         interactive_approvals,
         session_id,
         approval_handler,
+        orchestration_context,
     })
     .await?;
 

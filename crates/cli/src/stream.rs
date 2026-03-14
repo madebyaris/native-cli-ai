@@ -1,4 +1,4 @@
-use nca_common::event::AgentEvent;
+use nca_common::event::{AgentEvent, EventEnvelope};
 use nca_runtime::ipc::IpcHandle;
 use nca_runtime::supervisor;
 use std::collections::HashMap;
@@ -42,15 +42,15 @@ pub fn spawn_event_fanout_task(
     log_path: std::path::PathBuf,
     event_tx_ipc: Option<tokio::sync::broadcast::Sender<String>>,
 ) -> tokio::task::JoinHandle<()> {
-    let on_event: Option<Box<dyn Fn(&AgentEvent) + Send>> = match mode {
+    let on_event: Option<Box<dyn Fn(&EventEnvelope) + Send>> = match mode {
         StreamMode::Off => None,
-        StreamMode::Ndjson => Some(Box::new(|event: &AgentEvent| {
-            if let Ok(line) = serde_json::to_string(event) {
+        StreamMode::Ndjson => Some(Box::new(|envelope: &EventEnvelope| {
+            if let Ok(line) = serde_json::to_string(envelope) {
                 println!("{line}");
             }
         })),
-        StreamMode::Human => Some(Box::new(|event: &AgentEvent| {
-            render_human_event(event);
+        StreamMode::Human => Some(Box::new(|envelope: &EventEnvelope| {
+            render_human_event(&envelope.event);
         })),
     };
 
@@ -71,18 +71,15 @@ pub fn spawn_event_fanout_task(
         let mut event_id: u64 = 0;
         let mut rx = rx;
         while let Some(event) = rx.recv().await {
+            event_id += 1;
+            let envelope = EventEnvelope::new(event_id, event);
+
             if let Some(ref ipc) = ipc_handle_rebuilt {
-                let line = serde_json::to_string(&event).unwrap_or_default();
+                let line = serde_json::to_string(&envelope).unwrap_or_default();
                 let _ = ipc.event_tx.send(line);
             }
 
             if let Some(file) = log_file.as_mut() {
-                event_id += 1;
-                let envelope = EventEnvelope {
-                    id: event_id,
-                    ts: Some(chrono::Utc::now()),
-                    event: event.clone(),
-                };
                 if let Ok(line) = serde_json::to_string(&envelope) {
                     let _ = file.write_all(line.as_bytes()).await;
                     let _ = file.write_all(b"\n").await;
@@ -90,7 +87,7 @@ pub fn spawn_event_fanout_task(
             }
 
             if let Some(ref cb) = on_event {
-                cb(&event);
+                cb(&envelope);
             }
         }
     })

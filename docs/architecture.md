@@ -160,6 +160,7 @@ The system prompt is layered by `core::harness::build_system_prompt`:
 1. built-in harness prompt
 2. project instructions from `.ncarc`
 3. local instructions from `.nca/instructions.md`
+4. optional orchestration metadata from `NCA_ORCH_*`
 
 ```mermaid
 sequenceDiagram
@@ -197,7 +198,7 @@ sequenceDiagram
 Provider responses are streamed token-by-token via `tokio::sync::mpsc` using MiniMax SSE. The CLI can render:
 
 - human-readable live progress
-- NDJSON event stream mode
+- NDJSON `EventEnvelope` stream mode
 - no stream, with only final output
 
 Tool-use blocks are collected, executed by the registry, and replayed to MiniMax as `tool` messages until a final assistant response is produced.
@@ -212,7 +213,7 @@ The runtime exposes a Unix domain socket at `$XDG_RUNTIME_DIR/nca/<session-id>.s
 
 - **Transport**: Unix stream socket, newline-delimited JSON.
 - **Direction**: The runtime is the server. CLI and monitor are clients.
-- **Messages**: Every `AgentEvent` from `common::event` is serialized and broadcast to all connected clients.
+- **Messages**: Every `AgentEvent` from `common::event` is wrapped in `EventEnvelope` and serialized to all connected clients. Persisted logs and live IPC use the same machine-readable shape.
 
 ```mermaid
 flowchart LR

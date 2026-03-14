@@ -300,6 +300,7 @@ impl DesktopApp {
             workspace_root: workspace_root.clone(),
             safe_mode: self.composer.safe_mode,
             initial_prompt: Some(self.composer.prompt.clone()),
+            orchestration_context: None,
             kind: ServiceSessionKind::New { session_id: None },
         }) {
             Ok(handle) => {
@@ -354,6 +355,7 @@ impl DesktopApp {
             workspace_root: meta.workspace.clone(),
             safe_mode: false,
             initial_prompt: None,
+            orchestration_context: None,
             kind: ServiceSessionKind::Resume {
                 session_id: meta.id.clone(),
             },

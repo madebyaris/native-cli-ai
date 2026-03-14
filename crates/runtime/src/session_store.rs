@@ -1,4 +1,4 @@
-use nca_common::session::SessionState;
+use nca_common::session::{SessionSnapshot, SessionState};
 use std::path::{Path, PathBuf};
 
 /// Persists and loads session state to/from disk.
@@ -40,6 +40,13 @@ impl SessionStore {
             .map_err(|e| SessionStoreError::Io(e.to_string()))?;
 
         serde_json::from_str(&json).map_err(|e| SessionStoreError::Deserialize(e.to_string()))
+    }
+
+    pub async fn load_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Result<SessionSnapshot, SessionStoreError> {
+        self.load(session_id).await.map(|session| session.snapshot())
     }
 
     pub async fn list(&self) -> Result<Vec<String>, SessionStoreError> {

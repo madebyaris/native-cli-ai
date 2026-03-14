@@ -11,6 +11,7 @@ pub trait ApprovalHandler: Send + Sync {
 pub struct ApprovalPolicy {
     config: PermissionConfig,
     handler: Option<Arc<dyn ApprovalHandler>>,
+    fail_on_ask: bool,
 }
 
 impl ApprovalPolicy {
@@ -18,11 +19,17 @@ impl ApprovalPolicy {
         Self {
             config,
             handler: None,
+            fail_on_ask: false,
         }
     }
 
     pub fn with_handler(mut self, handler: Arc<dyn ApprovalHandler>) -> Self {
         self.handler = Some(handler);
+        self
+    }
+
+    pub fn fail_on_ask(mut self) -> Self {
+        self.fail_on_ask = true;
         self
     }
 
@@ -113,6 +120,10 @@ impl ApprovalPolicy {
             Some(handler) => handler.resolve(call, description).await,
             None => false,
         }
+    }
+
+    pub fn should_fail_on_ask(&self) -> bool {
+        self.fail_on_ask
     }
 
     pub fn mode(&self) -> PermissionMode {

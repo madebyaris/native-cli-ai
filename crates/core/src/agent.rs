@@ -2,11 +2,13 @@ use futures_util::future::join_all;
 use nca_common::event::AgentEvent;
 use nca_common::message::{Message, MessageToolCall};
 use nca_common::tool::{PermissionTier, ToolCall, ToolDefinition, ToolResult};
+use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::approval::ApprovalPolicy;
 use crate::cost::CostTracker;
+use crate::hooks::{HookEventKind, HookRunner};
 use crate::provider::{Provider, ProviderError, StreamChunk};
 use crate::tools::ToolRegistry;
 
@@ -23,6 +25,7 @@ pub struct AgentLoop {
     max_tool_calls_per_turn: u32,
     checkpoint_interval: u32,
     cancel_flag: Arc<AtomicBool>,
+    hooks: Option<HookRunner>,
 }
 
 impl AgentLoop {
@@ -35,6 +38,7 @@ impl AgentLoop {
         max_turns: u32,
         max_tool_calls_per_turn: u32,
         checkpoint_interval: u32,
+        hooks: Option<HookRunner>,
     ) -> Self {
         Self {
             provider,
@@ -48,6 +52,7 @@ impl AgentLoop {
             max_tool_calls_per_turn,
             checkpoint_interval,
             cancel_flag: Arc::new(AtomicBool::new(false)),
+            hooks,
         }
     }
 
@@ -233,6 +238,20 @@ impl AgentLoop {
                             description: description.clone(),
                         })
                         .await;
+                        if let Some(hooks) = &self.hooks {
+                            hooks
+                                .run_best_effort(
+                                    HookEventKind::ApprovalRequested,
+                                    Some(&call.name),
+                                    &json!({
+                                        "call_id": call.id.clone(),
+                                        "tool": call.name.clone(),
+                                        "input": call.input.clone(),
+                                        "description": description,
+                                    }),
+                                )
+                                .await;
+                        }
                         let approved = self.approval.resolve(call, &description).await;
                         self.emit(AgentEvent::ApprovalResolved {
                             call_id: call.id.clone(),
@@ -241,8 +260,41 @@ impl AgentLoop {
                         .await;
 
                         if approved {
+                            if let Some(hooks) = &self.hooks {
+                                if let Err(reason) = hooks
+                                    .run(
+                                        HookEventKind::PreToolUse,
+                                        Some(&call.name),
+                                        &json!({
+                                            "call_id": call.id.clone(),
+                                            "tool": call.name.clone(),
+                                            "input": call.input.clone(),
+                                        }),
+                                    )
+                                    .await
+                                {
+                                    tickets.push(Ticket::Resolved(ToolResult {
+                                        call_id: call.id.clone(),
+                                        success: false,
+                                        output: String::new(),
+                                        error: Some(reason),
+                                    }));
+                                    continue;
+                                }
+                            }
                             tickets.push(Ticket::Execute(call.clone()));
                         } else {
+                            if self.approval.should_fail_on_ask() {
+                                let message = format!(
+                                    "tool `{}` requires approval in headless mode; rerun with a non-interactive permission mode such as `dont-ask` or `bypass-permissions`",
+                                    call.name
+                                );
+                                self.emit(AgentEvent::Error {
+                                    message: message.clone(),
+                                })
+                                .await;
+                                return Err(ProviderError::Other(message));
+                            }
                             tickets.push(Ticket::Resolved(ToolResult {
                                 call_id: call.id.clone(),
                                 success: false,
@@ -256,6 +308,28 @@ impl AgentLoop {
                     }
 
                     PermissionTier::Allowed => {
+                        if let Some(hooks) = &self.hooks {
+                            if let Err(reason) = hooks
+                                .run(
+                                    HookEventKind::PreToolUse,
+                                    Some(&call.name),
+                                    &json!({
+                                        "call_id": call.id.clone(),
+                                        "tool": call.name.clone(),
+                                        "input": call.input.clone(),
+                                    }),
+                                )
+                                .await
+                            {
+                                tickets.push(Ticket::Resolved(ToolResult {
+                                    call_id: call.id.clone(),
+                                    success: false,
+                                    output: String::new(),
+                                    error: Some(reason),
+                                }));
+                                continue;
+                            }
+                        }
                         tickets.push(Ticket::Execute(call.clone()));
                     }
                 }
@@ -304,6 +378,33 @@ impl AgentLoop {
                 }
             }
 
+            let mut final_results = Vec::new();
+            for result in results.into_iter().flatten() {
+                final_results.push(result);
+            }
+
+            if let Some(hooks) = &self.hooks {
+                for result in &final_results {
+                    let hook_event = if result.success {
+                        HookEventKind::PostToolUse
+                    } else {
+                        HookEventKind::PostToolFailure
+                    };
+                    hooks
+                        .run_best_effort(
+                            hook_event,
+                            None,
+                            &json!({
+                                "call_id": result.call_id,
+                                "success": result.success,
+                                "output": result.output,
+                                "error": result.error,
+                            }),
+                        )
+                        .await;
+                }
+            }
+
             // ── Phase 3: push results to history + emit events (in original order) ──
             if self.checkpoint_interval > 0 && n as u32 >= self.checkpoint_interval {
                 self.emit(AgentEvent::Checkpoint {
@@ -314,7 +415,7 @@ impl AgentLoop {
                 .await;
             }
 
-            for result in results.into_iter().flatten() {
+            for result in final_results {
                 self.messages.push(Message::tool(
                     result.call_id.clone(),
                     format_tool_result(&result),

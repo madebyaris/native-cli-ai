@@ -1,17 +1,23 @@
 use crate::ipc::{IpcHandle, IpcServer};
+use crate::memory_store::{MemoryNote, MemoryStore};
 use crate::pty::PtyManager;
 use crate::session_store::SessionStore;
 use chrono::Utc;
 use nca_common::config::NcaConfig;
 use nca_common::event::{AgentCommand, AgentEvent, EndReason, EventEnvelope};
-use nca_common::session::{SessionMeta, SessionState, SessionStatus};
+use nca_common::session::{
+    OrchestrationContext, SessionMeta, SessionSnapshot, SessionState, SessionStatus,
+};
 use nca_core::agent::AgentLoop;
 use nca_core::approval::{ApprovalHandler, ApprovalPolicy};
 use nca_core::harness::build_system_prompt;
+use nca_core::hooks::{HookEventKind, HookRunner};
 use nca_core::provider::ProviderError;
 use nca_core::provider::factory::build_provider;
+use nca_core::tools::mcp::load_mcp_tools;
 use nca_core::tools::ToolRegistry;
 use nca_core::tools::spawn_subagent::{SpawnRequest, SpawnSubagentTool};
+use serde_json::json;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -36,7 +42,6 @@ pub struct Supervisor {
     ipc_handle: Option<IpcHandle>,
     event_rx: Option<mpsc::Receiver<AgentEvent>>,
     approval_pending: Option<Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>>,
-    cancel_tx: Option<oneshot::Sender<()>>,
     spawn_rx: Option<mpsc::Receiver<SpawnRequest>>,
     worktree_path: Option<PathBuf>,
     branch: Option<String>,
@@ -45,6 +50,10 @@ pub struct Supervisor {
     child_session_ids: Vec<String>,
     inherited_summary: Option<String>,
     spawn_reason: Option<String>,
+    session_summary: Option<String>,
+    orchestration: Option<OrchestrationContext>,
+    config: NcaConfig,
+    hooks: Option<HookRunner>,
 }
 
 /// Configuration for creating a new supervised session.
@@ -55,6 +64,7 @@ pub struct SupervisorConfig {
     pub interactive_approvals: bool,
     pub session_id: Option<String>,
     pub approval_handler: Option<Arc<dyn ApprovalHandler>>,
+    pub orchestration_context: Option<OrchestrationContext>,
 }
 
 /// A handle returned to callers for interacting with a running supervisor.
@@ -112,6 +122,16 @@ impl Supervisor {
         } else {
             ToolRegistry::with_default_full_tools(workspace_root.clone(), config.web.clone())
         };
+        if !config.mcp.servers.is_empty() && (!cfg.safe_mode || config.mcp.expose_in_safe_mode) {
+            match load_mcp_tools(&workspace_root, &config.mcp.servers) {
+                Ok(mcp_tools) => {
+                    for tool in mcp_tools {
+                        tools.register(tool);
+                    }
+                }
+                Err(error) => tracing::warn!("failed to load MCP tools: {}", error),
+            }
+        }
 
         let pty = Arc::new(PtyManager::new(&workspace_root));
         tools.register(Box::new(crate::bash_tool::RuntimeBashTool::new(pty)));
@@ -138,6 +158,7 @@ impl Supervisor {
         } else {
             approval_pending = None;
             ApprovalPolicy::new(config.permissions.clone())
+                .fail_on_ask()
                 .with_handler(Arc::new(AutoDenyHandler) as Arc<dyn ApprovalHandler>)
         };
 
@@ -159,6 +180,10 @@ impl Supervisor {
         });
 
         let created_at = Utc::now();
+        let hook_runner = {
+            let runner = HookRunner::new(config.hooks.clone());
+            runner.has_any().then_some(runner)
+        };
         let mut agent = AgentLoop::new(
             provider,
             tools,
@@ -168,14 +193,16 @@ impl Supervisor {
             config.session.max_turns_per_run,
             config.session.max_tool_calls_per_turn,
             config.session.checkpoint_interval,
+            hook_runner.clone(),
         );
-        let system_prompt = build_system_prompt(&config, &workspace_root);
+        let system_prompt =
+            build_system_prompt(&config, &workspace_root, cfg.orchestration_context.as_ref());
         agent.set_system_prompt(system_prompt);
 
         let sup = Self {
             session_id,
             workspace_root,
-            model: config.model.default_model,
+            model: config.model.default_model.clone(),
             created_at,
             status: SessionStatus::Running,
             pid: Some(std::process::id()),
@@ -185,7 +212,6 @@ impl Supervisor {
             ipc_handle: Some(ipc_handle),
             event_rx: Some(event_rx),
             approval_pending,
-            cancel_tx: None,
             spawn_rx: Some(spawn_rx),
             worktree_path: None,
             branch: None,
@@ -194,8 +220,14 @@ impl Supervisor {
             child_session_ids: Vec::new(),
             inherited_summary: None,
             spawn_reason: None,
+            session_summary: None,
+            orchestration: cfg.orchestration_context,
+            config,
+            hooks: hook_runner,
         };
         sup.save().await.map_err(|e| ProviderError::Other(e))?;
+        sup.run_session_hook(HookEventKind::SessionStart, json!(sup.snapshot()))
+            .await;
         Ok(sup)
     }
 
@@ -215,6 +247,7 @@ impl Supervisor {
             interactive_approvals,
             session_id: Some(session_id.into()),
             approval_handler: None,
+            orchestration_context: None,
         })
         .await?;
 
@@ -240,6 +273,8 @@ impl Supervisor {
         sup.child_session_ids = loaded.meta.child_session_ids;
         sup.inherited_summary = loaded.meta.inherited_summary;
         sup.spawn_reason = loaded.meta.spawn_reason;
+        sup.session_summary = loaded.meta.session_summary;
+        sup.orchestration = loaded.meta.orchestration;
         Ok(sup)
     }
 
@@ -267,6 +302,7 @@ impl Supervisor {
 
     pub async fn run_turn(&mut self, prompt: &str) -> Result<String, ProviderError> {
         let output = self.agent.run_turn(prompt).await?;
+        self.refresh_session_summary();
         self.save().await.map_err(|e| ProviderError::Other(e))?;
         Ok(output)
     }
@@ -278,18 +314,41 @@ impl Supervisor {
             EndReason::Cancelled => SessionStatus::Cancelled,
         };
         if let Some(tx) = self.agent.event_sender() {
-            let _ = tx.send(AgentEvent::SessionEnded { reason }).await;
+            let _ = tx
+                .send(AgentEvent::SessionEnded {
+                    reason: reason.clone(),
+                })
+                .await;
         }
+        self.refresh_session_summary();
+        if self.config.memory.auto_compact_on_finish {
+            let _ = self.append_memory_note("session-summary", self.session_summary.clone()).await;
+        }
+        self.run_session_hook(
+            HookEventKind::SessionEnd,
+            json!({
+                "reason": format!("{reason:?}"),
+                "session": self.snapshot(),
+            }),
+        )
+        .await;
         let _ = self.save().await;
     }
 
     pub async fn save(&self) -> Result<(), String> {
-        let now = Utc::now();
-        let session = SessionState {
+        let session = self.current_session_state(Utc::now());
+        self.session_store
+            .save(&session)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    fn current_session_state(&self, updated_at: chrono::DateTime<Utc>) -> SessionState {
+        SessionState {
             meta: SessionMeta {
                 id: self.session_id.clone(),
                 created_at: self.created_at,
-                updated_at: now,
+                updated_at,
                 workspace: self.workspace_root.clone(),
                 model: self.model.clone(),
                 status: self.status.clone(),
@@ -302,16 +361,57 @@ impl Supervisor {
                 child_session_ids: self.child_session_ids.clone(),
                 inherited_summary: self.inherited_summary.clone(),
                 spawn_reason: self.spawn_reason.clone(),
+                session_summary: self.session_summary.clone(),
+                orchestration: self.orchestration.clone(),
             },
             messages: self.agent.messages.clone(),
             total_input_tokens: self.agent.cost_tracker.input_tokens,
             total_output_tokens: self.agent.cost_tracker.output_tokens,
             estimated_cost_usd: self.agent.cost_tracker.estimated_cost_usd(),
+        }
+    }
+
+    pub fn snapshot(&self) -> SessionSnapshot {
+        self.current_session_state(Utc::now()).snapshot()
+    }
+
+    pub fn compact_summary(&self) -> String {
+        build_parent_summary(&self.agent.messages)
+    }
+
+    pub fn set_session_summary(&mut self, summary: Option<String>) {
+        self.session_summary = summary.filter(|summary| !summary.trim().is_empty());
+    }
+
+    pub async fn append_memory_note(
+        &self,
+        kind: &str,
+        content: Option<String>,
+    ) -> Result<(), String> {
+        let content = content
+            .map(|content| content.trim().to_string())
+            .filter(|content| !content.is_empty())
+            .ok_or_else(|| "memory note content is empty".to_string())?;
+        let store = MemoryStore::new(self.memory_store_path());
+        let note = MemoryNote {
+            id: format!("{}-{}", kind, Utc::now().timestamp_millis()),
+            created_at: Utc::now(),
+            kind: kind.to_string(),
+            title: Some(self.session_id.clone()),
+            content,
         };
-        self.session_store
-            .save(&session)
+        store
+            .append_note(note, self.config.memory.max_notes)
             .await
-            .map_err(|e| e.to_string())
+            .map(|_| ())
+    }
+
+    pub fn memory_store_path(&self) -> PathBuf {
+        if self.config.memory.file_path.is_absolute() {
+            self.config.memory.file_path.clone()
+        } else {
+            self.workspace_root.join(&self.config.memory.file_path)
+        }
     }
 
     pub fn session_id(&self) -> &str {
@@ -373,6 +473,16 @@ impl Supervisor {
     pub fn session_store(&self) -> &SessionStore {
         &self.session_store
     }
+
+    fn refresh_session_summary(&mut self) {
+        self.set_session_summary(Some(self.compact_summary()));
+    }
+
+    async fn run_session_hook(&self, event: HookEventKind, payload: serde_json::Value) {
+        if let Some(hooks) = &self.hooks {
+            hooks.run_best_effort(event, None, &payload).await;
+        }
+    }
 }
 
 /// Spawns the event fanout task: writes events to disk as `EventEnvelope`,
@@ -381,7 +491,7 @@ pub fn spawn_event_fanout(
     mut event_rx: mpsc::Receiver<AgentEvent>,
     log_path: PathBuf,
     ipc_handle: Option<IpcHandle>,
-    on_event: Option<Box<dyn Fn(&AgentEvent) + Send>>,
+    on_event: Option<Box<dyn Fn(&EventEnvelope) + Send>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let (event_tx, _command_rx) = match ipc_handle {
@@ -401,18 +511,14 @@ pub fn spawn_event_fanout(
 
         let mut event_id: u64 = 0;
         while let Some(event) = event_rx.recv().await {
+            event_id += 1;
+            let envelope = EventEnvelope::new(event_id, event);
             if let Some(ref tx) = event_tx {
-                let line = serde_json::to_string(&event).unwrap_or_default();
+                let line = serde_json::to_string(&envelope).unwrap_or_default();
                 let _ = tx.send(line);
             }
 
             if let Some(file) = log_file.as_mut() {
-                event_id += 1;
-                let envelope = EventEnvelope {
-                    id: event_id,
-                    ts: Some(Utc::now()),
-                    event: event.clone(),
-                };
                 if let Ok(line) = serde_json::to_string(&envelope) {
                     let _ = file.write_all(line.as_bytes()).await;
                     let _ = file.write_all(b"\n").await;
@@ -420,7 +526,7 @@ pub fn spawn_event_fanout(
             }
 
             if let Some(ref cb) = on_event {
-                cb(&event);
+                cb(&envelope);
             }
         }
     })
@@ -724,6 +830,23 @@ pub fn spawn_subagent_consumer(
             };
 
             tokio::spawn(async move {
+                let hook_runner = {
+                    let runner = HookRunner::new(child_cfg.config.hooks.clone());
+                    runner.has_any().then_some(runner)
+                };
+                if let Some(hooks) = &hook_runner {
+                    hooks
+                        .run_best_effort(
+                            HookEventKind::SubagentStart,
+                            None,
+                            &json!({
+                                "parent_session_id": parent_session_id.clone(),
+                                "task": child_cfg.task.clone(),
+                                "workspace": child_cfg.workspace_root.clone(),
+                            }),
+                        )
+                        .await;
+                }
                 let result = spawn_child_session(child_cfg, event_tx.clone()).await;
                 match result {
                     Ok(res) => {
@@ -743,6 +866,19 @@ pub fn spawn_subagent_consumer(
                                 })
                                 .await;
                         }
+                        if let Some(hooks) = &hook_runner {
+                            hooks
+                                .run_best_effort(
+                                    HookEventKind::SubagentStop,
+                                    None,
+                                    &json!({
+                                        "parent_session_id": parent_session_id.clone(),
+                                        "child_session_id": res.child_session_id.clone(),
+                                        "status": res.status.clone(),
+                                    }),
+                                )
+                                .await;
+                        }
                         let response = nca_core::tools::spawn_subagent::SpawnResponse {
                             child_session_id: res.child_session_id,
                             status: res.status,
@@ -754,6 +890,19 @@ pub fn spawn_subagent_consumer(
                         let _ = req.reply.send(response);
                     }
                     Err(e) => {
+                        if let Some(hooks) = &hook_runner {
+                            hooks
+                                .run_best_effort(
+                                    HookEventKind::SubagentStop,
+                                    None,
+                                    &json!({
+                                        "parent_session_id": parent_session_id.clone(),
+                                        "status": "error",
+                                        "error": e.clone(),
+                                    }),
+                                )
+                                .await;
+                        }
                         if let Some(ref tx) = event_tx {
                             let _ = tx
                                 .send(AgentEvent::Error {
@@ -867,6 +1016,7 @@ pub async fn spawn_child_session(
         interactive_approvals: false,
         session_id: None,
         approval_handler: Some(Arc::new(AutoDenyHandler) as Arc<dyn ApprovalHandler>),
+        orchestration_context: None,
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -1039,6 +1189,8 @@ mod tests {
                 child_session_ids: Vec::new(),
                 inherited_summary: None,
                 spawn_reason: None,
+                session_summary: None,
+                orchestration: None,
             },
             messages: Vec::new(),
             total_input_tokens: 0,

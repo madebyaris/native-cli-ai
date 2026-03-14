@@ -2,6 +2,7 @@ use assert_cmd::Command;
 use chrono::{Duration, Utc};
 use nca_common::message::Message;
 use nca_common::session::{SessionMeta, SessionState, SessionStatus};
+use serde_json::Value;
 use std::fs;
 use std::path::Path;
 use tempfile::tempdir;
@@ -43,6 +44,8 @@ fn write_session(
             child_session_ids: Vec::new(),
             inherited_summary: None,
             spawn_reason: None,
+            session_summary: None,
+            orchestration: None,
         },
         messages: vec![Message::user("hello")],
         total_input_tokens: 0,
@@ -52,6 +55,12 @@ fn write_session(
 
     let json = serde_json::to_string_pretty(&session).expect("serialize session");
     fs::write(sessions_dir.join(format!("{id}.json")), json).expect("write session");
+}
+
+fn write_event_log(workspace: &Path, id: &str, lines: &str) {
+    let sessions_dir = workspace.join(".nca").join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+    fs::write(sessions_dir.join(format!("{id}.events.jsonl")), lines).expect("write event log");
 }
 
 #[test]
@@ -70,6 +79,7 @@ fn run_without_config_exits_nonzero() {
         .arg("off")
         .assert()
         .failure()
+        .code(10)
         .stderr(predicates::str::contains("missing MiniMax API key"));
 }
 
@@ -100,7 +110,8 @@ fn sessions_lists_newest_saved_sessions_first_with_status() {
         .arg("sessions")
         .assert()
         .success()
-        .stdout(predicates::str::contains("session-newer\tCancelled\nsession-older\tCompleted"));
+        .stdout(predicates::str::contains("session-newer  status=Cancelled"))
+        .stdout(predicates::str::contains("session-older  status=Completed"));
 }
 
 #[test]
@@ -133,4 +144,170 @@ fn top_level_resume_uses_latest_session() {
         .assert()
         .success()
         .stdout(predicates::str::contains("session=session-newer"));
+}
+
+#[test]
+fn sessions_json_emits_sorted_machine_snapshots() {
+    let temp = tempdir().expect("tempdir");
+    let now = Utc::now();
+
+    write_session(
+        temp.path(),
+        "session-older",
+        now - Duration::minutes(5),
+        "MiniMax-M2.5",
+        SessionStatus::Completed,
+    );
+    write_session(
+        temp.path(),
+        "session-newer",
+        now,
+        "MiniMax-M2.5",
+        SessionStatus::Running,
+    );
+
+    let output = Command::cargo_bin("nca")
+        .expect("binary")
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .arg("sessions")
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let payload: Value = serde_json::from_slice(&output).expect("json");
+    let sessions = payload["sessions"].as_array().expect("sessions array");
+    assert_eq!(sessions[0]["id"], "session-newer");
+    assert_eq!(sessions[0]["status"], "running");
+    assert_eq!(sessions[1]["id"], "session-older");
+    assert!(payload["unreadable"].as_array().expect("unreadable array").is_empty());
+}
+
+#[test]
+fn status_outputs_session_snapshot_json() {
+    let temp = tempdir().expect("tempdir");
+    let now = Utc::now();
+    write_session(
+        temp.path(),
+        "session-status",
+        now,
+        "MiniMax-M2.5",
+        SessionStatus::Completed,
+    );
+
+    let output = Command::cargo_bin("nca")
+        .expect("binary")
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .arg("status")
+        .arg("session-status")
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let payload: Value = serde_json::from_slice(&output).expect("json");
+    assert_eq!(payload["id"], "session-status");
+    assert_eq!(payload["status"], "completed");
+    assert_eq!(payload["model"], "MiniMax-M2.5");
+    assert_eq!(payload["estimated_cost_usd"], 0.0);
+}
+
+#[test]
+fn cancel_json_updates_session_snapshot() {
+    let temp = tempdir().expect("tempdir");
+    let now = Utc::now();
+    write_session(
+        temp.path(),
+        "session-cancel",
+        now,
+        "MiniMax-M2.5",
+        SessionStatus::Running,
+    );
+
+    let output = Command::cargo_bin("nca")
+        .expect("binary")
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .arg("cancel")
+        .arg("session-cancel")
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let payload: Value = serde_json::from_slice(&output).expect("json");
+    assert_eq!(payload["cancelled"], true);
+    assert_eq!(payload["session"]["status"], "cancelled");
+}
+
+#[test]
+fn attach_falls_back_to_enveloped_event_log() {
+    let temp = tempdir().expect("tempdir");
+    let now = Utc::now();
+    write_session(
+        temp.path(),
+        "session-log",
+        now,
+        "MiniMax-M2.5",
+        SessionStatus::Completed,
+    );
+    write_event_log(
+        temp.path(),
+        "session-log",
+        "{\"id\":1,\"ts\":\"2026-03-14T00:00:00Z\",\"event\":{\"type\":\"SessionEnded\",\"reason\":\"Completed\"}}\n",
+    );
+
+    Command::cargo_bin("nca")
+        .expect("binary")
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .arg("attach")
+        .arg("session-log")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("\"event\":{\"type\":\"SessionEnded\""));
+}
+
+#[test]
+fn spawn_json_reports_machine_paths() {
+    let temp = tempdir().expect("tempdir");
+
+    let output = Command::cargo_bin("nca")
+        .expect("binary")
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .arg("spawn")
+        .arg("--prompt")
+        .arg("hello")
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let payload: Value = serde_json::from_slice(&output).expect("json");
+    let session_id = payload["session_id"].as_str().expect("session id");
+    assert!(session_id.starts_with("session-"));
+    assert!(
+        payload["spawn_log_path"]
+            .as_str()
+            .expect("spawn log path")
+            .ends_with(".spawn.log")
+    );
+    assert!(
+        payload["event_log_path"]
+            .as_str()
+            .expect("event log path")
+            .ends_with(".events.jsonl")
+    );
 }

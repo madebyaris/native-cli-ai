@@ -5,6 +5,7 @@ use crate::supervisor::{
 };
 use nca_common::config::NcaConfig;
 use nca_common::event::{AgentEvent, EndReason, EventEnvelope};
+use nca_common::session::OrchestrationContext;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc as std_mpsc;
@@ -25,6 +26,7 @@ pub struct ServiceSessionRequest {
     pub workspace_root: PathBuf,
     pub safe_mode: bool,
     pub initial_prompt: Option<String>,
+    pub orchestration_context: Option<OrchestrationContext>,
     pub kind: ServiceSessionKind,
 }
 
@@ -99,6 +101,7 @@ async fn run_service_session_with_startup(
             interactive_approvals: true,
             session_id: session_id.clone(),
             approval_handler: None,
+            orchestration_context: request.orchestration_context.clone(),
         })
         .await,
         ServiceSessionKind::Resume { session_id } => {
@@ -267,18 +270,14 @@ fn spawn_service_event_fanout(
 
         let mut event_id: u64 = 0;
         while let Some(event) = event_rx.recv().await {
+            event_id += 1;
+            let envelope = EventEnvelope::new(event_id, event);
             if let Some(ref tx) = event_tx_ipc {
-                let line = serde_json::to_string(&event).unwrap_or_default();
+                let line = serde_json::to_string(&envelope).unwrap_or_default();
                 let _ = tx.send(line);
             }
 
             if let Some(file) = log_file.as_mut() {
-                event_id += 1;
-                let envelope = EventEnvelope {
-                    id: event_id,
-                    ts: Some(chrono::Utc::now()),
-                    event: event.clone(),
-                };
                 if let Ok(line) = serde_json::to_string(&envelope) {
                     let _ = file.write_all(line.as_bytes()).await;
                     let _ = file.write_all(b"\n").await;
