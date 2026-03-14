@@ -1,99 +1,102 @@
 # nca - Native CLI AI
 
-A Rust-native AI coding assistant for the terminal. No JavaScript, no webview, single binary.
+![nca hero](docs/images/nca-readme-hero.png)
 
-## Toolchain
+Rust-native AI agent orchestration for people who want a real CLI worker, not another web wrapper.
 
-This workspace uses Rust edition 2024. Use a recent toolchain (Rust/Cargo that supports edition 2024) before building.
+`nca` is built to harness the CLI as the execution layer for serious agent workflows: run foreground tasks, spawn background sessions, stream machine-readable events, attach later, and supervise everything from a native monitor. No JavaScript, no Electron, no browser dependency, just Rust and a sharp subprocess contract.
+
+## Why Try It
+
+- Rust-native stack from top to bottom.
+- MiniMax-first by default, with compatibility for OpenAI, Anthropic/Claude, and OpenRouter.
+- Headless-friendly JSON and NDJSON surfaces for orchestration systems.
+- Background sessions, event logs, attachable runs, and isolated child-agent worktrees.
+- Native desktop monitor with session visibility instead of a bolted-on web dashboard.
+
+## Product Direction
+
+The current focus is not just "a coding CLI."
+
+- `nca` is being shaped into an orchestration-grade CLI worker.
+- `nca-monitor` is the native oversight surface for watching, reviewing, and steering those runs.
+- The harness is opinionated toward plan-first execution, fail-loud behavior, and structured session lineage.
+
+If you want to wire an agent into a bigger control plane, this repo is aiming directly at that use case.
 
 ## Quick Start
 
-```bash
-# Build the workspace
-cargo build --workspace
+This workspace uses Rust edition 2024, so use a recent Rust toolchain first.
 
-# Configure MiniMax
+```bash
+# Build release binaries
+cargo build --release
+
+# Install locally
+cp target/release/nca /usr/local/bin/
+cp target/release/nca-monitor /usr/local/bin/
+
+# Configure MiniMax (default provider)
 export MINIMAX_API_KEY="your-api-key"
 
-# Run the CLI
-cargo run -p nca-cli
+# Start the interactive CLI
+nca
 
-# Run with explicit interactive profile
-cargo run -p nca-cli -- --run
+# Run a one-shot task
+nca run --prompt "Explain this repository" --stream human
 
-# Run mode supports slash commands
-# /help /status /model /permissions /sessions /exit
+# Spawn a background worker
+nca spawn --prompt "Inspect the repo and draft a plan"
 
-# Run a one-shot MiniMax prompt
-cargo run -p nca-cli -- --prompt "Explain this repository"
+# Inspect and attach
+nca sessions
+nca status <session_id>
+nca attach <session_id>
 
-# Preferred command form
-cargo run -p nca-cli -- run --prompt "Build a login page" --stream human
-
-# Override model in run/spawn/resume surfaces
-cargo run -p nca-cli -- run --prompt "Review code" --model MiniMax-M2.5
-cargo run -p nca-cli -- spawn --prompt "Implement tests" --model MiniMax-M2.5
-cargo run -p nca-cli -- resume <session_id> --model MiniMax-M2.5
-
-# Run in safe mode (read/search/list only)
-cargo run -p nca-cli -- --safe
-
-# Inspect only, no edits or shell execution
-cargo run -p nca-cli -- run --permission-mode plan --prompt "Review this repo"
-
-# Spawn a background session
-cargo run -p nca-cli -- spawn --prompt "Inspect the repo and draft a plan"
-
-# List and resume sessions
-cargo run -p nca-cli -- sessions
-cargo run -p nca-cli -- resume <session_id>
-cargo run -p nca-cli -- logs <session_id>
-cargo run -p nca-cli -- status <session_id>
-cargo run -p nca-cli -- attach <session_id>
-cargo run -p nca-cli -- cancel <session_id>
-
-# Run the desktop monitor (Phase 2)
-cargo run -p nca-monitor
+# Launch the native monitor
+nca-monitor
 ```
 
-MiniMax is the default provider path. The CLI loads config from `~/.nca/config.toml`,
-`.nca/config.local.toml`, and environment variables such as `MINIMAX_API_KEY`,
-`MINIMAX_BASE_URL`, and `MINIMAX_MODEL`.
+## Built For Agent Orchestration
 
-## Harness (System Prompt Layers)
+`nca` is designed to be launched by other systems, wrappers, and local control planes.
 
-nca builds a layered system prompt in this order:
+- `nca run --stream off --json` returns a final structured result.
+- `nca run --stream ndjson` streams live `EventEnvelope` updates.
+- `nca spawn --json`, `status --json`, `sessions --json`, and `cancel --json` give machine-readable lifecycle control.
+- `NCA_ORCH_*` environment variables let orchestrators inject run metadata into session state and the harness.
+- Headless approval failures fail loudly instead of hanging forever.
 
-1. Built-in base harness (always-on by default)
-2. Project instructions from `.ncarc`
-3. Local instructions from `.nca/instructions.md`
+See [Orchestration Contract](docs/orchestration.md) for the exact subprocess surface.
 
-You can commit `.ncarc` for team conventions and keep `.nca/instructions.md` local.
+## Provider Story
 
-## Tools
+- MiniMax is the default and recommended path.
+- OpenAI, Anthropic/Claude, and OpenRouter are also supported.
+- Config loads from `~/.nca/config.toml`, `.nca/config.local.toml`, and provider-specific environment variables.
+- `nca doctor` and `nca models` expose provider readiness and active model selection.
 
-Current tool-running path supports:
+Example provider environment variables:
 
-- `read_file`
-- `search_code` (ripgrep-backed)
-- `list_directory`
-- `write_file`
-- `create_directory`
-- `git_status`
-- `git_diff`
-- `query_symbols` (fast local code-intel)
-- `web_search`
-- `fetch_url`
-- `apply_patch`
-- `edit_file`
-- `rename_path`
-- `move_path`
-- `copy_path`
-- `delete_path`
-- `run_validation`
-- `execute_bash` (runtime-backed command execution; denied in `--safe`)
+- `MINIMAX_API_KEY`
+- `OPENAI_API_KEY`
+- `ANTHROPIC_API_KEY`
+- `OPENROUTER_API_KEY`
 
-## Modes
+## Harness Layers
+
+The system prompt is layered so repo defaults stay strong without blocking team or local overrides.
+
+1. Built-in harness prompt
+2. Permission mode section
+3. Project instructions from `.ncarc`
+4. Local instructions from `.nca/instructions.md`
+5. Discovered skills summary
+6. Orchestration context
+
+You can commit `.ncarc` for shared conventions and keep `.nca/instructions.md` local.
+
+## CLI Surfaces
 
 - Interactive REPL
 - One-shot `run`
@@ -106,35 +109,38 @@ Current tool-running path supports:
 - Stream modes: `off`, `human`, `ndjson`
 - Permission modes: `default`, `plan`, `accept-edits`, `dont-ask`, `bypass-permissions`
 
-## Use As An Orchestrated Worker
+## Tools
 
-`nca` can be launched as a subprocess by external orchestrators such as Paperclip wrappers.
+Current tool-running path supports:
 
-- Use `run --stream off --json` for a final structured result.
-- Use `run --stream ndjson` or `attach` for live event envelopes on stdout.
-- Use `spawn --json`, `status --json`, `sessions --json`, and `cancel --json` for machine-readable session control.
-- Prefer `--permission-mode dont-ask` or `--permission-mode bypass-permissions` for headless runs. If a headless run hits a tool that would require approval, `nca` now fails loudly instead of hanging.
-- Optional orchestration metadata can be injected through `NCA_ORCH_*` environment variables. See `docs/orchestration.md` for the exact contract.
+- `read_file`
+- `search_code`
+- `list_directory`
+- `write_file`
+- `create_directory`
+- `git_status`
+- `git_diff`
+- `query_symbols`
+- `web_search`
+- `fetch_url`
+- `apply_patch`
+- `edit_file`
+- `rename_path`
+- `move_path`
+- `copy_path`
+- `delete_path`
+- `run_validation`
+- `execute_bash`
 
-## Claude Code Parity Roadmap
-
-Follow-up parity work is planned for:
-
-- slash-command style task presets
-- custom subagents / agent profiles
-- MCP integration
-- multi-directory context similar to `--add-dir`
-- durable memory and session summaries
-
-## Project Structure
+## Workspace Layout
 
 | Crate | Description |
 |-------|-------------|
 | `crates/common` | Shared types, config, events |
-| `crates/core` | Agent loop, provider abstraction, tools |
-| `crates/runtime` | PTY, process sandbox, IPC, sessions |
-| `crates/cli` | Terminal UI and interactive REPL |
-| `crates/monitor` | Native egui desktop monitor |
+| `crates/core` | Agent loop, provider abstraction, harness, tools |
+| `crates/runtime` | IPC, session lifecycle, persistence, worktree/runtime glue |
+| `crates/cli` | Terminal entrypoint and machine-facing control plane |
+| `crates/monitor` | Native egui monitor for supervising sessions |
 
 ## Documentation
 
