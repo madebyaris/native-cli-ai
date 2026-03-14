@@ -8,10 +8,7 @@ use std::path::Path;
 use tempfile::tempdir;
 
 fn write_local_config(workspace: &Path) {
-    write_local_config_contents(
-        workspace,
-        "[provider.minimax]\napi_key = \"test-key\"\n",
-    );
+    write_local_config_contents(workspace, "[provider.minimax]\napi_key = \"test-key\"\n");
 }
 
 fn write_local_config_contents(workspace: &Path, contents: &str) {
@@ -186,7 +183,12 @@ fn sessions_json_emits_sorted_machine_snapshots() {
     assert_eq!(sessions[0]["id"], "session-newer");
     assert_eq!(sessions[0]["status"], "running");
     assert_eq!(sessions[1]["id"], "session-older");
-    assert!(payload["unreadable"].as_array().expect("unreadable array").is_empty());
+    assert!(
+        payload["unreadable"]
+            .as_array()
+            .expect("unreadable array")
+            .is_empty()
+    );
 }
 
 #[test]
@@ -277,7 +279,9 @@ fn attach_falls_back_to_enveloped_event_log() {
         .arg("--json")
         .assert()
         .success()
-        .stdout(predicates::str::contains("\"event\":{\"type\":\"SessionEnded\""));
+        .stdout(predicates::str::contains(
+            "\"event\":{\"type\":\"SessionEnded\"",
+        ));
 }
 
 #[test]

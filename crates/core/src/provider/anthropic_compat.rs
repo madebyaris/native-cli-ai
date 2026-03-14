@@ -133,8 +133,13 @@ pub fn spawn_anthropic_stream(
                         }
                     }
                     "content_block_stop" => {
-                        flush_anthropic_tool_call(&tx, &mut tool_id, &mut tool_name, &mut tool_input)
-                            .await;
+                        flush_anthropic_tool_call(
+                            &tx,
+                            &mut tool_id,
+                            &mut tool_name,
+                            &mut tool_input,
+                        )
+                        .await;
                     }
                     "message_delta" => {
                         let output_tokens = event["usage"]["output_tokens"].as_u64().unwrap_or(0);
@@ -160,10 +165,7 @@ pub fn spawn_anthropic_stream(
     rx
 }
 
-pub fn map_provider_error(
-    status: reqwest::StatusCode,
-    body_text: String,
-) -> ProviderError {
+pub fn map_provider_error(status: reqwest::StatusCode, body_text: String) -> ProviderError {
     match status.as_u16() {
         401 | 403 => ProviderError::AuthError(body_text),
         404 => ProviderError::ModelNotFound(body_text),

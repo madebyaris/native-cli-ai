@@ -159,6 +159,11 @@ pub(crate) fn render_human_event(event: &AgentEvent) {
         } => {
             eprintln!("[subagent:done] {child_session_id} status={status}");
         }
-        AgentEvent::MessageReceived { .. } | AgentEvent::CostUpdated { .. } => {}
+        AgentEvent::MessageReceived { .. }
+        | AgentEvent::CostUpdated { .. }
+        | AgentEvent::TodoStatusChanged { .. }
+        | AgentEvent::TodoAssigned { .. }
+        | AgentEvent::RunLinked { .. }
+        | AgentEvent::DesktopModeChanged { .. } => {}
     }
 }

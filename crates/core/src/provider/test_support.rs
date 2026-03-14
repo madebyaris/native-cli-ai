@@ -4,11 +4,7 @@ use tiny_http::{Header, Request, Response, Server, StatusCode};
 
 use super::StreamChunk;
 
-pub fn spawn_sse_server<F>(
-    body: String,
-    status: u16,
-    assert_request: F,
-) -> String
+pub fn spawn_sse_server<F>(body: String, status: u16, assert_request: F) -> String
 where
     F: FnOnce(&Request) + Send + 'static,
 {
@@ -33,9 +29,7 @@ where
     base_url
 }
 
-pub async fn collect_chunks(
-    mut rx: tokio::sync::mpsc::Receiver<StreamChunk>,
-) -> Vec<StreamChunk> {
+pub async fn collect_chunks(mut rx: tokio::sync::mpsc::Receiver<StreamChunk>) -> Vec<StreamChunk> {
     let mut chunks = Vec::new();
     while let Some(chunk) = rx.recv().await {
         let done = matches!(chunk, StreamChunk::Done);

@@ -122,12 +122,15 @@ The desktop app (`nca-monitor`) is the primary user interface. The CLI remains a
 ```mermaid
 flowchart LR
   DesktopApp[Desktop App] --> WorkspaceRegistry
+  DesktopApp --> CompanyProjectUi[CompanyProjectTodoAgent UI]
   DesktopApp --> SessionHub[Session Index]
   DesktopApp --> ReviewWorkbench
   WorkspaceRegistry --> LocalMetadata["~/.nca/workspaces.json"]
+  CompanyProjectUi --> OrchestratorDb["~/.nca/orchestrator.db"]
   SessionHub --> RuntimeService[Supervisor]
   RuntimeService --> AgentRuns[AgentLoop]
   RuntimeService --> EventStore[EventEnvelope logs]
+  RuntimeService --> OrchestratorStore[SQLite orchestration store]
   RuntimeService --> WorktreeManager
   ReviewWorkbench --> GitInspector[git diff/status]
   ReviewWorkbench --> MergeActions[git merge/worktree]
@@ -138,6 +141,7 @@ flowchart LR
 
 - **`runtime::supervisor`**: Reusable session lifecycle manager. Both CLI and desktop use this.
 - **`runtime::workspace_registry`**: Persisted workspace index at `~/.nca/workspaces.json`.
+- **`runtime::orchestrator_store`**: SQLite-backed local store for companies, projects, todos, agents, mode preference, and run links.
 - **`runtime::worktree`**: Isolated git worktree creation, cleanup, and merge per agent run.
 - **`runtime::bash_tool`**: PTY-backed bash execution, registered by the supervisor.
 - **`monitor::workspaces`**: Desktop workspace view-model and navigation.
@@ -351,6 +355,12 @@ Sessions are stored as JSON files in `.nca/sessions/<session-id>.json`:
   "estimated_cost_usd": 0.042
 }
 ```
+
+The desktop orchestration layer uses a hybrid persistence model:
+
+- `~/.nca/orchestrator.db` stores companies, projects, todos, agent profiles, run links, and desktop mode preference.
+- `<workspace>/.nca/sessions/*.json` stores session snapshots and conversation state.
+- `<workspace>/.nca/sessions/*.events.jsonl` stores append-only event streams for replay and live attach.
 
 ### Lifecycle
 

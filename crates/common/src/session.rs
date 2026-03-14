@@ -222,7 +222,10 @@ mod tests {
             ctx.callback_url.as_deref(),
             Some("http://localhost/callback")
         );
-        assert_eq!(ctx.metadata.get("channel").map(String::as_str), Some("ticket"));
+        assert_eq!(
+            ctx.metadata.get("channel").map(String::as_str),
+            Some("ticket")
+        );
 
         for (key, _) in vars {
             unsafe { env::remove_var(key) };

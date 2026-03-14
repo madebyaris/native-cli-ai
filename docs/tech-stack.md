@@ -129,6 +129,20 @@ This document records every dependency choice, the rationale behind it, and the 
 
 ---
 
+## Local Persistence
+
+| Crate | Version | Role |
+|-------|---------|------|
+| `rusqlite` | 0.38.x | SQLite-backed orchestration store for companies, projects, todos, agents, and run links |
+
+**Why SQLite + rusqlite**: The desktop now needs relational local data for company/project/todo/agent orchestration without introducing a server or a hosted database. SQLite keeps setup zero-admin on macOS/Linux, while `rusqlite` is the simplest direct Rust integration for a local embedded control-plane store.
+
+**Hybrid model**: SQLite is the source of truth for orchestration entities and relationships. Session transcripts and event logs stay as JSON/JSONL artifacts in workspace-local `.nca/sessions/` folders.
+
+**Rejected for now**: Postgres (too much infrastructure for a local-first desktop), monitor-only JSON files (poor relational querying), fully remote control-plane storage (premature for the native desktop path).
+
+---
+
 ## Filesystem and Search
 
 | Crate | Version | Role |

@@ -102,15 +102,15 @@ A separate `nca-monitor` binary (egui) connects to one or more running nca sessi
 - Markdown-rendered responses with syntax highlighting in the terminal
 - Token usage and cost tracking per session
 - Colored diffs for file changes
+- Native desktop monitor with company/project/todo/agent orchestration views
+- Local orchestration persistence for companies, projects, todos, agents, and linked runs
 
 ### Out of Scope for MVP
 
-- Desktop monitor app (Phase 2)
 - MCP server/client integration (Phase 3)
 - Tmux session management (Phase 3)
 - Full language-server-backed LSP mode (phased after fast local code-intel)
 - Image/vision input (Phase 4)
-- Multi-agent orchestration (Phase 4)
 - Plugin/extension system (Phase 4)
 - Remote/SSH agent execution (Future)
 

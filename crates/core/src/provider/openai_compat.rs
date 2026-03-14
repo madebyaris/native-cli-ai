@@ -151,10 +151,7 @@ pub fn spawn_openai_stream(
     rx
 }
 
-pub fn map_provider_error(
-    status: reqwest::StatusCode,
-    body_text: String,
-) -> ProviderError {
+pub fn map_provider_error(status: reqwest::StatusCode, body_text: String) -> ProviderError {
     match status.as_u16() {
         401 | 403 => ProviderError::AuthError(body_text),
         404 => ProviderError::ModelNotFound(body_text),

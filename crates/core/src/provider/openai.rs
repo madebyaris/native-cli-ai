@@ -68,8 +68,13 @@ impl Provider for OpenAiProvider {
             model.to_string()
         };
 
-        let body =
-            openai_request_body(messages, tools, &model, self.max_tokens, self.config.temperature);
+        let body = openai_request_body(
+            messages,
+            tools,
+            &model,
+            self.max_tokens,
+            self.config.temperature,
+        );
 
         let response = self
             .client
@@ -143,8 +148,16 @@ mod tests {
 
         let chunks = collect_chunks(stream).await;
         assert!(matches!(&chunks[0], StreamChunk::TextDelta(text) if text == "Hello "));
-        assert!(matches!(&chunks[1], StreamChunk::ToolUse(call) if call.id == "call_1" && call.name == "lookup" && call.input == json!({"path":"src"})));
-        assert!(matches!(&chunks[2], StreamChunk::Usage { input_tokens: 11, output_tokens: 7 }));
+        assert!(
+            matches!(&chunks[1], StreamChunk::ToolUse(call) if call.id == "call_1" && call.name == "lookup" && call.input == json!({"path":"src"}))
+        );
+        assert!(matches!(
+            &chunks[2],
+            StreamChunk::Usage {
+                input_tokens: 11,
+                output_tokens: 7
+            }
+        ));
         assert!(matches!(chunks.last(), Some(StreamChunk::Done)));
     }
 }

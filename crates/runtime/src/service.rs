@@ -5,19 +5,22 @@ use crate::supervisor::{
 };
 use nca_common::config::NcaConfig;
 use nca_common::event::{AgentEvent, EndReason, EventEnvelope};
+use nca_common::orchestration::{
+    AgentProfile, AgentProfileId, Company, DesktopMode, DesktopModePreference, LinkRunRequest,
+    NewAgentProfile, NewCompany, NewProject, NewTodo, OrchestrationSnapshot, Project,
+    RunLaunchContext, RunLink, Todo, TodoId, TodoStatus,
+};
 use nca_common::session::OrchestrationContext;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc as std_mpsc;
 
+use crate::orchestrator_store::OrchestratorStore;
+
 #[derive(Debug, Clone)]
 pub enum ServiceSessionKind {
-    New {
-        session_id: Option<String>,
-    },
-    Resume {
-        session_id: String,
-    },
+    New { session_id: Option<String> },
+    Resume { session_id: String },
 }
 
 #[derive(Debug, Clone)]
@@ -27,6 +30,7 @@ pub struct ServiceSessionRequest {
     pub safe_mode: bool,
     pub initial_prompt: Option<String>,
     pub orchestration_context: Option<OrchestrationContext>,
+    pub launch_context: Option<RunLaunchContext>,
     pub kind: ServiceSessionKind,
 }
 
@@ -94,16 +98,18 @@ async fn run_service_session_with_startup(
     startup_tx: Option<std_mpsc::Sender<Result<ServiceSessionInfo, String>>>,
 ) -> Result<(), String> {
     let mut supervisor = match &request.kind {
-        ServiceSessionKind::New { session_id } => Supervisor::create(SupervisorConfig {
-            config: request.config.clone(),
-            workspace_root: request.workspace_root.clone(),
-            safe_mode: request.safe_mode,
-            interactive_approvals: true,
-            session_id: session_id.clone(),
-            approval_handler: None,
-            orchestration_context: request.orchestration_context.clone(),
-        })
-        .await,
+        ServiceSessionKind::New { session_id } => {
+            Supervisor::create(SupervisorConfig {
+                config: request.config.clone(),
+                workspace_root: request.workspace_root.clone(),
+                safe_mode: request.safe_mode,
+                interactive_approvals: true,
+                session_id: session_id.clone(),
+                approval_handler: None,
+                orchestration_context: request.orchestration_context.clone(),
+            })
+            .await
+        }
         ServiceSessionKind::Resume { session_id } => {
             Supervisor::resume(
                 request.config.clone(),
@@ -125,6 +131,19 @@ async fn run_service_session_with_startup(
         socket_path: handle.socket_path.clone(),
         event_log_path: handle.event_log_path.clone(),
     };
+
+    if let Some(launch) = request.launch_context.clone() {
+        let _ = OrchestrationService::default().link_run(LinkRunRequest {
+            todo_id: launch.todo_id,
+            agent_id: launch.agent_id,
+            session_id: info.session_id.clone(),
+            workspace_root: info.workspace_root.clone(),
+            worktree_path: None,
+            branch: None,
+            parent_session_id: None,
+            status: nca_common::session::SessionStatus::Running,
+        });
+    }
 
     if let Some(tx) = startup_tx {
         let _ = tx.send(Ok(info.clone()));
@@ -241,7 +260,14 @@ async fn run_service_session_with_startup(
         }
     }
 
-    supervisor.finish(reason).await;
+    supervisor.finish(reason.clone()).await;
+    let final_status = match reason {
+        EndReason::Completed => nca_common::session::SessionStatus::Completed,
+        EndReason::Error => nca_common::session::SessionStatus::Error,
+        EndReason::Cancelled => nca_common::session::SessionStatus::Cancelled,
+        EndReason::UserExit => nca_common::session::SessionStatus::Cancelled,
+    };
+    let _ = OrchestrationService::default().touch_run_status(&info.session_id, final_status);
     fanout_task.abort();
     if let Some(task) = command_task {
         task.abort();
@@ -285,4 +311,70 @@ fn spawn_service_event_fanout(
             }
         }
     })
+}
+
+pub struct OrchestrationService {
+    store: OrchestratorStore,
+}
+
+impl OrchestrationService {
+    pub fn new(store: OrchestratorStore) -> Self {
+        Self { store }
+    }
+
+    pub fn default() -> Self {
+        Self::new(OrchestratorStore::default())
+    }
+
+    pub fn load_snapshot(&self) -> Result<OrchestrationSnapshot, String> {
+        self.store.load_snapshot()
+    }
+
+    pub fn load_mode(&self) -> Result<DesktopModePreference, String> {
+        self.store.load_mode()
+    }
+
+    pub fn save_mode(&self, mode: DesktopMode) -> Result<DesktopModePreference, String> {
+        self.store.save_mode(mode)
+    }
+
+    pub fn create_company(&self, input: NewCompany) -> Result<Company, String> {
+        self.store.create_company(input)
+    }
+
+    pub fn create_project(&self, input: NewProject) -> Result<Project, String> {
+        self.store.create_project(input)
+    }
+
+    pub fn create_todo(&self, input: NewTodo) -> Result<Todo, String> {
+        self.store.create_todo(input)
+    }
+
+    pub fn create_agent_profile(&self, input: NewAgentProfile) -> Result<AgentProfile, String> {
+        self.store.create_agent_profile(input)
+    }
+
+    pub fn assign_todo(
+        &self,
+        todo_id: &TodoId,
+        agent_id: Option<&AgentProfileId>,
+    ) -> Result<(), String> {
+        self.store.assign_todo(todo_id, agent_id)
+    }
+
+    pub fn update_todo_status(&self, todo_id: &TodoId, status: TodoStatus) -> Result<(), String> {
+        self.store.update_todo_status(todo_id, status)
+    }
+
+    pub fn link_run(&self, request: LinkRunRequest) -> Result<RunLink, String> {
+        self.store.link_run(request)
+    }
+
+    pub fn touch_run_status(
+        &self,
+        session_id: &str,
+        status: nca_common::session::SessionStatus,
+    ) -> Result<(), String> {
+        self.store.touch_run_status(session_id, status)
+    }
 }

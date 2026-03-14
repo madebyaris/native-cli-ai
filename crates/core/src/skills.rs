@@ -64,7 +64,10 @@ impl SkillCatalog {
                     continue;
                 }
                 if let Ok(skill) = parse_skill_file(&skill_file) {
-                    if !skills.iter().any(|existing: &Skill| existing.command == skill.command) {
+                    if !skills
+                        .iter()
+                        .any(|existing: &Skill| existing.command == skill.command)
+                    {
                         skills.push(skill);
                     }
                 }
@@ -114,8 +117,8 @@ impl Skill {
 }
 
 fn parse_skill_file(path: &Path) -> Result<Skill, String> {
-    let raw =
-        std::fs::read_to_string(path).map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    let raw = std::fs::read_to_string(path)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
     let directory = path
         .parent()
         .map(Path::to_path_buf)
@@ -127,10 +130,14 @@ fn parse_skill_file(path: &Path) -> Result<Skill, String> {
         .to_string();
 
     let (frontmatter, body) = split_frontmatter(&raw)?;
-    let command = frontmatter
-        .command
-        .clone()
-        .unwrap_or_else(|| slugify(&frontmatter.name.clone().unwrap_or_else(|| file_stem.clone())));
+    let command = frontmatter.command.clone().unwrap_or_else(|| {
+        slugify(
+            &frontmatter
+                .name
+                .clone()
+                .unwrap_or_else(|| file_stem.clone()),
+        )
+    });
     Ok(Skill {
         name: frontmatter.name.unwrap_or(file_stem),
         description: frontmatter.description,

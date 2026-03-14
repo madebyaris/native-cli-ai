@@ -359,12 +359,10 @@ impl AgentLoop {
                 .collect();
 
             if !to_execute.is_empty() {
-                let futs = to_execute
-                    .iter()
-                    .map(|(i, call)| {
-                        let fut = self.tools.execute(call);
-                        async move { (*i, fut.await) }
-                    });
+                let futs = to_execute.iter().map(|(i, call)| {
+                    let fut = self.tools.execute(call);
+                    async move { (*i, fut.await) }
+                });
                 let executed: Vec<(usize, ToolResult)> = join_all(futs).await;
                 for (i, result) in executed {
                     results[i] = Some(result);

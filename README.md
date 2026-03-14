@@ -20,6 +20,7 @@ The current focus is not just "a coding CLI."
 
 - `nca` is being shaped into an orchestration-grade CLI worker.
 - `nca-monitor` is the native oversight surface for watching, reviewing, and steering those runs.
+- `nca-monitor` now supports two desktop directions on the same backend: `Company AI` and `Project AI`.
 - The harness is opinionated toward plan-first execution, fail-loud behavior, and structured session lineage.
 
 If you want to wire an agent into a bigger control plane, this repo is aiming directly at that use case.
@@ -66,6 +67,11 @@ nca-monitor
 - `nca spawn --json`, `status --json`, `sessions --json`, and `cancel --json` give machine-readable lifecycle control.
 - `NCA_ORCH_*` environment variables let orchestrators inject run metadata into session state and the harness.
 - Headless approval failures fail loudly instead of hanging forever.
+
+Desktop persistence uses a hybrid local-first model:
+
+- `~/.nca/orchestrator.db` for companies, projects, todos, agent profiles, and linked runs
+- `<workspace>/.nca/sessions/` for session snapshots and event logs
 
 See [Orchestration Contract](docs/orchestration.md) for the exact subprocess surface.
 

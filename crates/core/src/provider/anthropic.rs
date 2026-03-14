@@ -3,9 +3,7 @@ use nca_common::message::Message;
 use nca_common::tool::ToolDefinition;
 use reqwest::header::{HeaderMap, HeaderValue};
 
-use super::anthropic_compat::{
-    anthropic_request_body, map_provider_error, spawn_anthropic_stream,
-};
+use super::anthropic_compat::{anthropic_request_body, map_provider_error, spawn_anthropic_stream};
 use super::{Provider, ProviderError, StreamChunk};
 
 pub struct AnthropicProvider {
@@ -33,10 +31,7 @@ impl AnthropicProvider {
                 ))
             })?,
         );
-        headers.insert(
-            "anthropic-version",
-            HeaderValue::from_static("2023-06-01"),
-        );
+        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
 
         let client = reqwest::Client::builder()
             .default_headers(headers)
@@ -130,7 +125,8 @@ mod tests {
                 request
                     .headers()
                     .iter()
-                    .any(|header| header.field.equiv("x-api-key") && header.value.as_str() == "anthropic-test-key")
+                    .any(|header| header.field.equiv("x-api-key")
+                        && header.value.as_str() == "anthropic-test-key")
             );
             assert!(
                 request
@@ -165,8 +161,16 @@ mod tests {
 
         let chunks = collect_chunks(stream).await;
         assert!(matches!(&chunks[0], StreamChunk::TextDelta(text) if text == "Hello from Claude"));
-        assert!(matches!(&chunks[1], StreamChunk::ToolUse(call) if call.id == "toolu_1" && call.name == "lookup" && call.input == json!({"path":"src"})));
-        assert!(matches!(&chunks[2], StreamChunk::Usage { input_tokens: 13, output_tokens: 5 }));
+        assert!(
+            matches!(&chunks[1], StreamChunk::ToolUse(call) if call.id == "toolu_1" && call.name == "lookup" && call.input == json!({"path":"src"}))
+        );
+        assert!(matches!(
+            &chunks[2],
+            StreamChunk::Usage {
+                input_tokens: 13,
+                output_tokens: 5
+            }
+        ));
         assert!(matches!(chunks.last(), Some(StreamChunk::Done)));
     }
 }

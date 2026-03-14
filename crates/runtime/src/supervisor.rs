@@ -14,8 +14,8 @@ use nca_core::harness::build_system_prompt;
 use nca_core::hooks::{HookEventKind, HookRunner};
 use nca_core::provider::ProviderError;
 use nca_core::provider::factory::build_provider;
-use nca_core::tools::mcp::load_mcp_tools;
 use nca_core::tools::ToolRegistry;
+use nca_core::tools::mcp::load_mcp_tools;
 use nca_core::tools::spawn_subagent::{SpawnRequest, SpawnSubagentTool};
 use serde_json::json;
 use std::collections::HashMap;
@@ -322,7 +322,9 @@ impl Supervisor {
         }
         self.refresh_session_summary();
         if self.config.memory.auto_compact_on_finish {
-            let _ = self.append_memory_note("session-summary", self.session_summary.clone()).await;
+            let _ = self
+                .append_memory_note("session-summary", self.session_summary.clone())
+                .await;
         }
         self.run_session_hook(
             HookEventKind::SessionEnd,

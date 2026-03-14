@@ -4,9 +4,15 @@ use eframe::egui;
 use nca_common::config::{NcaConfig, PermissionMode, ProviderKind};
 use nca_common::event::{AgentCommand, AgentEvent, EndReason};
 use nca_common::message::{Message, Role};
+use nca_common::orchestration::{
+    AgentProfile, AgentProfileId, Company, CompanyId, DesktopMode, NewAgentProfile, NewCompany,
+    NewProject, NewTodo, OrchestrationSnapshot, Project, ProjectId, RunLaunchContext, RunLink,
+    Todo, TodoId, TodoPriority, TodoStatus,
+};
 use nca_common::session::{SessionMeta, SessionStatus};
 use nca_runtime::service::{
-    ServiceSessionHandle, ServiceSessionInfo, ServiceSessionKind, ServiceSessionRequest,
+    OrchestrationService, ServiceSessionHandle, ServiceSessionInfo, ServiceSessionKind,
+    ServiceSessionRequest,
 };
 use nca_runtime::session_store::SessionStore;
 use rfd::FileDialog;
@@ -32,7 +38,7 @@ mod palette {
     pub const ERROR: Color32 = Color32::from_rgb(239, 68, 68);
     #[allow(dead_code)]
     pub const ACCENT_DIM: Color32 = Color32::from_rgb(0, 112, 243);
-    pub const ACCENT_BG: Color32 = Color32::from_rgb(10, 22, 40); // accent at ~10%
+    pub const ACCENT_BG: Color32 = Color32::from_rgb(15, 30, 55); // accent at ~15%
     pub const USER_BUBBLE: Color32 = Color32::from_rgb(0, 90, 200); // slightly muted accent
     pub const ASSISTANT_BUBBLE: Color32 = Color32::from_rgb(30, 30, 30);
     pub const TOOL_BUBBLE: Color32 = Color32::from_rgb(20, 20, 20);
@@ -46,7 +52,10 @@ mod palette {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum View {
+    Dashboard,
     Projects,
+    Todos,
+    Agents,
     Chat,
     Settings,
 }
@@ -98,6 +107,36 @@ struct PendingApproval {
     description: String,
 }
 
+#[derive(Debug, Clone, Default)]
+struct CompanyForm {
+    name: String,
+    description: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ProjectForm {
+    name: String,
+    slug: String,
+    description: String,
+    workspace_root: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TodoForm {
+    title: String,
+    description: String,
+    acceptance_criteria: String,
+    priority: TodoPriority,
+}
+
+#[derive(Debug, Clone, Default)]
+struct AgentForm {
+    name: String,
+    role: String,
+    model: String,
+    prompt_hint: String,
+}
+
 struct ActiveSession {
     _service_handle: Option<ServiceSessionHandle>,
     controller: LiveAttachController,
@@ -109,6 +148,10 @@ struct ActiveSession {
     last_error: Option<String>,
     run_in_progress: bool,
     ended: Option<EndReason>,
+    input_tokens: u64,
+    output_tokens: u64,
+    estimated_cost_usd: f64,
+    child_session_ids: Vec<String>,
 }
 
 impl ActiveSession {
@@ -129,6 +172,10 @@ impl ActiveSession {
             last_error: None,
             run_in_progress: false,
             ended: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            estimated_cost_usd: 0.0,
+            child_session_ids: Vec::new(),
         }
     }
 
@@ -180,6 +227,14 @@ impl Drop for ActiveSession {
 // ---------------------------------------------------------------------------
 
 pub struct DesktopApp {
+    orchestration_service: OrchestrationService,
+    orchestration: OrchestrationSnapshot,
+    desktop_mode: DesktopMode,
+    selected_company_id: Option<CompanyId>,
+    selected_project_id: Option<ProjectId>,
+    selected_todo_id: Option<TodoId>,
+    selected_agent_id: Option<AgentProfileId>,
+    selected_session_id: Option<String>,
     workspace_mgr: WorkspaceManager,
     view: View,
     settings_scope: SettingsScope,
@@ -188,11 +243,17 @@ pub struct DesktopApp {
     composer: ComposerState,
     project_sessions: Vec<SessionMeta>,
     active_session: Option<ActiveSession>,
+    company_form: CompanyForm,
+    project_form: ProjectForm,
+    todo_form: TodoForm,
+    agent_form: AgentForm,
     status_message: Option<(String, bool, Instant)>,
 }
 
 impl DesktopApp {
     pub fn new() -> Self {
+        let orchestration_service = OrchestrationService::default();
+        let orchestration = orchestration_service.load_snapshot().unwrap_or_default();
         let mut workspace_mgr = WorkspaceManager::load();
         workspace_mgr.sort_by_recent();
         if !workspace_mgr.workspaces.is_empty() {
@@ -201,18 +262,393 @@ impl DesktopApp {
 
         let global_settings = NcaConfig::load_global_file().unwrap_or_default();
         let mut app = Self {
+            orchestration_service,
+            desktop_mode: orchestration.mode.mode,
+            orchestration,
+            selected_company_id: None,
+            selected_project_id: None,
+            selected_todo_id: None,
+            selected_agent_id: None,
+            selected_session_id: None,
             workspace_mgr,
-            view: View::Projects,
+            view: View::Dashboard,
             settings_scope: SettingsScope::Project,
             global_settings,
             project_settings: None,
             composer: ComposerState::default(),
             project_sessions: Vec::new(),
             active_session: None,
+            company_form: CompanyForm::default(),
+            project_form: ProjectForm::default(),
+            todo_form: TodoForm::default(),
+            agent_form: AgentForm::default(),
             status_message: None,
         };
+        app.sync_orchestration_selection();
         app.reload_selected_workspace_data();
         app
+    }
+
+    fn reload_orchestration_data(&mut self) {
+        match self.orchestration_service.load_snapshot() {
+            Ok(snapshot) => {
+                self.desktop_mode = snapshot.mode.mode;
+                self.orchestration = snapshot;
+                self.sync_orchestration_selection();
+            }
+            Err(error) => self.set_status(error, true),
+        }
+    }
+
+    fn sync_orchestration_selection(&mut self) {
+        if self.orchestration.companies.is_empty() {
+            self.selected_company_id = None;
+            self.selected_project_id = None;
+            self.selected_todo_id = None;
+            self.selected_agent_id = None;
+            return;
+        }
+
+        if self
+            .selected_company_id
+            .as_ref()
+            .is_none_or(|id| !self.orchestration.companies.iter().any(|c| &c.id == id))
+        {
+            self.selected_company_id = self.orchestration.companies.first().map(|c| c.id.clone());
+        }
+
+        let project_ids: Vec<_> = self
+            .selected_company_id
+            .as_ref()
+            .map(|company_id| {
+                self.orchestration
+                    .projects
+                    .iter()
+                    .filter(|project| &project.company_id == company_id)
+                    .map(|project| project.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if self
+            .selected_project_id
+            .as_ref()
+            .is_none_or(|id| !project_ids.iter().any(|candidate| candidate == id))
+        {
+            self.selected_project_id = project_ids.first().cloned();
+        }
+
+        let todo_ids: Vec<_> = self
+            .selected_project_id
+            .as_ref()
+            .map(|project_id| {
+                self.orchestration
+                    .todos
+                    .iter()
+                    .filter(|todo| &todo.project_id == project_id)
+                    .map(|todo| todo.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if self
+            .selected_todo_id
+            .as_ref()
+            .is_none_or(|id| !todo_ids.iter().any(|candidate| candidate == id))
+        {
+            self.selected_todo_id = todo_ids.first().cloned();
+        }
+
+        let agent_ids: Vec<_> = self
+            .selected_project_id
+            .as_ref()
+            .map(|project_id| {
+                self.orchestration
+                    .agents
+                    .iter()
+                    .filter(|agent| agent.project_id.as_ref() == Some(project_id))
+                    .map(|agent| agent.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if self
+            .selected_agent_id
+            .as_ref()
+            .is_none_or(|id| !agent_ids.iter().any(|candidate| candidate == id))
+        {
+            self.selected_agent_id = agent_ids.first().cloned();
+        }
+    }
+
+    fn selected_company(&self) -> Option<&Company> {
+        let id = self.selected_company_id.as_ref()?;
+        self.orchestration
+            .companies
+            .iter()
+            .find(|company| &company.id == id)
+    }
+
+    fn selected_project(&self) -> Option<&Project> {
+        let id = self.selected_project_id.as_ref()?;
+        self.orchestration
+            .projects
+            .iter()
+            .find(|project| &project.id == id)
+    }
+
+    fn selected_todo(&self) -> Option<&Todo> {
+        let id = self.selected_todo_id.as_ref()?;
+        self.orchestration.todos.iter().find(|todo| &todo.id == id)
+    }
+
+    fn company_projects(&self) -> Vec<&Project> {
+        let Some(company_id) = self.selected_company_id.as_ref() else {
+            return Vec::new();
+        };
+        self.orchestration
+            .projects
+            .iter()
+            .filter(|project| &project.company_id == company_id)
+            .collect()
+    }
+
+    fn project_todos(&self) -> Vec<&Todo> {
+        let Some(project_id) = self.selected_project_id.as_ref() else {
+            return Vec::new();
+        };
+        let mut todos: Vec<_> = self
+            .orchestration
+            .todos
+            .iter()
+            .filter(|todo| &todo.project_id == project_id)
+            .collect();
+        todos.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        todos
+    }
+
+    fn project_agents(&self) -> Vec<&AgentProfile> {
+        let company_id = self.selected_company_id.as_ref();
+        let project_id = self.selected_project_id.as_ref();
+        let mut agents: Vec<_> = self
+            .orchestration
+            .agents
+            .iter()
+            .filter(|agent| {
+                agent.project_id.as_ref() == project_id
+                    || (agent.project_id.is_none() && agent.company_id.as_ref() == company_id)
+            })
+            .collect();
+        agents.sort_by(|a, b| a.name.cmp(&b.name));
+        agents
+    }
+
+    fn project_run_links(&self) -> Vec<&RunLink> {
+        let todo_ids: std::collections::BTreeSet<_> = self
+            .project_todos()
+            .into_iter()
+            .map(|todo| todo.id.clone())
+            .collect();
+        let mut runs: Vec<_> = self
+            .orchestration
+            .run_links
+            .iter()
+            .filter(|run| todo_ids.contains(&run.todo_id))
+            .collect();
+        runs.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        runs
+    }
+
+    fn set_desktop_mode(&mut self, mode: DesktopMode) {
+        if self.desktop_mode == mode {
+            return;
+        }
+        match self.orchestration_service.save_mode(mode) {
+            Ok(pref) => {
+                self.desktop_mode = pref.mode;
+                self.reload_orchestration_data();
+            }
+            Err(error) => self.set_status(error, true),
+        }
+    }
+
+    fn create_company(&mut self) {
+        if self.company_form.name.trim().is_empty() {
+            self.set_status("Enter a company name first.", true);
+            return;
+        }
+        let input = NewCompany {
+            name: self.company_form.name.clone(),
+            description: clean_optional_text(&self.company_form.description),
+        };
+        match self.orchestration_service.create_company(input) {
+            Ok(company) => {
+                self.company_form = CompanyForm::default();
+                self.reload_orchestration_data();
+                self.selected_company_id = Some(company.id);
+                self.set_status("Company created.", false);
+            }
+            Err(error) => self.set_status(error, true),
+        }
+    }
+
+    fn create_project(&mut self) {
+        let Some(company_id) = self.selected_company_id.clone() else {
+            self.set_status("Create or select a company first.", true);
+            return;
+        };
+        if self.project_form.name.trim().is_empty() {
+            self.set_status("Enter a project name first.", true);
+            return;
+        }
+        let workspace_root =
+            clean_optional_text(&self.project_form.workspace_root).map(PathBuf::from);
+        let input = NewProject {
+            company_id,
+            name: self.project_form.name.clone(),
+            slug: self.project_form.slug.clone(),
+            description: clean_optional_text(&self.project_form.description),
+            workspace_root,
+        };
+        match self.orchestration_service.create_project(input) {
+            Ok(project) => {
+                self.project_form = ProjectForm::default();
+                self.reload_orchestration_data();
+                self.selected_project_id = Some(project.id);
+                self.reload_selected_workspace_data();
+                self.set_status("Project created.", false);
+            }
+            Err(error) => self.set_status(error, true),
+        }
+    }
+
+    fn create_todo(&mut self) {
+        let Some(project_id) = self.selected_project_id.clone() else {
+            self.set_status("Select a project before creating a todo.", true);
+            return;
+        };
+        if self.todo_form.title.trim().is_empty() {
+            self.set_status("Enter a todo title first.", true);
+            return;
+        }
+        let acceptance_criteria = self
+            .todo_form
+            .acceptance_criteria
+            .lines()
+            .map(|line| line.trim().to_string())
+            .filter(|line| !line.is_empty())
+            .collect();
+        let input = NewTodo {
+            project_id,
+            title: self.todo_form.title.clone(),
+            description: clean_optional_text(&self.todo_form.description),
+            priority: self.todo_form.priority,
+            acceptance_criteria,
+        };
+        match self.orchestration_service.create_todo(input) {
+            Ok(todo) => {
+                self.todo_form = TodoForm::default();
+                self.reload_orchestration_data();
+                self.selected_todo_id = Some(todo.id);
+                self.set_status("Todo created.", false);
+            }
+            Err(error) => self.set_status(error, true),
+        }
+    }
+
+    fn create_agent_profile(&mut self) {
+        if self.agent_form.name.trim().is_empty() || self.agent_form.role.trim().is_empty() {
+            self.set_status("Enter an agent name and role first.", true);
+            return;
+        }
+        let input = NewAgentProfile {
+            company_id: self.selected_company_id.clone(),
+            project_id: self.selected_project_id.clone(),
+            name: self.agent_form.name.clone(),
+            role: self.agent_form.role.clone(),
+            model: clean_optional_text(&self.agent_form.model),
+            workspace_root: self
+                .selected_project()
+                .and_then(|project| project.workspace_root.clone()),
+            prompt_hint: clean_optional_text(&self.agent_form.prompt_hint),
+        };
+        match self.orchestration_service.create_agent_profile(input) {
+            Ok(agent) => {
+                self.agent_form = AgentForm::default();
+                self.reload_orchestration_data();
+                self.selected_agent_id = Some(agent.id);
+                self.set_status("Agent created.", false);
+            }
+            Err(error) => self.set_status(error, true),
+        }
+    }
+
+    fn assign_selected_todo(&mut self, agent_id: Option<AgentProfileId>) {
+        let Some(todo_id) = self.selected_todo_id.clone() else {
+            return;
+        };
+        match self
+            .orchestration_service
+            .assign_todo(&todo_id, agent_id.as_ref())
+        {
+            Ok(()) => {
+                self.reload_orchestration_data();
+                self.set_status("Todo assignment updated.", false);
+            }
+            Err(error) => self.set_status(error, true),
+        }
+    }
+
+    fn update_selected_todo_status(&mut self, status: TodoStatus) {
+        let Some(todo_id) = self.selected_todo_id.clone() else {
+            return;
+        };
+        match self
+            .orchestration_service
+            .update_todo_status(&todo_id, status)
+        {
+            Ok(()) => {
+                self.reload_orchestration_data();
+                self.set_status("Todo status updated.", false);
+            }
+            Err(error) => self.set_status(error, true),
+        }
+    }
+
+    fn select_project_workspace_for_form(&mut self) {
+        if let Some(path) = FileDialog::new().pick_folder() {
+            self.project_form.workspace_root = path.display().to_string();
+        }
+    }
+
+    fn launch_selected_todo(&mut self) {
+        let Some(todo) = self.selected_todo().cloned() else {
+            self.set_status("Select a todo to launch.", true);
+            return;
+        };
+        let mut prompt = format!("Project task: {}\n\n", todo.title);
+        if let Some(project) = self.selected_project() {
+            prompt.push_str(&format!("Project: {}\n", project.name));
+        }
+        if let Some(description) = &todo.description {
+            prompt.push_str(&format!("\nDescription:\n{}\n", description));
+        }
+        if !todo.acceptance_criteria.is_empty() {
+            prompt.push_str("\nAcceptance criteria:\n");
+            for item in &todo.acceptance_criteria {
+                prompt.push_str(&format!("- {item}\n"));
+            }
+        }
+
+        let launch_context = RunLaunchContext {
+            todo_id: todo.id.clone(),
+            agent_id: todo
+                .assigned_agent_id
+                .clone()
+                .or_else(|| self.selected_agent_id.clone()),
+        };
+        self.composer.prompt = prompt.clone();
+        self.start_session_from_prompt(prompt, Some(launch_context));
     }
 
     fn delete_session(&mut self, session_id: &str) {
@@ -220,8 +656,7 @@ impl DesktopApp {
             let config = self.effective_project_config();
             let sessions_dir = workspace_root.join(&config.session.history_dir);
             let _ = std::fs::remove_file(sessions_dir.join(format!("{}.json", session_id)));
-            let _ =
-                std::fs::remove_file(sessions_dir.join(format!("{}.events.jsonl", session_id)));
+            let _ = std::fs::remove_file(sessions_dir.join(format!("{}.events.jsonl", session_id)));
             let _ = std::fs::remove_file(sessions_dir.join(format!("{}.spawn.log", session_id)));
             self.reload_selected_workspace_data();
         }
@@ -232,7 +667,9 @@ impl DesktopApp {
     }
 
     fn selected_workspace(&self) -> Option<PathBuf> {
-        self.workspace_mgr.selected_path().cloned()
+        self.selected_project()
+            .and_then(|project| project.workspace_root.clone())
+            .or_else(|| self.workspace_mgr.selected_path().cloned())
     }
 
     fn effective_project_config(&self) -> NcaConfig {
@@ -277,11 +714,20 @@ impl DesktopApp {
     }
 
     fn start_new_session(&mut self) {
+        let prompt = self.composer.prompt.clone();
+        self.start_session_from_prompt(prompt, None);
+    }
+
+    fn start_session_from_prompt(
+        &mut self,
+        prompt: String,
+        launch_context: Option<RunLaunchContext>,
+    ) {
         let Some(workspace_root) = self.selected_workspace() else {
             self.set_status("Pick a project folder first.", true);
             return;
         };
-        if self.composer.prompt.trim().is_empty() {
+        if prompt.trim().is_empty() {
             self.set_status("Enter a prompt before starting a chat.", true);
             return;
         }
@@ -299,8 +745,9 @@ impl DesktopApp {
             config,
             workspace_root: workspace_root.clone(),
             safe_mode: self.composer.safe_mode,
-            initial_prompt: Some(self.composer.prompt.clone()),
+            initial_prompt: Some(prompt),
             orchestration_context: None,
+            launch_context,
             kind: ServiceSessionKind::New { session_id: None },
         }) {
             Ok(handle) => {
@@ -310,9 +757,11 @@ impl DesktopApp {
                         let mut session =
                             ActiveSession::from_loaded(info, controller, Some(handle), Vec::new());
                         session.run_in_progress = true;
+                        self.selected_session_id = Some(session.info.session_id.clone());
                         self.active_session = Some(session);
                         self.composer.prompt.clear();
                         self.view = View::Chat;
+                        self.reload_orchestration_data();
                         self.reload_selected_workspace_data();
                     }
                     Err(e) => self.set_status(e, true),
@@ -343,6 +792,7 @@ impl DesktopApp {
                         self.active_session = Some(ActiveSession::from_loaded(
                             info, controller, None, transcript,
                         ));
+                        self.selected_session_id = Some(meta.id.clone());
                         self.view = View::Chat;
                     }
                     Err(e) => self.set_status(e, true),
@@ -356,6 +806,7 @@ impl DesktopApp {
             safe_mode: false,
             initial_prompt: None,
             orchestration_context: None,
+            launch_context: None,
             kind: ServiceSessionKind::Resume {
                 session_id: meta.id.clone(),
             },
@@ -370,6 +821,7 @@ impl DesktopApp {
                             Some(handle),
                             transcript,
                         ));
+                        self.selected_session_id = Some(meta.id.clone());
                         self.view = View::Chat;
                         self.reload_selected_workspace_data();
                     }
@@ -381,83 +833,109 @@ impl DesktopApp {
     }
 
     fn process_live_events(&mut self) {
-        let Some(session) = self.active_session.as_mut() else {
-            return;
-        };
         let mut refresh_sessions = false;
-        for event in session.controller.drain() {
-            match event {
-                AgentEvent::SessionStarted {
-                    session_id, model, ..
-                } => {
-                    session.info.session_id = session_id;
-                    session.info.model = model;
-                    session.ended = None;
-                    session.last_error = None;
-                }
-                AgentEvent::MessageReceived { role, content } => match role.as_str() {
-                    "user" => {
-                        if !content.trim().is_empty() {
-                            session.push_user(content);
+        let mut refresh_orchestration = false;
+        {
+            let Some(session) = self.active_session.as_mut() else {
+                return;
+            };
+            for event in session.controller.drain() {
+                match event {
+                    AgentEvent::SessionStarted {
+                        session_id, model, ..
+                    } => {
+                        session.info.session_id = session_id;
+                        session.info.model = model;
+                        session.ended = None;
+                        session.last_error = None;
+                    }
+                    AgentEvent::MessageReceived { role, content } => match role.as_str() {
+                        "user" => {
+                            if !content.trim().is_empty() {
+                                session.push_user(content);
+                            }
+                            session.run_in_progress = true;
                         }
-                        session.run_in_progress = true;
+                        "assistant" => {
+                            session.push_assistant(content);
+                            session.run_in_progress = false;
+                        }
+                        _ => {}
+                    },
+                    AgentEvent::TokensStreamed { delta } => {
+                        session.streaming_assistant.push_str(&delta);
                     }
-                    "assistant" => {
-                        session.push_assistant(content);
-                        session.run_in_progress = false;
+                    AgentEvent::ToolCallStarted { tool, input, .. } => {
+                        session.push_tool(format!("[exec] {tool} {input}"));
                     }
-                    _ => {}
-                },
-                AgentEvent::TokensStreamed { delta } => {
-                    session.streaming_assistant.push_str(&delta);
-                }
-                AgentEvent::ToolCallStarted { tool, input, .. } => {
-                    session.push_tool(format!("[exec] {tool} {input}"));
-                }
-                AgentEvent::ToolCallCompleted { output, .. } => {
-                    if output.success {
-                        session.push_tool("[done] ok".into());
-                    } else if let Some(e) = output.error {
-                        session.push_error(e);
+                    AgentEvent::ToolCallCompleted { output, .. } => {
+                        if output.success {
+                            session.push_tool("[done] ok".into());
+                        } else if let Some(e) = output.error {
+                            session.push_error(e);
+                        }
                     }
-                }
-                AgentEvent::ApprovalRequested {
-                    call_id,
-                    tool,
-                    description,
-                } => {
-                    session.pending_approvals.push(PendingApproval {
+                    AgentEvent::CostUpdated {
+                        input_tokens,
+                        output_tokens,
+                        estimated_cost_usd,
+                    } => {
+                        session.input_tokens = input_tokens;
+                        session.output_tokens = output_tokens;
+                        session.estimated_cost_usd = estimated_cost_usd;
+                    }
+                    AgentEvent::ApprovalRequested {
                         call_id,
                         tool,
                         description,
-                    });
-                }
-                AgentEvent::ApprovalResolved { call_id, approved } => {
-                    session
-                        .pending_approvals
-                        .retain(|a| a.call_id != call_id);
-                    if !approved {
-                        session.push_error("Tool approval was denied.".into());
+                    } => {
+                        session.pending_approvals.push(PendingApproval {
+                            call_id,
+                            tool,
+                            description,
+                        });
                     }
+                    AgentEvent::ApprovalResolved { call_id, approved } => {
+                        session.pending_approvals.retain(|a| a.call_id != call_id);
+                        if !approved {
+                            session.push_error("Tool approval was denied.".into());
+                        }
+                    }
+                    AgentEvent::SessionEnded { reason } => {
+                        session.ended = Some(reason);
+                        session.run_in_progress = false;
+                        refresh_sessions = true;
+                        refresh_orchestration = true;
+                    }
+                    AgentEvent::Error { message } => {
+                        session.push_error(message);
+                        session.run_in_progress = false;
+                    }
+                    AgentEvent::ChildSessionSpawned {
+                        child_session_id, ..
+                    } => {
+                        if !session.child_session_ids.contains(&child_session_id) {
+                            session.child_session_ids.push(child_session_id);
+                        }
+                        refresh_sessions = true;
+                    }
+                    AgentEvent::ChildSessionCompleted { .. } => {
+                        refresh_sessions = true;
+                    }
+                    AgentEvent::Checkpoint { .. }
+                    | AgentEvent::Response { .. }
+                    | AgentEvent::TodoStatusChanged { .. }
+                    | AgentEvent::TodoAssigned { .. }
+                    | AgentEvent::RunLinked { .. }
+                    | AgentEvent::DesktopModeChanged { .. } => {}
                 }
-                AgentEvent::SessionEnded { reason } => {
-                    session.ended = Some(reason);
-                    session.run_in_progress = false;
-                    refresh_sessions = true;
-                }
-                AgentEvent::Error { message } => {
-                    session.push_error(message);
-                    session.run_in_progress = false;
-                }
-                AgentEvent::CostUpdated { .. }
-                | AgentEvent::Checkpoint { .. }
-                | AgentEvent::Response { .. }
-                | AgentEvent::ChildSessionSpawned { .. }
-                | AgentEvent::ChildSessionCompleted { .. } => {}
             }
         }
         if refresh_sessions {
             self.reload_selected_workspace_data();
+        }
+        if refresh_orchestration {
+            self.reload_orchestration_data();
         }
     }
 
@@ -475,59 +953,47 @@ impl DesktopApp {
             .show(ctx, |ui| {
                 ui.style_mut().visuals.widgets.noninteractive.bg_fill = palette::SIDEBAR;
 
-                // App header
-                ui.add_space(12.0);
+                ui.add_space(14.0);
                 ui.horizontal(|ui| {
                     ui.add_space(16.0);
-                    ui.colored_label(palette::WHITE, egui::RichText::new("nca desktop").strong().size(15.0));
+                    ui.colored_label(
+                        palette::WHITE,
+                        egui::RichText::new("nca desktop").strong().size(16.0),
+                    );
                 });
-                ui.add_space(12.0);
+                ui.add_space(10.0);
 
-                // Divider
+                egui::Frame::none()
+                    .inner_margin(egui::Margin::symmetric(12.0, 0.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            let is_project = self.desktop_mode == DesktopMode::ProjectAi;
+                            let is_company = self.desktop_mode == DesktopMode::CompanyAi;
+                            if mode_pill(ui, is_project, "Project AI").clicked() {
+                                self.set_desktop_mode(DesktopMode::ProjectAi);
+                            }
+                            if mode_pill(ui, is_company, "Company AI").clicked() {
+                                self.set_desktop_mode(DesktopMode::CompanyAi);
+                            }
+                        });
+                    });
+                ui.add_space(14.0);
                 draw_separator(ui);
-
-                // Nav links
                 ui.add_space(8.0);
-                let nav_items = [
+                let mut nav_items = vec![
+                    (View::Dashboard, "Dashboard"),
                     (View::Projects, "Projects"),
+                    (View::Todos, "Todos"),
+                    (View::Agents, "Agents"),
                     (View::Chat, "Chat"),
                     (View::Settings, "Settings"),
                 ];
+                if self.desktop_mode == DesktopMode::ProjectAi {
+                    nav_items.remove(0);
+                }
                 for (view, label) in nav_items {
-                    let is_active = self.view == view;
-                    let (bg, text_color) = if is_active {
-                        (palette::ACCENT_BG, palette::ACCENT)
-                    } else {
-                        (egui::Color32::TRANSPARENT, palette::TEXT_DIM)
-                    };
-                    let resp = ui.allocate_ui_with_layout(
-                        egui::vec2(ui.available_width(), 32.0),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            let rect = ui.max_rect();
-                            ui.painter().rect_filled(
-                                rect.shrink2(egui::vec2(8.0, 0.0)),
-                                6.0,
-                                bg,
-                            );
-                            if is_active {
-                                ui.painter().rect_filled(
-                                    egui::Rect::from_min_size(
-                                        rect.left_top() + egui::vec2(8.0, 0.0),
-                                        egui::vec2(3.0, rect.height()),
-                                    ),
-                                    2.0,
-                                    palette::ACCENT,
-                                );
-                            }
-                            ui.add_space(20.0);
-                            ui.colored_label(
-                                text_color,
-                                egui::RichText::new(label).size(13.0).strong(),
-                            );
-                        },
-                    );
-                    if resp.response.interact(egui::Sense::click()).clicked() {
+                    if draw_nav_link(ui, self.view == view, label).clicked() {
                         self.view = view;
                     }
                 }
@@ -535,118 +1001,97 @@ impl DesktopApp {
                 ui.add_space(16.0);
                 draw_separator(ui);
                 ui.add_space(8.0);
-
-                // "Your Projects" section header
-                ui.horizontal(|ui| {
-                    ui.add_space(16.0);
-                    ui.colored_label(
-                        palette::TEXT_DIM,
-                        egui::RichText::new("YOUR PROJECTS").size(10.0).strong(),
-                    );
-                });
-                ui.add_space(6.0);
-
-                // Project list (scrollable)
                 egui::ScrollArea::vertical()
                     .max_height((ui.available_height() - 52.0).max(20.0))
                     .show(ui, |ui| {
-                        if self.workspace_mgr.workspaces.is_empty() {
+                        section_label(ui, "COMPANIES");
+                        if self.orchestration.companies.is_empty() {
+                            ui.add_space(4.0);
                             ui.horizontal(|ui| {
                                 ui.add_space(16.0);
-                                ui.colored_label(palette::TEXT_DIM, "No projects yet.");
+                                ui.colored_label(palette::TEXT_DIM, "Create your first company.");
                             });
+                        } else {
+                            let companies = self.orchestration.companies.clone();
+                            for company in companies {
+                                if draw_entity_tile(
+                                    ui,
+                                    self.selected_company_id.as_ref() == Some(&company.id),
+                                    &company.name,
+                                    company.description.as_deref().unwrap_or(""),
+                                )
+                                .clicked()
+                                {
+                                    self.selected_company_id = Some(company.id.clone());
+                                    self.sync_orchestration_selection();
+                                    self.reload_selected_workspace_data();
+                                }
+                            }
                         }
 
-                        let entries: Vec<_> = self
-                            .workspace_mgr
-                            .workspaces
-                            .iter()
-                            .enumerate()
-                            .map(|(i, w)| (i, w.name.clone(), w.path.display().to_string()))
-                            .collect();
-
-                        let mut new_selection = None;
-                        let mut remove_idx = None;
-
-                        for (idx, name, path_str) in &entries {
-                            let is_selected = self.workspace_mgr.selected_workspace == Some(*idx);
-                            let (border_color, bg_color) = if is_selected {
-                                (palette::ACCENT, palette::ACCENT_BG)
-                            } else {
-                                (palette::BORDER, palette::CARD)
-                            };
-
-                            let outer_rect = ui.available_rect_before_wrap();
-                            let desired = egui::vec2((outer_rect.width() - 16.0).max(40.0), 48.0);
-
-                            let resp = ui.allocate_ui_with_layout(
-                                egui::vec2(ui.available_width(), 52.0),
-                                egui::Layout::left_to_right(egui::Align::Center),
-                                |ui| {
-                                    ui.add_space(8.0);
-                                    let (rect, resp) = ui.allocate_exact_size(
-                                        desired,
-                                        egui::Sense::click(),
-                                    );
-                                    ui.painter().rect(
-                                        rect,
-                                        8.0,
-                                        bg_color,
-                                        egui::Stroke::new(1.0, border_color),
-                                    );
-                                    let text_color = if is_selected {
-                                        palette::WHITE
-                                    } else {
-                                        palette::TEXT_DIM
-                                    };
-                                    ui.painter().text(
-                                        rect.left_top() + egui::vec2(10.0, 8.0),
-                                        egui::Align2::LEFT_TOP,
-                                        name,
-                                        egui::FontId::proportional(12.0),
-                                        text_color,
-                                    );
-                                    ui.painter().text(
-                                        rect.left_top() + egui::vec2(10.0, 26.0),
-                                        egui::Align2::LEFT_TOP,
-                                        truncate_path(path_str, 30),
-                                        egui::FontId::proportional(10.0),
-                                        palette::TEXT_DIM,
-                                    );
-                                    resp
-                                },
-                            );
-                            if resp.inner.clicked() {
-                                new_selection = Some(*idx);
+                        ui.add_space(10.0);
+                        section_label(ui, "PROJECTS");
+                        if self.company_projects().is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.add_space(16.0);
+                                ui.colored_label(palette::TEXT_DIM, "No projects in this company.");
+                            });
+                        } else {
+                            let projects: Vec<_> =
+                                self.company_projects().into_iter().cloned().collect();
+                            for project in projects {
+                                let subtitle = project
+                                    .workspace_root
+                                    .as_ref()
+                                    .map(|path| truncate_path(&path.display().to_string(), 28))
+                                    .unwrap_or_else(|| "no workspace linked".into());
+                                if draw_entity_tile(
+                                    ui,
+                                    self.selected_project_id.as_ref() == Some(&project.id),
+                                    &project.name,
+                                    &subtitle,
+                                )
+                                .clicked()
+                                {
+                                    self.selected_project_id = Some(project.id.clone());
+                                    self.sync_orchestration_selection();
+                                    self.reload_selected_workspace_data();
+                                }
                             }
-                            if resp.inner.secondary_clicked() {
-                                remove_idx = Some(*idx);
-                            }
-                            ui.add_space(2.0);
                         }
 
-                        if let Some(idx) = new_selection {
-                            self.workspace_mgr.select(Some(idx));
-                            self.reload_selected_workspace_data();
-                        }
-                        if let Some(idx) = remove_idx {
-                            self.workspace_mgr.remove_workspace(idx);
-                            if self.workspace_mgr.selected_workspace.is_none()
-                                && !self.workspace_mgr.workspaces.is_empty()
-                            {
-                                self.workspace_mgr.select(Some(0));
+                        ui.add_space(10.0);
+                        section_label(ui, "AGENTS");
+                        let agents: Vec<_> = self.project_agents().into_iter().cloned().collect();
+                        if agents.is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.add_space(16.0);
+                                ui.colored_label(palette::TEXT_DIM, "No agents yet.");
+                            });
+                        } else {
+                            for agent in agents {
+                                if draw_entity_tile(
+                                    ui,
+                                    self.selected_agent_id.as_ref() == Some(&agent.id),
+                                    &agent.name,
+                                    &agent.role,
+                                )
+                                .clicked()
+                                {
+                                    self.selected_agent_id = Some(agent.id.clone());
+                                }
                             }
-                            self.reload_selected_workspace_data();
                         }
                     });
 
-                // Bottom "Open Folder" button
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                     ui.add_space(8.0);
                     draw_separator(ui);
                     ui.add_space(8.0);
                     let btn = egui::Button::new(
-                        egui::RichText::new("Open Folder").size(12.0).color(palette::TEXT),
+                        egui::RichText::new("Open Folder")
+                            .size(12.0)
+                            .color(palette::TEXT),
                     )
                     .fill(palette::CARD)
                     .stroke(egui::Stroke::new(1.0, palette::BORDER))
@@ -665,30 +1110,45 @@ impl DesktopApp {
     // -----------------------------------------------------------------------
     fn show_header(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("header")
-            .exact_height(48.0)
+            .exact_height(44.0)
             .frame(
                 egui::Frame::none()
                     .fill(palette::BG)
-                    .inner_margin(egui::Margin::symmetric(24.0, 0.0))
+                    .inner_margin(egui::Margin::symmetric(20.0, 0.0))
                     .stroke(egui::Stroke::new(1.0, palette::BORDER)),
             )
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
-                    // Breadcrumb
-                    ui.colored_label(palette::TEXT_DIM, egui::RichText::new("Project /").size(12.0));
-                    ui.add_space(4.0);
-                    let project_name = self
-                        .selected_workspace()
-                        .and_then(|p| {
-                            p.file_name()
-                                .and_then(|n| n.to_str())
-                                .map(|s| s.to_string())
-                        })
-                        .unwrap_or_else(|| "none".into());
-                    ui.colored_label(
-                        palette::WHITE,
-                        egui::RichText::new(project_name).size(13.0).strong(),
-                    );
+                    let mut crumbs: Vec<(&str, egui::Color32)> = Vec::new();
+                    if self.desktop_mode == DesktopMode::CompanyAi {
+                        if let Some(company) = self.selected_company() {
+                            crumbs.push((&company.name, palette::WHITE));
+                        }
+                    }
+                    if let Some(project) = self.selected_project() {
+                        crumbs.push((&project.name, palette::TEXT));
+                    }
+                    let view_name = match self.view {
+                        View::Dashboard => "Dashboard",
+                        View::Projects => "Projects",
+                        View::Todos => "Todos",
+                        View::Agents => "Agents",
+                        View::Chat => "Chat",
+                        View::Settings => "Settings",
+                    };
+                    crumbs.push((view_name, palette::TEXT_DIM));
+
+                    for (i, (label, color)) in crumbs.iter().enumerate() {
+                        if i > 0 {
+                            ui.add_space(4.0);
+                            ui.colored_label(
+                                palette::TEXT_DIM,
+                                egui::RichText::new("/").size(12.0),
+                            );
+                            ui.add_space(4.0);
+                        }
+                        ui.colored_label(*color, egui::RichText::new(*label).size(13.0));
+                    }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Status indicator
@@ -1024,10 +1484,520 @@ impl DesktopApp {
             });
     }
 
+    fn show_dashboard_view(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::none()
+                    .fill(palette::BG)
+                    .inner_margin(egui::Margin::symmetric(24.0, 0.0)),
+            )
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        ui.add_space(24.0);
+                        ui.horizontal_wrapped(|ui| {
+                            stat_card(ui, "Projects", &self.company_projects().len().to_string());
+                            stat_card(ui, "Open Todos", &self.project_todos().len().to_string());
+                            stat_card(ui, "Agents", &self.project_agents().len().to_string());
+                            stat_card(ui, "Runs", &self.project_run_links().len().to_string());
+                        });
+                        ui.add_space(18.0);
+
+                        ui.columns(2, |columns| {
+                            columns[0].add_space(4.0);
+                            panel_card(&mut columns[0], "Create Company", |ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.company_form.name)
+                                        .hint_text("Company name"),
+                                );
+                                ui.add_space(8.0);
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut self.company_form.description)
+                                        .desired_rows(3)
+                                        .hint_text("Description"),
+                                );
+                                ui.add_space(8.0);
+                                if ui.button("Create Company").clicked() {
+                                    self.create_company();
+                                }
+                            });
+
+                            panel_card(&mut columns[0], "Create Project", |ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.project_form.name)
+                                        .hint_text("Project name"),
+                                );
+                                ui.add_space(8.0);
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.project_form.slug)
+                                        .hint_text("Slug"),
+                                );
+                                ui.add_space(8.0);
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut self.project_form.description)
+                                        .desired_rows(3)
+                                        .hint_text("Description"),
+                                );
+                                ui.add_space(8.0);
+                                ui.horizontal(|ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(
+                                            &mut self.project_form.workspace_root,
+                                        )
+                                        .desired_width(220.0)
+                                        .hint_text("/path/to/repo"),
+                                    );
+                                    if ui.button("Browse").clicked() {
+                                        self.select_project_workspace_for_form();
+                                    }
+                                });
+                                ui.add_space(8.0);
+                                if ui.button("Create Project").clicked() {
+                                    self.create_project();
+                                }
+                            });
+                        });
+
+                        ui.add_space(16.0);
+                        ui.columns(2, |columns| {
+                            panel_card(&mut columns[0], "Create Todo", |ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.todo_form.title)
+                                        .hint_text("Todo title"),
+                                );
+                                ui.add_space(8.0);
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut self.todo_form.description)
+                                        .desired_rows(3)
+                                        .hint_text("Description"),
+                                );
+                                ui.add_space(8.0);
+                                ui.label(egui::RichText::new("Acceptance Criteria").size(11.0));
+                                ui.add(
+                                    egui::TextEdit::multiline(
+                                        &mut self.todo_form.acceptance_criteria,
+                                    )
+                                    .desired_rows(3)
+                                    .hint_text("One line per acceptance criterion"),
+                                );
+                                ui.add_space(8.0);
+                                todo_priority_combo(ui, &mut self.todo_form.priority);
+                                ui.add_space(8.0);
+                                if ui.button("Create Todo").clicked() {
+                                    self.create_todo();
+                                }
+                            });
+
+                            panel_card(&mut columns[1], "Create Agent", |ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.agent_form.name)
+                                        .hint_text("Agent name"),
+                                );
+                                ui.add_space(8.0);
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.agent_form.role)
+                                        .hint_text("Role"),
+                                );
+                                ui.add_space(8.0);
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.agent_form.model)
+                                        .hint_text("MiniMax-M2.5"),
+                                );
+                                ui.add_space(8.0);
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut self.agent_form.prompt_hint)
+                                        .desired_rows(3)
+                                        .hint_text("Prompt or operating hint"),
+                                );
+                                ui.add_space(8.0);
+                                if ui.button("Create Agent").clicked() {
+                                    self.create_agent_profile();
+                                }
+                            });
+                        });
+
+                        ui.add_space(20.0);
+                        ui.colored_label(
+                            palette::WHITE,
+                            egui::RichText::new("Recent Linked Runs")
+                                .size(16.0)
+                                .strong(),
+                        );
+                        ui.add_space(10.0);
+                        let runs: Vec<_> = self.project_run_links().into_iter().cloned().collect();
+                        if runs.is_empty() {
+                            ui.colored_label(
+                                palette::TEXT_DIM,
+                                "No linked runs yet. Launch a selected todo to create one.",
+                            );
+                        } else {
+                            let mut open_chat = None;
+                            for run in runs {
+                                let todo_title = self
+                                    .orchestration
+                                    .todos
+                                    .iter()
+                                    .find(|todo| todo.id == run.todo_id)
+                                    .map(|todo| todo.title.clone())
+                                    .unwrap_or_else(|| "Unknown todo".into());
+                                let agent_label = run
+                                    .agent_id
+                                    .as_ref()
+                                    .and_then(|id| {
+                                        self.orchestration
+                                            .agents
+                                            .iter()
+                                            .find(|agent| &agent.id == id)
+                                            .map(|agent| agent.name.clone())
+                                    })
+                                    .unwrap_or_else(|| "Unassigned".into());
+                                panel_card(
+                                    ui,
+                                    &format!("{todo_title} · {}", run.session_id),
+                                    |ui| {
+                                        ui.colored_label(
+                                            palette::TEXT_DIM,
+                                            format!(
+                                                "{} · {}",
+                                                agent_label,
+                                                format_time(&run.updated_at)
+                                            ),
+                                        );
+                                        if let Some(branch) = &run.branch {
+                                            ui.colored_label(
+                                                palette::TEXT_DIM,
+                                                format!("branch: {branch}"),
+                                            );
+                                        }
+                                        if let Some(worktree) = &run.worktree_path {
+                                            ui.colored_label(
+                                                palette::TEXT_DIM,
+                                                truncate_path(&worktree.display().to_string(), 60),
+                                            );
+                                        }
+                                        ui.add_space(6.0);
+                                        if ui.button("Open Chat").clicked() {
+                                            open_chat = Some(run.session_id.clone());
+                                        }
+                                    },
+                                );
+                            }
+                            if let Some(session_id) = open_chat {
+                                if let Some(meta) = self
+                                    .project_sessions
+                                    .iter()
+                                    .find(|meta| meta.id == session_id)
+                                    .cloned()
+                                {
+                                    self.resume_or_attach_session(meta);
+                                }
+                            }
+                        }
+                        ui.add_space(20.0);
+                    });
+            });
+    }
+
+    fn show_todos_view(&mut self, ctx: &egui::Context) {
+        egui::SidePanel::right("todo_detail")
+            .resizable(true)
+            .default_width(320.0)
+            .frame(
+                egui::Frame::none()
+                    .fill(palette::CARD)
+                    .inner_margin(egui::Margin::same(16.0))
+                    .stroke(egui::Stroke::new(1.0, palette::BORDER)),
+            )
+            .show(ctx, |ui| {
+                ui.colored_label(
+                    palette::WHITE,
+                    egui::RichText::new("Todo Detail").size(15.0).strong(),
+                );
+                ui.add_space(12.0);
+                let todo = self.selected_todo().cloned();
+                if let Some(todo) = todo {
+                    ui.label(egui::RichText::new(&todo.title).size(14.0).strong());
+                    if let Some(desc) = &todo.description {
+                        ui.add_space(8.0);
+                        ui.colored_label(palette::TEXT_DIM, desc);
+                    }
+                    ui.add_space(10.0);
+                    let mut status = todo.status;
+                    todo_status_combo(ui, &mut status);
+                    if status != todo.status && ui.button("Save Status").clicked() {
+                        self.update_selected_todo_status(status);
+                    }
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new("Assign Agent").size(11.0).strong());
+                    for agent in self
+                        .project_agents()
+                        .into_iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                    {
+                        let assigned = todo.assigned_agent_id.as_ref() == Some(&agent.id);
+                        if ui
+                            .selectable_label(assigned, format!("{} · {}", agent.name, agent.role))
+                            .clicked()
+                        {
+                            self.assign_selected_todo(Some(agent.id.clone()));
+                        }
+                    }
+                    if ui.button("Clear Assignment").clicked() {
+                        self.assign_selected_todo(None);
+                    }
+                    ui.add_space(12.0);
+                    if ui
+                        .add(
+                            egui::Button::new("Launch Run")
+                                .fill(palette::ACCENT)
+                                .min_size(egui::vec2(120.0, 32.0)),
+                        )
+                        .clicked()
+                    {
+                        self.launch_selected_todo();
+                    }
+                    if !todo.acceptance_criteria.is_empty() {
+                        ui.add_space(12.0);
+                        ui.label(egui::RichText::new("Acceptance").size(11.0).strong());
+                        for item in &todo.acceptance_criteria {
+                            ui.colored_label(palette::TEXT_DIM, format!("- {item}"));
+                        }
+                    }
+                } else {
+                    ui.colored_label(palette::TEXT_DIM, "Select a todo to inspect.");
+                }
+            });
+
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::none()
+                    .fill(palette::BG)
+                    .inner_margin(egui::Margin::same(16.0)),
+            )
+            .show(ctx, |ui| {
+                let todos: Vec<_> = self.project_todos().into_iter().cloned().collect();
+                if todos.is_empty() {
+                    ui.centered_and_justified(|ui| {
+                        ui.colored_label(palette::TEXT_DIM, "No todos for this project yet.");
+                    });
+                    return;
+                }
+
+                let columns = [
+                    TodoStatus::Backlog,
+                    TodoStatus::InProgress,
+                    TodoStatus::InReview,
+                    TodoStatus::Done,
+                ];
+                egui::ScrollArea::horizontal().show(ui, |ui| {
+                    ui.horizontal_top(|ui| {
+                        for status in columns {
+                            let items: Vec<_> = todos
+                                .iter()
+                                .filter(|todo| todo.status == status)
+                                .cloned()
+                                .collect();
+                            panel_card(ui, todo_status_label(status), |ui| {
+                                ui.set_width(250.0);
+                                if items.is_empty() {
+                                    ui.colored_label(palette::TEXT_DIM, "No items");
+                                } else {
+                                    for todo in &items {
+                                        let selected =
+                                            self.selected_todo_id.as_ref() == Some(&todo.id);
+                                        if draw_entity_tile(
+                                            ui,
+                                            selected,
+                                            &todo.title,
+                                            todo.description.as_deref().unwrap_or(""),
+                                        )
+                                        .clicked()
+                                        {
+                                            self.selected_todo_id = Some(todo.id.clone());
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    });
+                });
+            });
+    }
+
+    fn show_agents_view(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::none()
+                    .fill(palette::BG)
+                    .inner_margin(egui::Margin::same(16.0)),
+            )
+            .show(ctx, |ui| {
+                ui.colored_label(
+                    palette::WHITE,
+                    egui::RichText::new("Agents").size(18.0).strong(),
+                );
+                ui.add_space(12.0);
+                let agents: Vec<_> = self.project_agents().into_iter().cloned().collect();
+                if agents.is_empty() {
+                    ui.colored_label(palette::TEXT_DIM, "No agents for this scope yet.");
+                } else {
+                    for agent in agents {
+                        let assigned_count = self
+                            .project_todos()
+                            .into_iter()
+                            .filter(|todo| todo.assigned_agent_id.as_ref() == Some(&agent.id))
+                            .count();
+                        panel_card(ui, &agent.name, |ui| {
+                            ui.colored_label(
+                                palette::TEXT_DIM,
+                                format!(
+                                    "{} · {}",
+                                    agent.role,
+                                    agent
+                                        .model
+                                        .clone()
+                                        .unwrap_or_else(|| "default model".into())
+                                ),
+                            );
+                            ui.colored_label(
+                                palette::TEXT_DIM,
+                                format!("{assigned_count} assigned todos"),
+                            );
+                            if ui.button("Select Agent").clicked() {
+                                self.selected_agent_id = Some(agent.id.clone());
+                                self.view = View::Todos;
+                            }
+                        });
+                    }
+                }
+            });
+    }
+
     // -----------------------------------------------------------------------
     // Chat view — matches dashboar-detail.html
     // -----------------------------------------------------------------------
     fn show_chat_view(&mut self, ctx: &egui::Context) {
+        let has_session = self.active_session.is_some() || self.selected_session_id.is_some();
+        if has_session {
+        egui::SidePanel::right("chat_run_detail")
+            .default_width(280.0)
+            .resizable(true)
+            .frame(
+                egui::Frame::none()
+                    .fill(palette::CARD)
+                    .inner_margin(egui::Margin::same(16.0))
+                    .stroke(egui::Stroke::new(1.0, palette::BORDER)),
+            )
+            .show(ctx, |ui| {
+                ui.colored_label(
+                    palette::WHITE,
+                    egui::RichText::new("Run Detail").size(14.0).strong(),
+                );
+                ui.add_space(12.0);
+                let active_session_id = self
+                    .active_session
+                    .as_ref()
+                    .map(|session| session.info.session_id.clone())
+                    .or_else(|| self.selected_session_id.clone());
+                if let Some(session_id) = active_session_id {
+                    ui.colored_label(
+                        palette::TEXT,
+                        egui::RichText::new(&session_id).monospace().size(11.0),
+                    );
+                    if let Some(run) = self
+                        .orchestration
+                        .run_links
+                        .iter()
+                        .find(|run| run.session_id == session_id)
+                    {
+                        if let Some(todo) = self
+                            .orchestration
+                            .todos
+                            .iter()
+                            .find(|todo| todo.id == run.todo_id)
+                        {
+                            ui.add_space(8.0);
+                            ui.label(egui::RichText::new("Todo").size(11.0).strong());
+                            ui.colored_label(palette::TEXT_DIM, &todo.title);
+                        }
+                        if let Some(agent_id) = &run.agent_id {
+                            if let Some(agent) = self
+                                .orchestration
+                                .agents
+                                .iter()
+                                .find(|agent| &agent.id == agent_id)
+                            {
+                                ui.add_space(8.0);
+                                ui.label(egui::RichText::new("Agent").size(11.0).strong());
+                                ui.colored_label(palette::TEXT_DIM, &agent.name);
+                            }
+                        }
+                        if let Some(branch) = &run.branch {
+                            ui.add_space(8.0);
+                            ui.label(egui::RichText::new("Branch").size(11.0).strong());
+                            ui.colored_label(palette::TEXT_DIM, branch);
+                        }
+                    }
+
+                    if let Some(active) = self.active_session.as_ref() {
+                        ui.add_space(12.0);
+                        ui.label(egui::RichText::new("Usage").size(11.0).strong());
+                        ui.colored_label(
+                            palette::TEXT_DIM,
+                            format!(
+                                "{} in · {} out · ${:.4}",
+                                active.input_tokens,
+                                active.output_tokens,
+                                active.estimated_cost_usd
+                            ),
+                        );
+                        if let Some(workspace) = active.info.workspace_root.to_str() {
+                            ui.add_space(8.0);
+                            ui.label(egui::RichText::new("Workspace").size(11.0).strong());
+                            ui.colored_label(palette::TEXT_DIM, truncate_path(workspace, 42));
+                        }
+                        if !active.child_session_ids.is_empty() {
+                            ui.add_space(12.0);
+                            ui.label(egui::RichText::new("Child Sessions").size(11.0).strong());
+                            for child in &active.child_session_ids {
+                                ui.colored_label(palette::TEXT_DIM, child);
+                            }
+                        }
+                    }
+
+                    if let Some(workspace_root) = self.selected_workspace() {
+                        if let Some(state) = load_session_state(
+                            &workspace_root,
+                            &self.effective_project_config(),
+                            &session_id,
+                        ) {
+                            if let Some(worktree) = state.meta.worktree_path {
+                                ui.add_space(8.0);
+                                ui.label(egui::RichText::new("Worktree").size(11.0).strong());
+                                ui.colored_label(
+                                    palette::TEXT_DIM,
+                                    truncate_path(&worktree.display().to_string(), 42),
+                                );
+                            }
+                            if !state.meta.child_session_ids.is_empty() {
+                                ui.add_space(8.0);
+                                ui.label(
+                                    egui::RichText::new("Persisted Lineage").size(11.0).strong(),
+                                );
+                                for child in state.meta.child_session_ids {
+                                    ui.colored_label(palette::TEXT_DIM, child);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    ui.colored_label(palette::TEXT_DIM, "Open a session to inspect its lineage.");
+                }
+            });
+        }
+
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::none()
@@ -1132,8 +2102,7 @@ impl DesktopApp {
                                     ui.horizontal(|ui| {
                                         ui.colored_label(
                                             palette::ACCENT,
-                                            egui::RichText::new("● Agent is working...")
-                                                .size(12.0),
+                                            egui::RichText::new("● Agent is working...").size(12.0),
                                         );
                                     });
                                     ui.add_space(8.0);
@@ -1143,11 +2112,8 @@ impl DesktopApp {
                                     ui.add_space(8.0);
                                     ui.colored_label(
                                         palette::TEXT_DIM,
-                                        egui::RichText::new(format!(
-                                            "Session ended: {:?}",
-                                            reason
-                                        ))
-                                        .size(12.0),
+                                        egui::RichText::new(format!("Session ended: {:?}", reason))
+                                            .size(12.0),
                                     );
                                 }
 
@@ -1181,7 +2147,9 @@ impl DesktopApp {
                                     let resp = ui.add(
                                         egui::TextEdit::singleline(&mut session.composer)
                                             .font(egui::FontId::monospace(13.0))
-                                            .desired_width((ui.available_width() - 160.0).max(100.0))
+                                            .desired_width(
+                                                (ui.available_width() - 160.0).max(100.0),
+                                            )
                                             .hint_text("Type a command or message to dispatch..."),
                                     );
 
@@ -1200,7 +2168,7 @@ impl DesktopApp {
                                     .rounding(8.0)
                                     .min_size(egui::vec2(90.0, 32.0));
 
-                                                    if ui.add_enabled(can_send, send_btn).clicked()
+                                    if ui.add_enabled(can_send, send_btn).clicked()
                                         || (enter_pressed && can_send)
                                     {
                                         session.run_in_progress = true;
@@ -1222,9 +2190,7 @@ impl DesktopApp {
                                     .stroke(egui::Stroke::new(1.0, palette::BORDER))
                                     .rounding(6.0);
                                     if ui.add(cancel_btn).clicked() {
-                                        session
-                                            .controller
-                                            .send_command(&AgentCommand::Cancel);
+                                        session.controller.send_command(&AgentCommand::Cancel);
                                     }
                                 });
                             },
@@ -1245,8 +2211,18 @@ impl DesktopApp {
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    scope_tab(ui, &mut self.settings_scope, SettingsScope::Project, "Project");
-                    scope_tab(ui, &mut self.settings_scope, SettingsScope::Global, "Global");
+                    scope_tab(
+                        ui,
+                        &mut self.settings_scope,
+                        SettingsScope::Project,
+                        "Project",
+                    );
+                    scope_tab(
+                        ui,
+                        &mut self.settings_scope,
+                        SettingsScope::Global,
+                        "Global",
+                    );
                 });
                 ui.add_space(16.0);
 
@@ -1371,7 +2347,10 @@ impl eframe::App for DesktopApp {
         self.show_header(ctx);
 
         match self.view {
+            View::Dashboard => self.show_dashboard_view(ctx),
             View::Projects => self.show_projects_view(ctx),
+            View::Todos => self.show_todos_view(ctx),
+            View::Agents => self.show_agents_view(ctx),
             View::Chat => self.show_chat_view(ctx),
             View::Settings => self.show_settings_view(ctx),
         }
@@ -1513,8 +2492,13 @@ fn scope_tab(ui: &mut egui::Ui, selected: &mut SettingsScope, value: SettingsSco
     };
 
     let resp = ui.add(
-        egui::Label::new(egui::RichText::new(label).size(13.0).strong().color(text_color))
-            .sense(egui::Sense::click()),
+        egui::Label::new(
+            egui::RichText::new(label)
+                .size(13.0)
+                .strong()
+                .color(text_color),
+        )
+        .sense(egui::Sense::click()),
     );
     if underline {
         let rect = resp.rect;
@@ -1530,6 +2514,215 @@ fn scope_tab(ui: &mut egui::Ui, selected: &mut SettingsScope, value: SettingsSco
         *selected = value;
     }
     ui.add_space(16.0);
+}
+
+fn mode_pill(ui: &mut egui::Ui, active: bool, label: &str) -> egui::Response {
+    let text_color = if active { palette::WHITE } else { palette::TEXT_DIM };
+    ui.add(
+        egui::Button::new(egui::RichText::new(label).size(11.5).color(text_color))
+            .fill(if active {
+                palette::ACCENT_BG
+            } else {
+                palette::CARD
+            })
+            .stroke(egui::Stroke::new(
+                1.0,
+                if active {
+                    palette::ACCENT
+                } else {
+                    palette::BORDER
+                },
+            ))
+            .rounding(6.0)
+            .min_size(egui::vec2(0.0, 26.0)),
+    )
+}
+
+fn draw_nav_link(ui: &mut egui::Ui, is_active: bool, label: &str) -> egui::Response {
+    let text_color = if is_active {
+        palette::WHITE
+    } else {
+        palette::TEXT
+    };
+    let bg = if is_active {
+        palette::ACCENT_BG
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), egui::Sense::click());
+    let inner = rect.shrink2(egui::vec2(10.0, 1.0));
+
+    ui.painter().rect_filled(inner, 6.0, bg);
+    if is_active {
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(inner.left_top(), egui::vec2(3.0, inner.height())),
+            2.0,
+            palette::ACCENT,
+        );
+    }
+
+    ui.painter().text(
+        egui::pos2(inner.left() + 22.0, inner.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(13.5),
+        text_color,
+    );
+
+    response
+}
+
+fn section_label(ui: &mut egui::Ui, label: &str) {
+    ui.horizontal(|ui| {
+        ui.add_space(14.0);
+        ui.colored_label(
+            palette::TEXT_DIM,
+            egui::RichText::new(label).size(10.5).strong(),
+        );
+    });
+    ui.add_space(4.0);
+}
+
+fn draw_entity_tile(
+    ui: &mut egui::Ui,
+    selected: bool,
+    title: &str,
+    subtitle: &str,
+) -> egui::Response {
+    let (border_color, bg_color) = if selected {
+        (palette::ACCENT, palette::ACCENT_BG)
+    } else {
+        (palette::BORDER, palette::CARD)
+    };
+    let outer_rect = ui.available_rect_before_wrap();
+    let desired = egui::vec2((outer_rect.width() - 24.0).max(40.0), 44.0);
+    let resp = ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), 48.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.add_space(12.0);
+            let (rect, resp) = ui.allocate_exact_size(desired, egui::Sense::click());
+            ui.painter()
+                .rect(rect, 6.0, bg_color, egui::Stroke::new(1.0, border_color));
+            let title_color = if selected {
+                palette::WHITE
+            } else {
+                palette::TEXT
+            };
+            ui.painter().text(
+                rect.left_top() + egui::vec2(10.0, 7.0),
+                egui::Align2::LEFT_TOP,
+                truncate_path(title, 26),
+                egui::FontId::proportional(12.5),
+                title_color,
+            );
+            if !subtitle.is_empty() {
+                ui.painter().text(
+                    rect.left_top() + egui::vec2(10.0, 25.0),
+                    egui::Align2::LEFT_TOP,
+                    truncate_path(subtitle, 30),
+                    egui::FontId::proportional(10.5),
+                    palette::TEXT_DIM,
+                );
+            }
+            resp
+        },
+    );
+    ui.add_space(2.0);
+    resp.inner
+}
+
+fn stat_card(ui: &mut egui::Ui, label: &str, value: &str) {
+    egui::Frame::none()
+        .fill(palette::CARD)
+        .rounding(10.0)
+        .stroke(egui::Stroke::new(1.0, palette::BORDER))
+        .inner_margin(egui::Margin::symmetric(16.0, 12.0))
+        .show(ui, |ui| {
+            ui.set_min_width(140.0);
+            ui.colored_label(
+                palette::TEXT_DIM,
+                egui::RichText::new(label).size(11.0).strong(),
+            );
+            ui.add_space(4.0);
+            ui.colored_label(
+                palette::WHITE,
+                egui::RichText::new(value).size(22.0).strong(),
+            );
+        });
+}
+
+fn panel_card(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::none()
+        .fill(palette::CARD)
+        .rounding(12.0)
+        .stroke(egui::Stroke::new(1.0, palette::BORDER))
+        .inner_margin(egui::Margin::symmetric(16.0, 14.0))
+        .show(ui, |ui| {
+            ui.colored_label(
+                palette::WHITE,
+                egui::RichText::new(title).size(14.0).strong(),
+            );
+            ui.add_space(10.0);
+            add_contents(ui);
+        });
+    ui.add_space(10.0);
+}
+
+fn todo_priority_combo(ui: &mut egui::Ui, priority: &mut TodoPriority) {
+    egui::ComboBox::from_id_salt("todo_priority")
+        .selected_text(match priority {
+            TodoPriority::Low => "Priority: Low",
+            TodoPriority::Medium => "Priority: Medium",
+            TodoPriority::High => "Priority: High",
+            TodoPriority::Critical => "Priority: Critical",
+        })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(priority, TodoPriority::Low, "Low");
+            ui.selectable_value(priority, TodoPriority::Medium, "Medium");
+            ui.selectable_value(priority, TodoPriority::High, "High");
+            ui.selectable_value(priority, TodoPriority::Critical, "Critical");
+        });
+}
+
+fn todo_status_combo(ui: &mut egui::Ui, status: &mut TodoStatus) {
+    egui::ComboBox::from_id_salt("todo_status")
+        .selected_text(todo_status_label(*status))
+        .show_ui(ui, |ui| {
+            for candidate in [
+                TodoStatus::Backlog,
+                TodoStatus::Ready,
+                TodoStatus::InProgress,
+                TodoStatus::InReview,
+                TodoStatus::Blocked,
+                TodoStatus::Done,
+                TodoStatus::Cancelled,
+            ] {
+                ui.selectable_value(status, candidate, todo_status_label(candidate));
+            }
+        });
+}
+
+fn todo_status_label(status: TodoStatus) -> &'static str {
+    match status {
+        TodoStatus::Backlog => "Backlog",
+        TodoStatus::Ready => "Ready",
+        TodoStatus::InProgress => "In Progress",
+        TodoStatus::InReview => "In Review",
+        TodoStatus::Blocked => "Blocked",
+        TodoStatus::Done => "Done",
+        TodoStatus::Cancelled => "Cancelled",
+    }
+}
+
+fn clean_optional_text(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn attach_controller(info: &ServiceSessionInfo) -> Result<LiveAttachController, String> {
@@ -1576,6 +2769,19 @@ fn load_transcript(workspace_root: &Path, config: &NcaConfig, session_id: &str) 
         .iter()
         .filter_map(message_to_chat_entry)
         .collect()
+}
+
+fn load_session_state(
+    workspace_root: &Path,
+    config: &NcaConfig,
+    session_id: &str,
+) -> Option<nca_common::session::SessionState> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    let store = SessionStore::new(workspace_root.join(&config.session.history_dir));
+    runtime.block_on(store.load(session_id)).ok()
 }
 
 fn workspace_event_log_path(

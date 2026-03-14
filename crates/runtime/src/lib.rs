@@ -1,6 +1,7 @@
 pub mod bash_tool;
 pub mod ipc;
 pub mod memory_store;
+pub mod orchestrator_store;
 pub mod process;
 pub mod pty;
 pub mod service;

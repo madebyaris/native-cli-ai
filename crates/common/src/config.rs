@@ -1190,7 +1190,10 @@ mod tests {
         config.apply_env();
 
         assert_eq!(config.provider.default, ProviderKind::OpenRouter);
-        assert_eq!(config.provider.openai.resolve_api_key().as_deref(), Some("openai-key"));
+        assert_eq!(
+            config.provider.openai.resolve_api_key().as_deref(),
+            Some("openai-key")
+        );
         assert_eq!(
             config.provider.anthropic.resolve_api_key().as_deref(),
             Some("anthropic-key")

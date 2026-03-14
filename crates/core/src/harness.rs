@@ -83,9 +83,7 @@ pub fn build_system_prompt(
         }
     }
 
-    if let Some(section) =
-        skills_section(workspace_root, &config.harness.skill_directories)
-    {
+    if let Some(section) = skills_section(workspace_root, &config.harness.skill_directories) {
         sections.push(section);
     }
 
@@ -125,7 +123,10 @@ fn permission_mode_section(mode: PermissionMode) -> Option<String> {
     }
 }
 
-fn skills_section(workspace_root: &Path, skill_directories: &[std::path::PathBuf]) -> Option<String> {
+fn skills_section(
+    workspace_root: &Path,
+    skill_directories: &[std::path::PathBuf],
+) -> Option<String> {
     let skills = SkillCatalog::discover(workspace_root, skill_directories).ok()?;
     if skills.is_empty() {
         return None;
@@ -142,9 +143,7 @@ fn skills_section(workspace_root: &Path, skill_directories: &[std::path::PathBuf
     Some(section)
 }
 
-fn orchestration_context_section(
-    orchestration: Option<&OrchestrationContext>,
-) -> Option<String> {
+fn orchestration_context_section(orchestration: Option<&OrchestrationContext>) -> Option<String> {
     let orchestration = orchestration?;
     let mut lines = vec!["Execution Context:".to_string()];
 
@@ -198,7 +197,11 @@ mod tests {
 
         assert!(prompt.contains("Rust-native only."));
         assert!(prompt.contains("MiniMax is the primary provider path."));
-        assert!(prompt.contains("The desktop monitor app (`nca-monitor`) is the primary user experience."));
+        assert!(
+            prompt.contains(
+                "The desktop monitor app (`nca-monitor`) is the primary user experience."
+            )
+        );
         assert!(prompt.contains("Subagents should be child sessions with their own worktrees"));
         assert!(prompt.contains("must fail loudly instead of being treated as success"));
     }
@@ -237,7 +240,9 @@ mod tests {
         let prompt = build_system_prompt(&config, temp.path(), Some(&orchestration));
 
         let identity_idx = prompt.find("Identity:").expect("built-in section");
-        let permission_idx = prompt.find("Permission Mode: plan").expect("permission section");
+        let permission_idx = prompt
+            .find("Permission Mode: plan")
+            .expect("permission section");
         let project_idx = prompt
             .find("Project Instructions:\nproject rule")
             .expect("project instructions");
@@ -245,7 +250,9 @@ mod tests {
             .find("Local Instructions:\nlocal rule")
             .expect("local instructions");
         let skills_idx = prompt.find("Available Skills:").expect("skills section");
-        let orchestration_idx = prompt.find("Execution Context:").expect("orchestration section");
+        let orchestration_idx = prompt
+            .find("Execution Context:")
+            .expect("orchestration section");
 
         assert!(identity_idx < permission_idx);
         assert!(permission_idx < project_idx);
@@ -260,11 +267,8 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         fs::create_dir_all(temp.path().join(".nca")).expect("create local dir");
         fs::write(temp.path().join(".ncarc"), "project override").expect("write .ncarc");
-        fs::write(
-            temp.path().join(".nca/instructions.md"),
-            "local override",
-        )
-        .expect("write local instructions");
+        fs::write(temp.path().join(".nca/instructions.md"), "local override")
+            .expect("write local instructions");
 
         let prompt = build_system_prompt(&config, temp.path(), None);
 

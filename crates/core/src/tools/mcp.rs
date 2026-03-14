@@ -40,10 +40,9 @@ impl ToolExecutor for McpTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.prefixed_name(),
-            description: self
-                .description
-                .clone()
-                .unwrap_or_else(|| format!("MCP tool `{}` from `{}`", self.tool_name, self.server.name)),
+            description: self.description.clone().unwrap_or_else(|| {
+                format!("MCP tool `{}` from `{}`", self.tool_name, self.server.name)
+            }),
             parameters: self.parameters.clone(),
         }
     }
@@ -54,7 +53,11 @@ impl ToolExecutor for McpTool {
         let tool_name = self.tool_name.clone();
         let input = call.input.clone();
         let call_id = call.id.clone();
-        match tokio::task::spawn_blocking(move || execute_mcp_call(&workspace_root, &server, &tool_name, input)).await {
+        match tokio::task::spawn_blocking(move || {
+            execute_mcp_call(&workspace_root, &server, &tool_name, input)
+        })
+        .await
+        {
             Ok(Ok(output)) => ToolResult {
                 call_id,
                 success: true,
@@ -187,14 +190,22 @@ impl McpClient {
                 }
             }),
         )?;
-        self.notify("notifications/initialized", Value::Object(Default::default()))?;
+        self.notify(
+            "notifications/initialized",
+            Value::Object(Default::default()),
+        )?;
         Ok(())
     }
 
     fn list_tools(&mut self) -> Result<Vec<McpToolSchema>, String> {
         let result = self.request("tools/list", serde_json::json!({}))?;
-        serde_json::from_value(result.get("tools").cloned().unwrap_or_else(|| Value::Array(vec![])))
-            .map_err(|err| format!("failed to decode MCP tool list: {err}"))
+        serde_json::from_value(
+            result
+                .get("tools")
+                .cloned()
+                .unwrap_or_else(|| Value::Array(vec![])),
+        )
+        .map_err(|err| format!("failed to decode MCP tool list: {err}"))
     }
 
     fn call_tool(&mut self, tool_name: &str, input: Value) -> Result<Value, String> {
@@ -255,7 +266,9 @@ impl McpClient {
 
     fn read_message(&mut self) -> Result<Value, String> {
         let mut line = String::new();
-        self.stdout.read_line(&mut line).map_err(|err| err.to_string())?;
+        self.stdout
+            .read_line(&mut line)
+            .map_err(|err| err.to_string())?;
         serde_json::from_str(&line).map_err(|err| err.to_string())
     }
 }

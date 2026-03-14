@@ -46,7 +46,9 @@ impl SessionStore {
         &self,
         session_id: &str,
     ) -> Result<SessionSnapshot, SessionStoreError> {
-        self.load(session_id).await.map(|session| session.snapshot())
+        self.load(session_id)
+            .await
+            .map(|session| session.snapshot())
     }
 
     pub async fn list(&self) -> Result<Vec<String>, SessionStoreError> {

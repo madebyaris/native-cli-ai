@@ -7,8 +7,8 @@ mod stream;
 use crate::approval_prompt::IpcApprovalHandler;
 use clap::Parser;
 use nca_common::config::{NcaConfig, PermissionMode, ProviderKind};
-use nca_common::event::{AgentCommand, EventEnvelope};
 use nca_common::event::EndReason;
+use nca_common::event::{AgentCommand, EventEnvelope};
 use nca_common::session::{OrchestrationContext, SessionSnapshot, SessionStatus};
 use nca_core::skills::SkillCatalog;
 use nca_runtime::memory_store::{MemoryNote, MemoryStore};
@@ -335,7 +335,9 @@ async fn try_main() -> anyhow::Result<()> {
             spawn_run(
                 &workspace_root,
                 &prompt,
-                model.as_deref().map(|model| config.model.resolve_alias(model)),
+                model
+                    .as_deref()
+                    .map(|model| config.model.resolve_alias(model)),
                 safe,
                 effective_mode,
                 json,
@@ -449,8 +451,15 @@ async fn try_main() -> anyhow::Result<()> {
                     config.permissions.mode = mode.into();
                 }
                 let session_id = latest_session_id(&config, &workspace_root).await?;
-                resume_session(config, &workspace_root, &session_id, None, cli.safe, cli.stream)
-                    .await?;
+                resume_session(
+                    config,
+                    &workspace_root,
+                    &session_id,
+                    None,
+                    cli.safe,
+                    cli.stream,
+                )
+                .await?;
             } else {
                 if cli.run {
                     eprintln!("[run-mode] interactive run profile enabled");
@@ -590,6 +599,7 @@ async fn run_service_session(
         safe_mode: safe,
         initial_prompt,
         orchestration_context,
+        launch_context: None,
         kind: nca_runtime::service::ServiceSessionKind::New { session_id },
     })
     .await
@@ -651,7 +661,11 @@ async fn spawn_run(
     Ok(())
 }
 
-async fn list_sessions(config: &NcaConfig, workspace_root: &PathBuf, json: bool) -> anyhow::Result<()> {
+async fn list_sessions(
+    config: &NcaConfig,
+    workspace_root: &PathBuf,
+    json: bool,
+) -> anyhow::Result<()> {
     let store = nca_runtime::session_store::SessionStore::new(
         workspace_root.join(&config.session.history_dir),
     );
@@ -947,7 +961,11 @@ fn list_mcp_servers(config: &NcaConfig, json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn show_memory(config: &NcaConfig, workspace_root: &PathBuf, json: bool) -> anyhow::Result<()> {
+async fn show_memory(
+    config: &NcaConfig,
+    workspace_root: &PathBuf,
+    json: bool,
+) -> anyhow::Result<()> {
     let store = workspace_memory_store(config, workspace_root);
     let state = store.load().await.map_err(anyhow::Error::msg)?;
     if json {
@@ -1061,7 +1079,12 @@ fn show_doctor(config: &NcaConfig, workspace_root: &PathBuf, json: bool) -> anyh
                 base_url: config.provider.base_url_for(provider).to_string(),
             })
             .collect(),
-        mcp_server_count: config.mcp.servers.iter().filter(|server| server.enabled).count(),
+        mcp_server_count: config
+            .mcp
+            .servers
+            .iter()
+            .filter(|server| server.enabled)
+            .count(),
         skill_count: skills,
         memory_path: if config.memory.file_path.is_absolute() {
             config.memory.file_path.clone()
@@ -1102,7 +1125,12 @@ fn show_config(config: &NcaConfig, workspace_root: &PathBuf, json: bool) -> anyh
     if json {
         print_json(config, false)?;
     } else {
-        println!("Global config: {}", nca_common::config::global_config_path().map(|path| path.display().to_string()).unwrap_or_else(|| "<unavailable>".into()));
+        println!(
+            "Global config: {}",
+            nca_common::config::global_config_path()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<unavailable>".into())
+        );
         println!(
             "Workspace config: {}",
             nca_common::config::workspace_config_path(workspace_root).display()
@@ -1119,7 +1147,12 @@ fn show_config(config: &NcaConfig, workspace_root: &PathBuf, json: bool) -> anyh
                 config.provider.base_url_for(provider)
             );
         }
-        println!("Memory path: {}", workspace_memory_store(config, workspace_root).path().display());
+        println!(
+            "Memory path: {}",
+            workspace_memory_store(config, workspace_root)
+                .path()
+                .display()
+        );
         println!("Skill directories:");
         for path in &config.harness.skill_directories {
             let resolved = if path.is_absolute() {

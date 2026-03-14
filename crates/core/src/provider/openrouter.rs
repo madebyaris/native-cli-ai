@@ -88,8 +88,13 @@ impl Provider for OpenRouterProvider {
             model.to_string()
         };
 
-        let body =
-            openai_request_body(messages, tools, &model, self.max_tokens, self.config.temperature);
+        let body = openai_request_body(
+            messages,
+            tools,
+            &model,
+            self.max_tokens,
+            self.config.temperature,
+        );
 
         let response = self
             .client
@@ -129,19 +134,22 @@ mod tests {
                 request
                     .headers()
                     .iter()
-                    .any(|header| header.field.equiv("authorization") && header.value.as_str() == "Bearer openrouter-test-key")
+                    .any(|header| header.field.equiv("authorization")
+                        && header.value.as_str() == "Bearer openrouter-test-key")
             );
             assert!(
                 request
                     .headers()
                     .iter()
-                    .any(|header| header.field.equiv("http-referer") && header.value.as_str() == "https://nca.test")
+                    .any(|header| header.field.equiv("http-referer")
+                        && header.value.as_str() == "https://nca.test")
             );
             assert!(
                 request
                     .headers()
                     .iter()
-                    .any(|header| header.field.equiv("x-title") && header.value.as_str() == "Native CLI AI")
+                    .any(|header| header.field.equiv("x-title")
+                        && header.value.as_str() == "Native CLI AI")
             );
         });
 
@@ -159,7 +167,13 @@ mod tests {
 
         let chunks = collect_chunks(stream).await;
         assert!(matches!(&chunks[0], StreamChunk::TextDelta(text) if text == "Router hello"));
-        assert!(matches!(&chunks[1], StreamChunk::Usage { input_tokens: 9, output_tokens: 4 }));
+        assert!(matches!(
+            &chunks[1],
+            StreamChunk::Usage {
+                input_tokens: 9,
+                output_tokens: 4
+            }
+        ));
         assert!(matches!(chunks.last(), Some(StreamChunk::Done)));
     }
 }

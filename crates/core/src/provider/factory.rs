@@ -57,7 +57,9 @@ mod tests {
         match build_provider(&config) {
             Ok(_) => panic!("missing credentials should fail"),
             Err(error) => {
-                assert!(matches!(error, ProviderError::Configuration(message) if message.contains("missing OpenAI API key")));
+                assert!(
+                    matches!(error, ProviderError::Configuration(message) if message.contains("missing OpenAI API key"))
+                );
             }
         }
     }

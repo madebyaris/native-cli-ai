@@ -19,6 +19,7 @@ portable-pty = "0.9"
 ignore = "0.4"
 walkdir = "2"
 async-trait = "0.1"
+rusqlite = { version = "0.38.0", features = ["bundled", "chrono"] }
 
 [dev-dependencies]
 tempfile = "3"

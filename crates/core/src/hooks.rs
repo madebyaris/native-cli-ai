@@ -104,10 +104,16 @@ async fn run_hook_command(hook: &HookCommand, payload: &Value) -> Result<(), Str
 
     if let Some(mut stdin) = child.stdin.take() {
         let input = serde_json::to_vec(payload).map_err(|err| err.to_string())?;
-        stdin.write_all(&input).await.map_err(|err| err.to_string())?;
+        stdin
+            .write_all(&input)
+            .await
+            .map_err(|err| err.to_string())?;
     }
 
-    let output = child.wait_with_output().await.map_err(|err| err.to_string())?;
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|err| err.to_string())?;
     if output.status.success() || !hook.blocking {
         return Ok(());
     }

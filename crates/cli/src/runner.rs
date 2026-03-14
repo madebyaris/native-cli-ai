@@ -108,7 +108,11 @@ impl SessionRuntime {
         self.supervisor.set_session_summary(summary);
     }
 
-    pub async fn append_memory_note(&self, kind: &str, content: Option<String>) -> Result<(), String> {
+    pub async fn append_memory_note(
+        &self,
+        kind: &str,
+        content: Option<String>,
+    ) -> Result<(), String> {
         self.supervisor.append_memory_note(kind, content).await
     }
 

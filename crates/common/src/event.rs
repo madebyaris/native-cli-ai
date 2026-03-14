@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::orchestration::{DesktopMode, OrchestrationSnapshot};
 use crate::tool::ToolResult;
 
 /// Envelope for events written to disk, with stable id and timestamp for ordering.
@@ -89,6 +90,22 @@ pub enum AgentEvent {
         child_session_id: String,
         status: String,
     },
+    TodoStatusChanged {
+        todo_id: String,
+        status: String,
+    },
+    TodoAssigned {
+        todo_id: String,
+        agent_id: Option<String>,
+    },
+    RunLinked {
+        todo_id: String,
+        agent_id: Option<String>,
+        session_id: String,
+    },
+    DesktopModeChanged {
+        mode: DesktopMode,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,6 +162,9 @@ pub enum AgentResponse {
     },
     SessionList {
         sessions: Vec<crate::session::SessionMeta>,
+    },
+    OrchestrationSnapshot {
+        snapshot: OrchestrationSnapshot,
     },
     Error {
         message: String,

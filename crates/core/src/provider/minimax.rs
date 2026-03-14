@@ -3,9 +3,7 @@ use nca_common::message::Message;
 use nca_common::tool::ToolDefinition;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 
-use super::anthropic_compat::{
-    anthropic_request_body, map_provider_error, spawn_anthropic_stream,
-};
+use super::anthropic_compat::{anthropic_request_body, map_provider_error, spawn_anthropic_stream};
 use super::{Provider, ProviderError, StreamChunk};
 
 /// MiniMax provider using the Anthropic-compatible endpoint.
@@ -44,15 +42,10 @@ impl MiniMaxProvider {
         headers.insert(
             "x-api-key",
             HeaderValue::from_str(&api_key).map_err(|err| {
-                ProviderError::Configuration(format!(
-                    "failed to build x-api-key header: {err}"
-                ))
+                ProviderError::Configuration(format!("failed to build x-api-key header: {err}"))
             })?,
         );
-        headers.insert(
-            "anthropic-version",
-            HeaderValue::from_static("2023-06-01"),
-        );
+        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
 
         let client = reqwest::Client::builder()
             .default_headers(headers)
@@ -69,10 +62,7 @@ impl MiniMaxProvider {
     }
 
     fn endpoint(&self) -> String {
-        format!(
-            "{}/v1/messages",
-            self.config.base_url.trim_end_matches('/')
-        )
+        format!("{}/v1/messages", self.config.base_url.trim_end_matches('/'))
     }
 }
 
