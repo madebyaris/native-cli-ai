@@ -1,5 +1,12 @@
+pub mod anthropic;
+pub mod anthropic_compat;
 pub mod factory;
 pub mod minimax;
+pub mod openai;
+pub mod openai_compat;
+pub mod openrouter;
+#[cfg(test)]
+pub mod test_support;
 
 use async_trait::async_trait;
 use nca_common::message::Message;

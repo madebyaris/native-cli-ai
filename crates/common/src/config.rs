@@ -114,6 +114,12 @@ impl NcaConfig {
     }
 
     fn merge(&mut self, partial: PartialNcaConfig) {
+        let provider_changed = partial.provider.is_some();
+        let explicit_model_override = partial
+            .model
+            .as_ref()
+            .and_then(|model| model.default_model.as_ref())
+            .is_some();
         if let Some(provider) = partial.provider {
             self.provider.merge(provider);
         }
@@ -144,17 +150,25 @@ impl NcaConfig {
         if let Some(web) = partial.web {
             self.web.merge(web);
         }
+
+        if explicit_model_override {
+            self.provider
+                .set_model_for_default(self.model.default_model.clone());
+        }
+
+        if provider_changed || explicit_model_override {
+            self.sync_default_model_from_provider();
+        }
     }
 
     fn apply_env(&mut self) {
         if let Ok(provider) = env::var("NCA_DEFAULT_PROVIDER") {
             self.provider.default = ProviderKind::from_env(&provider);
+            self.sync_default_model_from_provider();
         }
 
         if let Ok(model) = env::var("NCA_MODEL") {
-            let resolved = self.model.resolve_alias(&model);
-            self.model.default_model = resolved.clone();
-            self.provider.minimax.model = resolved;
+            self.apply_model_override(&model);
         }
 
         if let Ok(api_key) = env::var("MINIMAX_API_KEY") {
@@ -167,6 +181,50 @@ impl NcaConfig {
 
         if let Ok(model) = env::var("MINIMAX_MODEL") {
             self.provider.minimax.model = model;
+        }
+
+        if let Ok(api_key) = env::var("OPENAI_API_KEY") {
+            self.provider.openai.api_key = Some(api_key);
+        }
+
+        if let Ok(base_url) = env::var("OPENAI_BASE_URL") {
+            self.provider.openai.base_url = base_url;
+        }
+
+        if let Ok(model) = env::var("OPENAI_MODEL") {
+            self.provider.openai.model = model;
+        }
+
+        if let Ok(api_key) = env::var("ANTHROPIC_API_KEY") {
+            self.provider.anthropic.api_key = Some(api_key);
+        }
+
+        if let Ok(base_url) = env::var("ANTHROPIC_BASE_URL") {
+            self.provider.anthropic.base_url = base_url;
+        }
+
+        if let Ok(model) = env::var("ANTHROPIC_MODEL") {
+            self.provider.anthropic.model = model;
+        }
+
+        if let Ok(api_key) = env::var("OPENROUTER_API_KEY") {
+            self.provider.openrouter.api_key = Some(api_key);
+        }
+
+        if let Ok(base_url) = env::var("OPENROUTER_BASE_URL") {
+            self.provider.openrouter.base_url = base_url;
+        }
+
+        if let Ok(model) = env::var("OPENROUTER_MODEL") {
+            self.provider.openrouter.model = model;
+        }
+
+        if let Ok(site_url) = env::var("OPENROUTER_SITE_URL") {
+            self.provider.openrouter.site_url = Some(site_url);
+        }
+
+        if let Ok(app_name) = env::var("OPENROUTER_APP_NAME") {
+            self.provider.openrouter.app_name = Some(app_name);
         }
 
         if let Ok(memory_path) = env::var("NCA_MEMORY_PATH") {
@@ -184,6 +242,18 @@ impl NcaConfig {
                 self.web.max_fetch_chars = max_fetch_chars;
             }
         }
+
+        self.sync_default_model_from_provider();
+    }
+
+    pub fn apply_model_override(&mut self, raw_model: &str) {
+        let resolved = self.model.resolve_alias(raw_model);
+        self.provider.set_model_for_default(resolved);
+        self.sync_default_model_from_provider();
+    }
+
+    fn sync_default_model_from_provider(&mut self) {
+        self.model.default_model = self.provider.active_model().to_string();
     }
 }
 
@@ -259,6 +329,9 @@ pub enum ConfigError {
 pub struct ProviderConfig {
     pub default: ProviderKind,
     pub minimax: MiniMaxConfig,
+    pub openai: OpenAiConfig,
+    pub anthropic: AnthropicConfig,
+    pub openrouter: OpenRouterConfig,
 }
 
 impl Default for ProviderConfig {
@@ -266,6 +339,9 @@ impl Default for ProviderConfig {
         Self {
             default: ProviderKind::MiniMax,
             minimax: MiniMaxConfig::default(),
+            openai: OpenAiConfig::default(),
+            anthropic: AnthropicConfig::default(),
+            openrouter: OpenRouterConfig::default(),
         }
     }
 }
@@ -279,10 +355,78 @@ impl ProviderConfig {
         if let Some(minimax) = partial.minimax {
             self.minimax.merge(minimax);
         }
+        if let Some(openai) = partial.openai {
+            self.openai.merge(openai);
+        }
+        if let Some(anthropic) = partial.anthropic {
+            self.anthropic.merge(anthropic);
+        }
+        if let Some(openrouter) = partial.openrouter {
+            self.openrouter.merge(openrouter);
+        }
+    }
+
+    pub fn active_model(&self) -> &str {
+        match self.default {
+            ProviderKind::MiniMax => &self.minimax.model,
+            ProviderKind::OpenRouter => &self.openrouter.model,
+            ProviderKind::Anthropic => &self.anthropic.model,
+            ProviderKind::OpenAi => &self.openai.model,
+        }
+    }
+
+    pub fn set_model_for_default(&mut self, model: impl Into<String>) {
+        self.set_model_for(self.default, model);
+    }
+
+    pub fn set_model_for(&mut self, provider: ProviderKind, model: impl Into<String>) {
+        let model = model.into();
+        match provider {
+            ProviderKind::MiniMax => self.minimax.model = model,
+            ProviderKind::OpenRouter => self.openrouter.model = model,
+            ProviderKind::Anthropic => self.anthropic.model = model,
+            ProviderKind::OpenAi => self.openai.model = model,
+        }
+    }
+
+    pub fn model_for(&self, provider: ProviderKind) -> &str {
+        match provider {
+            ProviderKind::MiniMax => &self.minimax.model,
+            ProviderKind::OpenRouter => &self.openrouter.model,
+            ProviderKind::Anthropic => &self.anthropic.model,
+            ProviderKind::OpenAi => &self.openai.model,
+        }
+    }
+
+    pub fn base_url_for(&self, provider: ProviderKind) -> &str {
+        match provider {
+            ProviderKind::MiniMax => &self.minimax.base_url,
+            ProviderKind::OpenRouter => &self.openrouter.base_url,
+            ProviderKind::Anthropic => &self.anthropic.base_url,
+            ProviderKind::OpenAi => &self.openai.base_url,
+        }
+    }
+
+    pub fn api_key_env_for(&self, provider: ProviderKind) -> &str {
+        match provider {
+            ProviderKind::MiniMax => &self.minimax.api_key_env,
+            ProviderKind::OpenRouter => &self.openrouter.api_key_env,
+            ProviderKind::Anthropic => &self.anthropic.api_key_env,
+            ProviderKind::OpenAi => &self.openai.api_key_env,
+        }
+    }
+
+    pub fn api_key_present_for(&self, provider: ProviderKind) -> bool {
+        match provider {
+            ProviderKind::MiniMax => self.minimax.resolve_api_key().is_some(),
+            ProviderKind::OpenRouter => self.openrouter.resolve_api_key().is_some(),
+            ProviderKind::Anthropic => self.anthropic.resolve_api_key().is_some(),
+            ProviderKind::OpenAi => self.openai.resolve_api_key().is_some(),
+        }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderKind {
     MiniMax,
@@ -292,12 +436,28 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
+    pub const ALL: [ProviderKind; 4] = [
+        ProviderKind::MiniMax,
+        ProviderKind::OpenAi,
+        ProviderKind::Anthropic,
+        ProviderKind::OpenRouter,
+    ];
+
     fn from_env(value: &str) -> Self {
         match value.to_ascii_lowercase().as_str() {
             "openrouter" => Self::OpenRouter,
             "anthropic" => Self::Anthropic,
             "openai" => Self::OpenAi,
             _ => Self::MiniMax,
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            ProviderKind::MiniMax => "MiniMax",
+            ProviderKind::OpenRouter => "OpenRouter",
+            ProviderKind::Anthropic => "Anthropic",
+            ProviderKind::OpenAi => "OpenAI",
         }
     }
 }
@@ -328,9 +488,7 @@ impl Default for MiniMaxConfig {
 
 impl MiniMaxConfig {
     pub fn resolve_api_key(&self) -> Option<String> {
-        self.api_key
-            .clone()
-            .or_else(|| env::var(&self.api_key_env).ok())
+        resolve_api_key_value(&self.api_key, &self.api_key_env)
     }
 
     fn merge(&mut self, partial: PartialMiniMaxConfig) {
@@ -348,6 +506,153 @@ impl MiniMaxConfig {
         }
         if let Some(temperature) = partial.temperature {
             self.temperature = temperature;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAiConfig {
+    pub api_key_env: String,
+    pub api_key: Option<String>,
+    pub base_url: String,
+    pub model: String,
+    pub temperature: f32,
+}
+
+impl Default for OpenAiConfig {
+    fn default() -> Self {
+        Self {
+            api_key_env: "OPENAI_API_KEY".into(),
+            api_key: None,
+            base_url: "https://api.openai.com".into(),
+            model: "gpt-4o-mini".into(),
+            temperature: 0.7,
+        }
+    }
+}
+
+impl OpenAiConfig {
+    pub fn resolve_api_key(&self) -> Option<String> {
+        resolve_api_key_value(&self.api_key, &self.api_key_env)
+    }
+
+    fn merge(&mut self, partial: PartialOpenAiConfig) {
+        if let Some(api_key_env) = partial.api_key_env {
+            self.api_key_env = api_key_env;
+        }
+        if let Some(api_key) = partial.api_key {
+            self.api_key = Some(api_key);
+        }
+        if let Some(base_url) = partial.base_url {
+            self.base_url = base_url;
+        }
+        if let Some(model) = partial.model {
+            self.model = model;
+        }
+        if let Some(temperature) = partial.temperature {
+            self.temperature = temperature;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnthropicConfig {
+    pub api_key_env: String,
+    pub api_key: Option<String>,
+    pub base_url: String,
+    pub model: String,
+    pub temperature: f32,
+}
+
+impl Default for AnthropicConfig {
+    fn default() -> Self {
+        Self {
+            api_key_env: "ANTHROPIC_API_KEY".into(),
+            api_key: None,
+            base_url: "https://api.anthropic.com".into(),
+            model: "claude-3-7-sonnet-latest".into(),
+            temperature: 1.0,
+        }
+    }
+}
+
+impl AnthropicConfig {
+    pub fn resolve_api_key(&self) -> Option<String> {
+        resolve_api_key_value(&self.api_key, &self.api_key_env)
+    }
+
+    fn merge(&mut self, partial: PartialAnthropicConfig) {
+        if let Some(api_key_env) = partial.api_key_env {
+            self.api_key_env = api_key_env;
+        }
+        if let Some(api_key) = partial.api_key {
+            self.api_key = Some(api_key);
+        }
+        if let Some(base_url) = partial.base_url {
+            self.base_url = base_url;
+        }
+        if let Some(model) = partial.model {
+            self.model = model;
+        }
+        if let Some(temperature) = partial.temperature {
+            self.temperature = temperature;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenRouterConfig {
+    pub api_key_env: String,
+    pub api_key: Option<String>,
+    pub base_url: String,
+    pub model: String,
+    pub temperature: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_name: Option<String>,
+}
+
+impl Default for OpenRouterConfig {
+    fn default() -> Self {
+        Self {
+            api_key_env: "OPENROUTER_API_KEY".into(),
+            api_key: None,
+            base_url: "https://openrouter.ai/api".into(),
+            model: "openai/gpt-4o-mini".into(),
+            temperature: 0.7,
+            site_url: None,
+            app_name: None,
+        }
+    }
+}
+
+impl OpenRouterConfig {
+    pub fn resolve_api_key(&self) -> Option<String> {
+        resolve_api_key_value(&self.api_key, &self.api_key_env)
+    }
+
+    fn merge(&mut self, partial: PartialOpenRouterConfig) {
+        if let Some(api_key_env) = partial.api_key_env {
+            self.api_key_env = api_key_env;
+        }
+        if let Some(api_key) = partial.api_key {
+            self.api_key = Some(api_key);
+        }
+        if let Some(base_url) = partial.base_url {
+            self.base_url = base_url;
+        }
+        if let Some(model) = partial.model {
+            self.model = model;
+        }
+        if let Some(temperature) = partial.temperature {
+            self.temperature = temperature;
+        }
+        if let Some(site_url) = partial.site_url {
+            self.site_url = Some(site_url);
+        }
+        if let Some(app_name) = partial.app_name {
+            self.app_name = Some(app_name);
         }
     }
 }
@@ -706,6 +1011,9 @@ struct PartialNcaConfig {
 struct PartialProviderConfig {
     default: Option<ProviderKind>,
     minimax: Option<PartialMiniMaxConfig>,
+    openai: Option<PartialOpenAiConfig>,
+    anthropic: Option<PartialAnthropicConfig>,
+    openrouter: Option<PartialOpenRouterConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -715,6 +1023,35 @@ struct PartialMiniMaxConfig {
     base_url: Option<String>,
     model: Option<String>,
     temperature: Option<f32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialOpenAiConfig {
+    api_key_env: Option<String>,
+    api_key: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+    temperature: Option<f32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialAnthropicConfig {
+    api_key_env: Option<String>,
+    api_key: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+    temperature: Option<f32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialOpenRouterConfig {
+    api_key_env: Option<String>,
+    api_key: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+    temperature: Option<f32>,
+    site_url: Option<String>,
+    app_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -798,7 +1135,17 @@ fn default_model_aliases() -> BTreeMap<String, String> {
         ("m2.5".into(), "MiniMax-M2.5".into()),
         ("coding".into(), "MiniMax-M2.5".into()),
         ("reasoning".into(), "MiniMax-M2.5".into()),
+        ("openai".into(), "gpt-4o-mini".into()),
+        ("gpt4o".into(), "gpt-4o".into()),
+        ("gpt4omini".into(), "gpt-4o-mini".into()),
+        ("claude".into(), "claude-3-7-sonnet-latest".into()),
+        ("claude-sonnet".into(), "claude-3-7-sonnet-latest".into()),
+        ("openrouter".into(), "openai/gpt-4o-mini".into()),
     ])
+}
+
+fn resolve_api_key_value(inline: &Option<String>, env_name: &str) -> Option<String> {
+    inline.clone().or_else(|| env::var(env_name).ok())
 }
 
 fn default_skill_directories() -> Vec<PathBuf> {
@@ -806,4 +1153,98 @@ fn default_skill_directories() -> Vec<PathBuf> {
         PathBuf::from(".nca/skills"),
         PathBuf::from(".claude/skills"),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_model_override_updates_selected_provider_model() {
+        let mut config = NcaConfig::default();
+        config.provider.default = ProviderKind::OpenAi;
+        config.sync_default_model_from_provider();
+
+        config.apply_model_override("gpt4o");
+
+        assert_eq!(config.provider.openai.model, "gpt-4o");
+        assert_eq!(config.model.default_model, "gpt-4o");
+        assert_eq!(config.provider.minimax.model, "MiniMax-M2.5");
+    }
+
+    #[test]
+    fn apply_env_supports_openai_anthropic_and_openrouter() {
+        let _guard = EnvGuard::set(&[
+            ("NCA_DEFAULT_PROVIDER", Some("openrouter")),
+            ("OPENAI_API_KEY", Some("openai-key")),
+            ("OPENAI_MODEL", Some("gpt-4o")),
+            ("ANTHROPIC_API_KEY", Some("anthropic-key")),
+            ("ANTHROPIC_MODEL", Some("claude-3-7-sonnet-20250219")),
+            ("OPENROUTER_API_KEY", Some("openrouter-key")),
+            ("OPENROUTER_MODEL", Some("anthropic/claude-3.7-sonnet")),
+            ("OPENROUTER_SITE_URL", Some("https://nca.test")),
+            ("OPENROUTER_APP_NAME", Some("Native CLI AI")),
+        ]);
+
+        let mut config = NcaConfig::default();
+        config.apply_env();
+
+        assert_eq!(config.provider.default, ProviderKind::OpenRouter);
+        assert_eq!(config.provider.openai.resolve_api_key().as_deref(), Some("openai-key"));
+        assert_eq!(
+            config.provider.anthropic.resolve_api_key().as_deref(),
+            Some("anthropic-key")
+        );
+        assert_eq!(
+            config.provider.openrouter.resolve_api_key().as_deref(),
+            Some("openrouter-key")
+        );
+        assert_eq!(config.provider.openai.model, "gpt-4o");
+        assert_eq!(
+            config.provider.anthropic.model,
+            "claude-3-7-sonnet-20250219"
+        );
+        assert_eq!(
+            config.provider.openrouter.model,
+            "anthropic/claude-3.7-sonnet"
+        );
+        assert_eq!(
+            config.provider.openrouter.site_url.as_deref(),
+            Some("https://nca.test")
+        );
+        assert_eq!(
+            config.provider.openrouter.app_name.as_deref(),
+            Some("Native CLI AI")
+        );
+        assert_eq!(config.model.default_model, "anthropic/claude-3.7-sonnet");
+    }
+
+    struct EnvGuard {
+        previous: Vec<(String, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn set(vars: &[(&str, Option<&str>)]) -> Self {
+            let mut previous = Vec::new();
+            for (key, value) in vars {
+                previous.push((key.to_string(), env::var(key).ok()));
+                match value {
+                    Some(value) => unsafe { env::set_var(key, value) },
+                    None => unsafe { env::remove_var(key) },
+                }
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.previous.drain(..) {
+                match value {
+                    Some(value) => unsafe { env::set_var(&key, value) },
+                    None => unsafe { env::remove_var(&key) },
+                }
+            }
+        }
+    }
 }

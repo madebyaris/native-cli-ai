@@ -250,10 +250,12 @@ impl Repl {
                     .await?;
             }
             "/models" => {
+                let provider = self.runtime.config().provider.default;
                 stdout
                     .write_all(
                         format!(
-                            "default={} thinking={} budget={}\n",
+                            "default_provider={} default_model={} thinking={} budget={}\n",
+                            provider.display_name(),
                             self.runtime.config().model.default_model,
                             self.runtime.config().model.enable_thinking,
                             self.runtime.config().model.thinking_budget
@@ -261,6 +263,19 @@ impl Repl {
                         .as_bytes(),
                     )
                     .await?;
+                for provider in nca_common::config::ProviderKind::ALL {
+                    stdout
+                        .write_all(
+                            format!(
+                                "  {} -> {} ({})\n",
+                                provider.display_name(),
+                                self.runtime.config().provider.model_for(provider),
+                                self.runtime.config().provider.base_url_for(provider)
+                            )
+                            .as_bytes(),
+                        )
+                        .await?;
+                }
                 for (alias, target) in &self.runtime.config().model.aliases {
                     stdout
                         .write_all(format!("  {alias} -> {target}\n").as_bytes())
@@ -339,13 +354,29 @@ impl Repl {
                     .await?;
             }
             "/doctor" => {
-                let configured = self.runtime.config().provider.minimax.resolve_api_key().is_some();
-                let message = if configured {
-                    "MiniMax API key configured\n"
-                } else {
-                    "MiniMax API key missing\n"
-                };
-                stdout.write_all(message.as_bytes()).await?;
+                for provider in nca_common::config::ProviderKind::ALL {
+                    let configured = self
+                        .runtime
+                        .config()
+                        .provider
+                        .api_key_present_for(provider);
+                    stdout
+                        .write_all(
+                            format!(
+                                "{}{} API key {} ({})\n",
+                                provider.display_name(),
+                                if provider == self.runtime.config().provider.default {
+                                    " [selected]"
+                                } else {
+                                    ""
+                                },
+                                if configured { "configured" } else { "missing" },
+                                self.runtime.config().provider.api_key_env_for(provider)
+                            )
+                            .as_bytes(),
+                        )
+                        .await?;
+                }
             }
             "/sessions" => match self.runtime.list_session_ids().await {
                 Ok(mut ids) => {

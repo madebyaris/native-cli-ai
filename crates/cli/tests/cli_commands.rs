@@ -8,13 +8,16 @@ use std::path::Path;
 use tempfile::tempdir;
 
 fn write_local_config(workspace: &Path) {
+    write_local_config_contents(
+        workspace,
+        "[provider.minimax]\napi_key = \"test-key\"\n",
+    );
+}
+
+fn write_local_config_contents(workspace: &Path, contents: &str) {
     let config_dir = workspace.join(".nca");
     fs::create_dir_all(&config_dir).expect("create config dir");
-    fs::write(
-        config_dir.join("config.local.toml"),
-        "[provider.minimax]\napi_key = \"test-key\"\n",
-    )
-    .expect("write local config");
+    fs::write(config_dir.join("config.local.toml"), contents).expect("write local config");
 }
 
 fn write_session(
@@ -310,4 +313,101 @@ fn spawn_json_reports_machine_paths() {
             .expect("event log path")
             .ends_with(".events.jsonl")
     );
+}
+
+#[test]
+fn models_json_lists_all_provider_models() {
+    let temp = tempdir().expect("tempdir");
+    write_local_config_contents(
+        temp.path(),
+        r#"
+[provider]
+default = "openai"
+
+[provider.minimax]
+api_key = "minimax-key"
+
+[provider.openai]
+api_key = "openai-key"
+model = "gpt-4o"
+
+[provider.anthropic]
+api_key = "anthropic-key"
+model = "claude-3-7-sonnet-latest"
+
+[provider.openrouter]
+api_key = "openrouter-key"
+model = "openai/gpt-4o-mini"
+"#,
+    );
+
+    let output = Command::cargo_bin("nca")
+        .expect("binary")
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .arg("models")
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let payload: Value = serde_json::from_slice(&output).expect("json");
+    assert_eq!(payload["default_provider"], "OpenAI");
+    assert_eq!(payload["default_model"], "gpt-4o");
+    let provider_models = payload["provider_models"]
+        .as_array()
+        .expect("provider_models array");
+    assert_eq!(provider_models.len(), 4);
+    assert!(provider_models.iter().any(|entry| {
+        entry["provider"] == "OpenAI" && entry["model"] == "gpt-4o" && entry["selected"] == true
+    }));
+}
+
+#[test]
+fn doctor_json_reports_provider_readiness_for_all_backends() {
+    let temp = tempdir().expect("tempdir");
+    write_local_config_contents(
+        temp.path(),
+        r#"
+[provider]
+default = "anthropic"
+
+[provider.minimax]
+api_key = "minimax-key"
+
+[provider.anthropic]
+api_key = "anthropic-key"
+model = "claude-3-7-sonnet-latest"
+"#,
+    );
+
+    let output = Command::cargo_bin("nca")
+        .expect("binary")
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .arg("doctor")
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let payload: Value = serde_json::from_slice(&output).expect("json");
+    assert_eq!(payload["provider"], "Anthropic");
+    assert_eq!(payload["default_model"], "claude-3-7-sonnet-latest");
+    let providers = payload["providers"].as_array().expect("providers array");
+    assert_eq!(providers.len(), 4);
+    assert!(providers.iter().any(|entry| {
+        entry["provider"] == "Anthropic"
+            && entry["selected"] == true
+            && entry["api_key_present"] == true
+    }));
+    assert!(providers.iter().any(|entry| {
+        entry["provider"] == "OpenAI"
+            && entry["selected"] == false
+            && entry["api_key_present"] == false
+    }));
 }

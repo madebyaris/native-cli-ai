@@ -6,7 +6,7 @@ mod stream;
 
 use crate::approval_prompt::IpcApprovalHandler;
 use clap::Parser;
-use nca_common::config::{NcaConfig, PermissionMode};
+use nca_common::config::{NcaConfig, PermissionMode, ProviderKind};
 use nca_common::event::{AgentCommand, EventEnvelope};
 use nca_common::event::EndReason;
 use nca_common::session::{OrchestrationContext, SessionSnapshot, SessionStatus};
@@ -261,9 +261,7 @@ async fn try_main() -> anyhow::Result<()> {
     let orchestration_context = OrchestrationContext::from_env();
 
     if let Some(model) = &cli.model {
-        let resolved = config.model.resolve_alias(model);
-        config.model.default_model = resolved.clone();
-        config.provider.minimax.model = resolved;
+        config.apply_model_override(model);
     }
 
     config.model.max_tokens = cli.max_tokens;
@@ -284,9 +282,7 @@ async fn try_main() -> anyhow::Result<()> {
             session_id,
         }) => {
             if let Some(model) = model {
-                let resolved = config.model.resolve_alias(&model);
-                config.model.default_model = resolved.clone();
-                config.provider.minimax.model = resolved;
+                config.apply_model_override(&model);
             }
             if let Some(mode) = permission_mode {
                 config.permissions.mode = mode.into();
@@ -312,9 +308,7 @@ async fn try_main() -> anyhow::Result<()> {
             session_id,
         }) => {
             if let Some(model) = model {
-                let resolved = config.model.resolve_alias(&model);
-                config.model.default_model = resolved.clone();
-                config.provider.minimax.model = resolved;
+                config.apply_model_override(&model);
             }
             // Serve always uses an explicit default (accept-edits) — not overridable from config
             config.permissions.mode = permission_mode.into();
@@ -360,9 +354,7 @@ async fn try_main() -> anyhow::Result<()> {
             permission_mode,
         }) => {
             if let Some(model) = model {
-                let resolved = config.model.resolve_alias(&model);
-                config.model.default_model = resolved.clone();
-                config.provider.minimax.model = resolved;
+                config.apply_model_override(&model);
             }
             if let Some(mode) = permission_mode {
                 config.permissions.mode = mode.into();
@@ -1007,8 +999,17 @@ async fn add_memory_note(
 
 fn show_models(config: &NcaConfig, json: bool) -> anyhow::Result<()> {
     let output = ModelCatalogOutput {
+        default_provider: config.provider.default.display_name().to_string(),
         default_model: config.model.default_model.clone(),
-        minimax_model: config.provider.minimax.model.clone(),
+        provider_models: ProviderKind::ALL
+            .into_iter()
+            .map(|provider| ProviderModelOutput {
+                provider: provider.display_name().to_string(),
+                model: config.provider.model_for(provider).to_string(),
+                base_url: config.provider.base_url_for(provider).to_string(),
+                selected: provider == config.provider.default,
+            })
+            .collect(),
         aliases: config.model.aliases.clone(),
         thinking_enabled: config.model.enable_thinking,
         thinking_budget: config.model.thinking_budget,
@@ -1016,13 +1017,25 @@ fn show_models(config: &NcaConfig, json: bool) -> anyhow::Result<()> {
     if json {
         print_json(&output, false)?;
     } else {
-        println!("Default model: {}", output.default_model);
-        println!("MiniMax model: {}", output.minimax_model);
+        println!(
+            "Default provider/model: {} / {}",
+            output.default_provider, output.default_model
+        );
         println!(
             "Thinking: {} (budget {})",
             if output.thinking_enabled { "on" } else { "off" },
             output.thinking_budget
         );
+        println!("Provider models:");
+        for provider in &output.provider_models {
+            println!(
+                "  {}{} -> {} ({})",
+                provider.provider,
+                if provider.selected { " [selected]" } else { "" },
+                provider.model,
+                provider.base_url
+            );
+        }
         for (alias, target) in output.aliases {
             println!("  {alias} -> {target}");
         }
@@ -1031,19 +1044,23 @@ fn show_models(config: &NcaConfig, json: bool) -> anyhow::Result<()> {
 }
 
 fn show_doctor(config: &NcaConfig, workspace_root: &PathBuf, json: bool) -> anyhow::Result<()> {
-    let api_key_present = config.provider.minimax.resolve_api_key().is_some();
     let skills = SkillCatalog::discover(workspace_root, &config.harness.skill_directories)
         .map(|skills| skills.len())
         .unwrap_or(0);
     let output = DoctorOutput {
-        provider: format!("{:?}", config.provider.default),
+        provider: config.provider.default.display_name().to_string(),
         default_model: config.model.default_model.clone(),
-        api_key_present,
-        api_key_env: config.provider.minimax.api_key_env.clone(),
-        minimax_supported: matches!(
-            config.provider.default,
-            nca_common::config::ProviderKind::MiniMax
-        ),
+        providers: ProviderKind::ALL
+            .into_iter()
+            .map(|provider| ProviderDoctorStatus {
+                provider: provider.display_name().to_string(),
+                selected: provider == config.provider.default,
+                api_key_present: config.provider.api_key_present_for(provider),
+                api_key_env: config.provider.api_key_env_for(provider).to_string(),
+                model: config.provider.model_for(provider).to_string(),
+                base_url: config.provider.base_url_for(provider).to_string(),
+            })
+            .collect(),
         mcp_server_count: config.mcp.servers.iter().filter(|server| server.enabled).count(),
         skill_count: skills,
         memory_path: if config.memory.file_path.is_absolute() {
@@ -1057,17 +1074,26 @@ fn show_doctor(config: &NcaConfig, workspace_root: &PathBuf, json: bool) -> anyh
     } else {
         println!("Provider: {}", output.provider);
         println!("Default model: {}", output.default_model);
-        println!(
-            "MiniMax API key: {} ({})",
-            if output.api_key_present { "configured" } else { "missing" },
-            output.api_key_env
-        );
+        println!("Provider readiness:");
+        for provider in &output.providers {
+            println!(
+                "  {}{}: api_key={} ({}) model={} base_url={}",
+                provider.provider,
+                if provider.selected { " [selected]" } else { "" },
+                if provider.api_key_present {
+                    "configured"
+                } else {
+                    "missing"
+                },
+                provider.api_key_env,
+                provider.model,
+                provider.base_url
+            );
+        }
         println!("Skills discovered: {}", output.skill_count);
         println!("MCP servers enabled: {}", output.mcp_server_count);
         println!("Memory path: {}", output.memory_path.display());
-        if !output.minimax_supported {
-            println!("Warning: only MiniMax is implemented today; other providers are placeholders.");
-        }
+        println!("MiniMax remains the default recommended path for this workspace.");
     }
     Ok(())
 }
@@ -1084,6 +1110,15 @@ fn show_config(config: &NcaConfig, workspace_root: &PathBuf, json: bool) -> anyh
         println!("Default provider: {:?}", config.provider.default);
         println!("Default model: {}", config.model.default_model);
         println!("Permission mode: {:?}", config.permissions.mode);
+        println!("Provider endpoints:");
+        for provider in ProviderKind::ALL {
+            println!(
+                "  {} -> model={} base_url={}",
+                provider.display_name(),
+                config.provider.model_for(provider),
+                config.provider.base_url_for(provider)
+            );
+        }
         println!("Memory path: {}", workspace_memory_store(config, workspace_root).path().display());
         println!("Skill directories:");
         for path in &config.harness.skill_directories {
@@ -1150,8 +1185,9 @@ struct SkillOutput {
 
 #[derive(serde::Serialize)]
 struct ModelCatalogOutput {
+    default_provider: String,
     default_model: String,
-    minimax_model: String,
+    provider_models: Vec<ProviderModelOutput>,
     aliases: std::collections::BTreeMap<String, String>,
     thinking_enabled: bool,
     thinking_budget: u32,
@@ -1161,12 +1197,28 @@ struct ModelCatalogOutput {
 struct DoctorOutput {
     provider: String,
     default_model: String,
-    api_key_present: bool,
-    api_key_env: String,
-    minimax_supported: bool,
+    providers: Vec<ProviderDoctorStatus>,
     mcp_server_count: usize,
     skill_count: usize,
     memory_path: PathBuf,
+}
+
+#[derive(serde::Serialize)]
+struct ProviderModelOutput {
+    provider: String,
+    model: String,
+    base_url: String,
+    selected: bool,
+}
+
+#[derive(serde::Serialize)]
+struct ProviderDoctorStatus {
+    provider: String,
+    selected: bool,
+    api_key_present: bool,
+    api_key_env: String,
+    model: String,
+    base_url: String,
 }
 
 fn print_json<T: serde::Serialize>(value: &T, pretty: bool) -> anyhow::Result<()> {
