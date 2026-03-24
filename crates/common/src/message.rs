@@ -137,7 +137,7 @@ impl MessageContent {
                     }
                 }
                 if images > 0 {
-                    if !text.is_empty() {
+                    if !text.is_empty() && !text.chars().last().is_some_and(char::is_whitespace) {
                         text.push(' ');
                     }
                     text.push_str(&format!("[{images} image(s)]"));
@@ -145,6 +145,14 @@ impl MessageContent {
                 text
             }
         }
+    }
+
+    /// Preview for user-authored content. Expanded ` ```file:path ` blocks are compacted back to
+    /// `@path` so the transcript stays readable while the model still receives full file contents.
+    pub fn user_event_preview(&self) -> String {
+        collapse_expanded_file_blocks(&self.event_preview())
+            .trim()
+            .to_string()
     }
 
     /// Plain text only; images become placeholders (for summary prompts).
@@ -173,6 +181,68 @@ impl MessageContent {
             }
         }
     }
+}
+
+fn collapse_expanded_file_blocks(text: &str) -> String {
+    const HEADER: &str = "```file:";
+    let mut out = String::new();
+    let mut rest = text;
+
+    while let Some(start) = rest.find(HEADER) {
+        let (before, after_header_marker) = rest.split_at(start);
+        out.push_str(before);
+
+        let after_header = &after_header_marker[HEADER.len()..];
+        let Some(header_end) = after_header.find('\n') else {
+            out.push_str(after_header_marker);
+            return collapse_excess_blank_lines(&out);
+        };
+
+        let path = after_header[..header_end].trim();
+        let after_body = &after_header[header_end + 1..];
+        let Some(block_end) = after_body.find("\n```") else {
+            out.push_str(after_header_marker);
+            return collapse_excess_blank_lines(&out);
+        };
+
+        trim_trailing_inline_whitespace(&mut out);
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push('@');
+        out.push_str(path);
+        rest = after_body[block_end + "\n```".len()..].trim_start();
+        if !rest.is_empty() {
+            out.push(' ');
+        }
+    }
+
+    out.push_str(rest);
+    collapse_excess_blank_lines(&out)
+}
+
+fn trim_trailing_inline_whitespace(text: &mut String) {
+    let trimmed_len = text.trim_end().len();
+    text.truncate(trimmed_len);
+}
+
+fn collapse_excess_blank_lines(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut newline_run = 0usize;
+
+    for ch in text.chars() {
+        if ch == '\n' {
+            newline_run += 1;
+            if newline_run <= 2 {
+                out.push(ch);
+            }
+        } else {
+            newline_run = 0;
+            out.push(ch);
+        }
+    }
+
+    out
 }
 
 mod message_content_serde {
@@ -281,7 +351,11 @@ impl Message {
     }
 
     pub fn event_preview(&self) -> String {
-        self.content.event_preview()
+        if self.role == Role::User {
+            self.content.user_event_preview()
+        } else {
+            self.content.event_preview()
+        }
     }
 }
 
@@ -336,6 +410,42 @@ mod tests {
         assert!(content.strip_image_paths(&removed));
         assert!(
             matches!(content, MessageContent::Text(text) if text.contains("image processed and removed after send"))
+        );
+    }
+
+    #[test]
+    fn user_event_preview_compacts_expanded_file_blocks() {
+        let msg = Message::user(
+            "\n\n```file:.gitignore\n# content here\n```\n\n\nlearn about this project",
+        );
+
+        assert_eq!(msg.event_preview(), "@.gitignore learn about this project");
+    }
+
+    #[test]
+    fn user_parts_preview_keeps_images_and_compacts_files() {
+        let msg = Message::user_with_parts(vec![
+            ContentPart::Text {
+                text: "See\n\n```file:README.md\nhello\n```\n\n".into(),
+            },
+            ContentPart::Image {
+                media_type: "image/png".into(),
+                path: ".nca/sessions/x/a.png".into(),
+            },
+        ]);
+
+        assert_eq!(msg.event_preview(), "See @README.md [1 image(s)]");
+    }
+
+    #[test]
+    fn user_event_preview_keeps_multiple_mentions_inline() {
+        let msg = Message::user(
+            "compare ```file:Cargo.toml\n[package]\n```\n and ```file:README.md\nhello\n``` please",
+        );
+
+        assert_eq!(
+            msg.event_preview(),
+            "compare @Cargo.toml and @README.md please"
         );
     }
 }

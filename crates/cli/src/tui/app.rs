@@ -113,6 +113,7 @@ mod theme {
     pub const BG: Color = Color::Rgb(22, 22, 28);
     pub const SURFACE: Color = Color::Rgb(32, 32, 42);
     pub const BORDER: Color = Color::Rgb(55, 55, 70);
+    pub const MENTION_BG: Color = Color::Rgb(48, 62, 94);
 
     pub const USER: Color = Color::Rgb(56, 189, 248);
     pub const ASSISTANT: Color = Color::Rgb(167, 139, 250);
@@ -205,6 +206,154 @@ fn apply_at_completion(buffer: &str, cursor_char_idx: usize, choice: &str) -> (S
     let new_byte = at_byte + 1 + choice.len();
     let new_char = new_buf[..new_byte.min(new_buf.len())].chars().count();
     (new_buf, new_char)
+}
+
+fn apply_selected_at_completion(
+    workspace_files: &[String],
+    buffer: &str,
+    cursor_char_idx: usize,
+    at_menu_index: usize,
+    append_space: bool,
+) -> Option<(String, usize)> {
+    let at_matches = at_completion_matches(workspace_files, buffer, cursor_char_idx);
+    if at_matches.is_empty() || !at_completion_active(buffer, cursor_char_idx) {
+        return None;
+    }
+
+    let pick = at_menu_index.min(at_matches.len().saturating_sub(1));
+    let choice = at_matches.get(pick)?;
+    let (mut new_buf, mut new_cursor_char_idx) =
+        apply_at_completion(buffer, cursor_char_idx, choice);
+
+    if append_space {
+        let insert_at = cursor_byte_index(&new_buf, new_cursor_char_idx);
+        new_buf.insert(insert_at, ' ');
+        new_cursor_char_idx += 1;
+    }
+
+    Some((new_buf, new_cursor_char_idx))
+}
+
+fn at_mention_char_ranges(buffer: &str) -> Vec<(usize, usize)> {
+    file_mentions::parse_at_mentions(buffer)
+        .into_iter()
+        .map(|(start, end, _)| {
+            let start_char = buffer[..start].chars().count();
+            let end_char = buffer[..end].chars().count();
+            (start_char, end_char)
+        })
+        .collect()
+}
+
+fn completed_at_mention_range_before_cursor(
+    buffer: &str,
+    cursor_char_idx: usize,
+) -> Option<(usize, usize)> {
+    let chars: Vec<char> = buffer.chars().collect();
+    for (start_char, end_char) in at_mention_char_ranges(buffer) {
+        if end_char == cursor_char_idx {
+            return Some((start_char, end_char));
+        }
+        if end_char < chars.len()
+            && end_char + 1 == cursor_char_idx
+            && chars.get(end_char) == Some(&' ')
+        {
+            return Some((start_char, end_char + 1));
+        }
+    }
+    None
+}
+
+fn remove_char_range(buffer: &str, start_char_idx: usize, end_char_idx: usize) -> String {
+    let mut chars: Vec<char> = buffer.chars().collect();
+    chars.drain(start_char_idx..end_char_idx);
+    chars.into_iter().collect()
+}
+
+fn delete_completed_at_mention(buffer: &str, cursor_char_idx: usize) -> Option<(String, usize)> {
+    let (start_char, end_char) = completed_at_mention_range_before_cursor(buffer, cursor_char_idx)?;
+    Some((remove_char_range(buffer, start_char, end_char), start_char))
+}
+
+fn push_styled_run(
+    spans: &mut Vec<Span<'static>>,
+    text: &mut String,
+    current_style: &mut Option<Style>,
+    style: Style,
+    ch: char,
+) {
+    if current_style.as_ref() != Some(&style) && !text.is_empty() {
+        spans.push(Span::styled(
+            std::mem::take(text),
+            current_style.unwrap_or_default(),
+        ));
+    }
+    *current_style = Some(style);
+    text.push(ch);
+}
+
+fn composer_line(buffer: &str, cursor_char_idx: usize) -> Line<'static> {
+    let prompt = Span::styled("❯ ", Style::default().fg(theme::USER).bold());
+    let chars: Vec<char> = buffer.chars().collect();
+    let mention_ranges = at_mention_char_ranges(buffer);
+    let cursor_char_idx = cursor_char_idx.min(chars.len());
+    let mut spans = vec![prompt];
+    let mut run = String::new();
+    let mut run_style: Option<Style> = None;
+
+    for idx in 0..=chars.len() {
+        if idx == cursor_char_idx {
+            let cursor_char = chars.get(idx).copied().unwrap_or(' ');
+            let in_mention = idx < chars.len()
+                && mention_ranges
+                    .iter()
+                    .any(|(start, end)| *start <= idx && idx < *end);
+            let cursor_style = if in_mention {
+                Style::default()
+                    .bg(theme::USER)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .bg(theme::MUTED)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD)
+            };
+            push_styled_run(
+                &mut spans,
+                &mut run,
+                &mut run_style,
+                cursor_style,
+                cursor_char,
+            );
+            if idx == chars.len() {
+                break;
+            }
+            continue;
+        }
+
+        let Some(ch) = chars.get(idx).copied() else {
+            break;
+        };
+        let in_mention = mention_ranges
+            .iter()
+            .any(|(start, end)| *start <= idx && idx < *end);
+        let style = if in_mention {
+            Style::default()
+                .fg(theme::TEXT)
+                .bg(theme::MENTION_BG)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::TEXT)
+        };
+        push_styled_run(&mut spans, &mut run, &mut run_style, style, ch);
+    }
+
+    if !run.is_empty() {
+        spans.push(Span::styled(run, run_style.unwrap_or_default()));
+    }
+
+    Line::from(spans)
 }
 
 /// Entry for the slash panel: either a hardcoded command or a discovered skill.
@@ -1618,7 +1767,8 @@ pub fn run_blocking(
                             } else {
                                 Style::default().fg(theme::TEXT)
                             };
-                            lines.push(Line::from(Span::styled(format!(" @{path}"), st)));
+                            // Show path without @ prefix since @ is already in the buffer
+                            lines.push(Line::from(Span::styled(format!(" {path}"), st)));
                         }
                         if at_matches.len() > n_show {
                             lines.push(Line::from(Span::styled(
@@ -1641,28 +1791,7 @@ pub fn run_blocking(
                     }
                 }
 
-                let prompt = Span::styled("❯ ", Style::default().fg(theme::USER).bold());
-                let before: String = g.input_buffer.chars().take(g.cursor_char_idx).collect();
-                let after: String = g.input_buffer.chars().skip(g.cursor_char_idx).collect();
-                let input_line = Line::from(vec![
-                    prompt,
-                    Span::styled(before, Style::default().fg(theme::TEXT)),
-                    Span::styled(
-                        if after.is_empty() {
-                            " ".into()
-                        } else {
-                            after.chars().next().map(|c| c.to_string()).unwrap_or_default()
-                        },
-                        Style::default()
-                            .bg(theme::MUTED)
-                            .fg(Color::Black)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        after.chars().skip(1).collect::<String>(),
-                        Style::default().fg(theme::TEXT),
-                    ),
-                ]);
+                let input_line = composer_line(&g.input_buffer, g.cursor_char_idx);
 
                 let hint = if g.active_approval.is_some() {
                     Line::from(Span::styled(
@@ -3125,22 +3254,15 @@ pub fn run_blocking(
                             }
                         }
                         (KeyCode::Tab, _) => {
-                            let at_matches = at_completion_matches(
+                            if let Some((buf, cidx)) = apply_selected_at_completion(
                                 &workspace_files,
                                 &g.input_buffer,
                                 g.cursor_char_idx,
-                            );
-                            if !at_matches.is_empty()
-                                && at_completion_active(&g.input_buffer, g.cursor_char_idx)
-                            {
-                                let pick = g.at_menu_index.min(at_matches.len() - 1);
-                                if let Some(choice) = at_matches.get(pick) {
-                                    let cur = g.cursor_char_idx;
-                                    let (buf, cidx) =
-                                        apply_at_completion(&g.input_buffer, cur, choice);
-                                    g.input_buffer = buf;
-                                    g.cursor_char_idx = cidx;
-                                }
+                                g.at_menu_index,
+                                false,
+                            ) {
+                                g.input_buffer = buf;
+                                g.cursor_char_idx = cidx;
                             } else {
                                 let slash_filtered =
                                     filter_slash_entries(&slash_entries, &g.input_buffer);
@@ -3214,6 +3336,17 @@ pub fn run_blocking(
                             }
                         }
                         (KeyCode::Enter, _) => {
+                            if let Some((buf, cidx)) = apply_selected_at_completion(
+                                &workspace_files,
+                                &g.input_buffer,
+                                g.cursor_char_idx,
+                                g.at_menu_index,
+                                true,
+                            ) {
+                                g.input_buffer = buf;
+                                g.cursor_char_idx = cidx;
+                                continue;
+                            }
                             let line = std::mem::take(&mut g.input_buffer);
                             g.cursor_char_idx = 0;
                             g.slash_menu_index = 0;
@@ -3415,11 +3548,18 @@ pub fn run_blocking(
                         }
                         (KeyCode::Backspace, _) => {
                             if g.cursor_char_idx > 0 {
-                                let idx = g.cursor_char_idx;
-                                let mut cs: Vec<char> = g.input_buffer.chars().collect();
-                                cs.remove(idx - 1);
-                                g.input_buffer = cs.into_iter().collect();
-                                g.cursor_char_idx -= 1;
+                                if let Some((buf, cidx)) =
+                                    delete_completed_at_mention(&g.input_buffer, g.cursor_char_idx)
+                                {
+                                    g.input_buffer = buf;
+                                    g.cursor_char_idx = cidx;
+                                } else {
+                                    let idx = g.cursor_char_idx;
+                                    let mut cs: Vec<char> = g.input_buffer.chars().collect();
+                                    cs.remove(idx - 1);
+                                    g.input_buffer = cs.into_iter().collect();
+                                    g.cursor_char_idx -= 1;
+                                }
                                 if slash_panel_visible(&g.input_buffer) {
                                     let f = filter_slash_entries(&slash_entries, &g.input_buffer);
                                     if !f.is_empty() {
@@ -3461,7 +3601,9 @@ pub fn run_blocking(
 #[cfg(test)]
 mod approval_parse_tests {
     use super::{
-        TuiCmd, branch_picker_enter_command, filtered_branch_indices, parse_approval_verdict,
+        TuiCmd, apply_selected_at_completion, branch_picker_enter_command,
+        completed_at_mention_range_before_cursor, composer_line, delete_completed_at_mention,
+        filtered_branch_indices, parse_approval_verdict,
     };
 
     #[test]
@@ -3519,5 +3661,58 @@ mod approval_parse_tests {
         let branches = vec!["alpha".into(), "main".into(), "main-fix".into()];
         let cmd = branch_picker_enter_command(&branches, "mai", 1);
         assert!(matches!(cmd, Some(TuiCmd::SwitchBranch(name)) if name == "main-fix"));
+    }
+
+    #[test]
+    fn enter_accepts_selected_at_mention_without_submitting() {
+        let workspace_files = vec![
+            "crates/cli/src/file_mentions.rs".into(),
+            "crates/cli/src/tui/app.rs".into(),
+        ];
+        let buffer = "check @crates/cli/src/t";
+        let cursor_char_idx = buffer.chars().count();
+
+        let (next_buffer, next_cursor_char_idx) =
+            apply_selected_at_completion(&workspace_files, buffer, cursor_char_idx, 0, true)
+                .expect("active mention should be selectable");
+
+        assert_eq!(next_buffer, "check @crates/cli/src/tui/app.rs ");
+        assert_eq!(next_cursor_char_idx, next_buffer.chars().count());
+    }
+
+    #[test]
+    fn backspace_deletes_completed_at_mention_and_space() {
+        let buffer = "check @crates/cli/src/tui/app.rs ";
+        let cursor_char_idx = buffer.chars().count();
+
+        let (next_buffer, next_cursor_char_idx) =
+            delete_completed_at_mention(buffer, cursor_char_idx)
+                .expect("completed mention should delete as one token");
+
+        assert_eq!(next_buffer, "check ");
+        assert_eq!(next_cursor_char_idx, "check ".chars().count());
+    }
+
+    #[test]
+    fn mention_range_includes_inserted_trailing_space() {
+        let buffer = "check @crates/cli/src/tui/app.rs ";
+        let cursor_char_idx = buffer.chars().count();
+
+        assert_eq!(
+            completed_at_mention_range_before_cursor(buffer, cursor_char_idx),
+            Some((6, buffer.chars().count()))
+        );
+    }
+
+    #[test]
+    fn composer_line_styles_completed_mentions() {
+        let line = composer_line("see @README.md ", 15);
+        let mention_span = line
+            .spans
+            .iter()
+            .find(|span| span.content.contains("@README.md"))
+            .expect("mention span should exist");
+
+        assert_eq!(mention_span.style.bg, Some(super::theme::MENTION_BG));
     }
 }
