@@ -54,10 +54,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install OpenSSL
+      - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
+          sudo apt-get install -y libssl-dev pkg-config ripgrep
 
       - name: Check formatting
         run: cargo fmt --check --all
