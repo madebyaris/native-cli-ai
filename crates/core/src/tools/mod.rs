@@ -14,6 +14,7 @@ pub mod list_directory;
 pub mod mcp;
 pub mod move_path;
 pub mod rename_path;
+pub mod replace_match;
 pub mod run_validation;
 pub mod search;
 pub mod spawn_subagent;
@@ -80,6 +81,9 @@ impl ToolRegistry {
             workspace_root.clone(),
         )));
         registry.register(Box::new(edit_file::EditFileTool::new(
+            workspace_root.clone(),
+        )));
+        registry.register(Box::new(replace_match::ReplaceMatchTool::new(
             workspace_root.clone(),
         )));
         registry.register(Box::new(rename_path::RenamePathTool::new(

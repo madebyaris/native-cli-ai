@@ -180,6 +180,7 @@ impl ApprovalPolicy {
                 | "create_directory"
                 | "apply_patch"
                 | "edit_file"
+                | "replace_match"
                 | "rename_path"
                 | "move_path"
                 | "copy_path"

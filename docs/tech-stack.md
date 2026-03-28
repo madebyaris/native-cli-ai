@@ -145,7 +145,9 @@ Session state and event streams are stored as JSON and JSONL under `<workspace>/
 | `globset` | 0.4.x | Glob pattern matching for permission rules |
 | `walkdir` | 2.x | Recursive directory traversal |
 
-**Code search**: MVP shells out to `rg` (ripgrep) as an external tool, same as Claude Code. A future phase may embed `grep` crate or `tree-sitter` for structural search.
+**Code search**: The current implementation shells out to `rg` (ripgrep) and consumes `--json` output so the tool layer can return structured search matches. This keeps search fast and local without committing to a persistent index yet.
+
+**Editing precision**: File editing remains exact-text based, but the tool layer now distinguishes between ambiguous multi-match replacements and precise match-targeted edits (`replace_match` by path/line/column). We intentionally improved the tool contract before attempting a bespoke local regex index, which matches the current repo scale and keeps the implementation simpler than trigram-index systems such as those described by Cursor, Zoekt, or GitHub Blackbird.
 
 ---
 

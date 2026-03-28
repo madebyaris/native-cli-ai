@@ -42,9 +42,13 @@ impl ToolExecutor for ApplyPatchTool {
 
     async fn execute(&self, call: &ToolCall) -> ToolResult {
         let path = call.input["path"].as_str().unwrap_or("");
+        let workspace_root = self
+            .workspace_root
+            .canonicalize()
+            .unwrap_or_else(|_| self.workspace_root.clone());
         let full_path = self.workspace_root.join(path);
         let canonical = match full_path.canonicalize() {
-            Ok(canonical) if canonical.starts_with(&self.workspace_root) => canonical,
+            Ok(canonical) if canonical.starts_with(&workspace_root) => canonical,
             _ => {
                 return ToolResult {
                     call_id: call.id.clone(),
@@ -90,16 +94,28 @@ impl ToolExecutor for ApplyPatchTool {
                 };
             }
 
+            let occurrence_count = content.matches(old_text).count();
+            if occurrence_count == 0 {
+                return ToolResult {
+                    call_id: call.id.clone(),
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("text not found in {}", canonical.display())),
+                };
+            }
+
             if replace_all {
-                if !content.contains(old_text) {
-                    return ToolResult {
-                        call_id: call.id.clone(),
-                        success: false,
-                        output: String::new(),
-                        error: Some(format!("text not found in {}", canonical.display())),
-                    };
-                }
                 content = content.replace(old_text, new_text);
+            } else if occurrence_count > 1 {
+                return ToolResult {
+                    call_id: call.id.clone(),
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "text matched {occurrence_count} occurrences in {}; use replace_all or replace_match for a precise edit",
+                        canonical.display()
+                    )),
+                };
             } else if let Some(index) = content.find(old_text) {
                 content.replace_range(index..index + old_text.len(), new_text);
             } else {
@@ -126,5 +142,64 @@ impl ToolExecutor for ApplyPatchTool {
                 error: Some(format!("Failed to write file: {err}")),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_call(input: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: "call-1".into(),
+            name: "apply_patch".into(),
+            input,
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_patch_rejects_ambiguous_single_replacements() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "alpha\nalpha\n").unwrap();
+
+        let tool = ApplyPatchTool::new(dir.path().to_path_buf());
+        let result = tool
+            .execute(&make_call(serde_json::json!({
+                "path": "main.rs",
+                "edits": [
+                    {
+                        "old_text": "alpha",
+                        "new_text": "beta"
+                    }
+                ]
+            })))
+            .await;
+
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("replace_match"));
+    }
+
+    #[tokio::test]
+    async fn apply_patch_replace_all_updates_all_occurrences() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "alpha\nalpha\n").unwrap();
+
+        let tool = ApplyPatchTool::new(dir.path().to_path_buf());
+        let result = tool
+            .execute(&make_call(serde_json::json!({
+                "path": "main.rs",
+                "edits": [
+                    {
+                        "old_text": "alpha",
+                        "new_text": "beta",
+                        "replace_all": true
+                    }
+                ]
+            })))
+            .await;
+
+        assert!(result.success, "{result:?}");
+        let updated = std::fs::read_to_string(dir.path().join("main.rs")).unwrap();
+        assert_eq!(updated, "beta\nbeta\n");
     }
 }

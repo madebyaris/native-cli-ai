@@ -18,11 +18,16 @@ impl<T: CodeIntel> ToolExecutor for CodeIntelTool<T> {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "query_symbols".into(),
-            description: "Search for likely symbol definitions quickly using Rust-native local code intelligence".into(),
+            description:
+                "Search for likely Rust symbol definitions by literal symbol name and return path:line:text results"
+                    .into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string" },
+                    "query": {
+                        "type": "string",
+                        "description": "Literal Rust symbol name to look up, not a regex"
+                    },
                     "glob": { "type": "string" }
                 },
                 "required": ["query"]

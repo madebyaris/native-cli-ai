@@ -273,6 +273,17 @@ The system prompt is layered in this order:
 
 The built-in tool surface includes filesystem editing, search, diffing, patching, shell execution, web access, `ask_question`, and `spawn_subagent`. MCP tools are loaded dynamically when configured, so the available tool set can grow with your environment.
 
+### Search And Edit Tools
+
+Recent search/edit improvements are aimed at making agent file work less brittle:
+
+- `search_code` now returns structured JSON match objects instead of raw `rg` text.
+- `search_code` treats ripgrep exit code `1` as a successful empty result, not a failure.
+- `search_code` supports `path`, `glob`, `fixed_strings`, `case_sensitive`, `word`, `context_before`, `context_after`, and `max_results`.
+- `query_symbols` is a literal Rust symbol lookup, not an implicit regex expansion of user input.
+- `edit_file` and `apply_patch` now fail loudly on ambiguous single-match edits instead of silently changing the first occurrence.
+- `replace_match` can edit a specific search result by exact `path`, `line`, and `column`, which makes search -> edit flows much safer.
+
 ## Crate Layout
 
 | Crate | Responsibility |
