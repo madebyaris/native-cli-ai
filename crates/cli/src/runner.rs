@@ -9,6 +9,7 @@ use nca_runtime::ipc::IpcHandle;
 use nca_runtime::supervisor::{Supervisor, SupervisorConfig, SupervisorHandle};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio::sync::mpsc;
 
 /// Resolve a pending `ask_question` without going through `SessionRuntime` (e.g. TUI side task
@@ -161,6 +162,10 @@ impl SessionRuntime {
 
     pub fn request_cancel(&self) {
         self.supervisor.request_cancel();
+    }
+
+    pub fn cancel_handle(&self) -> Arc<AtomicBool> {
+        self.supervisor.cancel_handle()
     }
 
     pub fn event_tx(&self) -> Option<tokio::sync::mpsc::Sender<AgentEvent>> {

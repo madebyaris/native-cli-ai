@@ -632,7 +632,11 @@ impl TuiSessionState {
             }
             AgentEvent::Error { message } => {
                 self.blocks.push(DisplayBlock::ErrorLine(message.clone()));
-                self.set_busy_state(BusyState::Error);
+                if message.to_ascii_lowercase().contains("run cancelled") {
+                    self.set_busy_state(BusyState::Idle);
+                } else {
+                    self.set_busy_state(BusyState::Error);
+                }
             }
             AgentEvent::Checkpoint { .. } => {}
             AgentEvent::ChildSessionSpawned {

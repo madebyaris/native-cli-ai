@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use crate::approval::{ApprovalPolicy, ApprovalVerdict};
 use crate::cost::CostTracker;
@@ -160,14 +161,25 @@ impl AgentLoop {
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut got_usage = false;
 
-            while let Some(chunk) = stream.recv().await {
-                if self.is_cancelled() {
-                    self.emit(AgentEvent::Error {
-                        message: "Run cancelled while streaming model output".into(),
-                    })
-                    .await;
-                    return Err(ProviderError::Other("run cancelled".into()));
-                }
+            let mut cancel_poll = tokio::time::interval(Duration::from_millis(25));
+            cancel_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                let chunk = tokio::select! {
+                    _ = cancel_poll.tick() => {
+                        if self.is_cancelled() {
+                            self.emit(AgentEvent::Error {
+                                message: "Run cancelled while streaming model output".into(),
+                            })
+                            .await;
+                            return Err(ProviderError::Other("run cancelled".into()));
+                        }
+                        continue;
+                    }
+                    chunk = stream.recv() => chunk,
+                };
+                let Some(chunk) = chunk else {
+                    break;
+                };
                 match chunk {
                     StreamChunk::TextDelta(delta) => {
                         if assistant_text.is_empty() {

@@ -1646,6 +1646,7 @@ impl Repl {
         let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<TuiCmd>();
         let st = tui_state.clone();
         let banner = self.run_mode;
+        let cancel_flag = self.runtime.cancel_handle();
         let ui = tokio::task::spawn_blocking(move || {
             run_blocking(
                 st,
@@ -1653,6 +1654,7 @@ impl Repl {
                 Some(answer_for_tui),
                 Some(approval_for_tui),
                 banner,
+                Some(cancel_flag),
             )
         });
 

@@ -24,7 +24,7 @@ use crossterm::{
     },
 };
 use nca_common::config::ProviderKind;
-use nca_common::event::QuestionSelection;
+use nca_common::event::{BusyState, QuestionSelection};
 use nca_core::approval::suggest_allow_pattern;
 use nca_core::skills::{SkillCatalog, SkillSource};
 use ratatui::{
@@ -753,6 +753,13 @@ fn toolbar_permission_is_bypass(mode: &str) -> bool {
     mode.contains("BypassPermissions")
 }
 
+fn escape_cancels_active_turn(state: &TuiSessionState) -> bool {
+    matches!(
+        state.current_busy_state,
+        BusyState::Thinking | BusyState::Streaming | BusyState::ToolRunning
+    )
+}
+
 fn rect_contains(r: Rect, col: u16, row: u16) -> bool {
     col >= r.x
         && col < r.x.saturating_add(r.width)
@@ -1371,6 +1378,7 @@ pub fn run_blocking(
     question_answer_tx: Option<UnboundedSender<(String, QuestionSelection)>>,
     approval_answer_tx: Option<UnboundedSender<ApprovalAnswer>>,
     show_run_banner: bool,
+    cancel_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
 ) -> anyhow::Result<()> {
     let mut terminal = setup_terminal()?;
 
@@ -1641,6 +1649,28 @@ pub fn run_blocking(
                     Style::default().fg(theme::MUTED),
                 );
 
+                let cancel_hint_text = " Esc cancel ";
+                let cancel_hint = escape_cancels_active_turn(&g).then(|| {
+                    Span::styled(
+                        cancel_hint_text,
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(theme::WARN)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                });
+                let status_rect = if cancel_hint.is_some() && st_r.width > cancel_hint_text.len() as u16 {
+                    Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([
+                            Constraint::Min(0),
+                            Constraint::Length(cancel_hint_text.len() as u16),
+                        ])
+                        .split(st_r)[0]
+                } else {
+                    st_r
+                };
+
                 // Compute the character-cell x-offset before any borrow of `g` escapes into `status_spans`.
                 let branch_char_offset = 4 + g.model.len() + 4 + g.agent_profile.len() + 4;
                 let branch_text = if g.current_branch.is_empty() {
@@ -1653,12 +1683,12 @@ pub fn run_blocking(
                     .add_modifier(Modifier::UNDERLINED);
 
                 // Store the branch chip bounds for click hit-testing.
-                if st_r.width > branch_char_offset as u16 && !branch_text.is_empty() {
+                if status_rect.width > branch_char_offset as u16 && !branch_text.is_empty() {
                     let chip_len = branch_text.len() as u16;
                     g.branch_chip_bounds = Some(Rect::new(
-                        st_r.x + branch_char_offset as u16,
-                        st_r.y,
-                        chip_len.min(st_r.width - branch_char_offset as u16),
+                        status_rect.x + branch_char_offset as u16,
+                        status_rect.y,
+                        chip_len.min(status_rect.width - branch_char_offset as u16),
                         1,
                     ));
                 } else {
@@ -1708,7 +1738,21 @@ pub fn run_blocking(
                 status_spans.push(time_span);
                 let status = Line::from(status_spans);
                 let bar = Paragraph::new(status).style(Style::default().bg(theme::SURFACE));
-                frame.render_widget(bar, st_r);
+                frame.render_widget(bar, status_rect);
+                if let Some(cancel_hint) = cancel_hint {
+                    let hint_width = cancel_hint_text.len() as u16;
+                    if st_r.width > hint_width {
+                        let hint_rect = Rect::new(
+                            st_r.x + st_r.width.saturating_sub(hint_width),
+                            st_r.y,
+                            hint_width,
+                            1,
+                        );
+                        let hint_bar = Paragraph::new(Line::from(cancel_hint))
+                            .style(Style::default().bg(theme::SURFACE));
+                        frame.render_widget(hint_bar, hint_rect);
+                    }
+                }
 
                 if let Some(sr) = slash_opt {
                     if slash_panel_visible(&g.input_buffer) && !slash_filtered.is_empty() {
@@ -3388,12 +3432,23 @@ pub fn run_blocking(
                     }
 
                     match (key.code, key.modifiers) {
+                        (KeyCode::Esc, _) if escape_cancels_active_turn(&g) => {
+                            if let Some(ref flag) = cancel_flag {
+                                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
+                            g.blocks
+                                .push(DisplayBlock::System("Cancelling current run...".into()));
+                            let _ = cmd_tx.send(TuiCmd::CancelTurn);
+                        }
                         (KeyCode::Char('q'), KeyModifiers::CONTROL) => {
                             g.should_exit = true;
                             let _ = cmd_tx.send(TuiCmd::Exit);
                             break;
                         }
                         (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                            if let Some(ref flag) = cancel_flag {
+                                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
                             let _ = cmd_tx.send(TuiCmd::CancelTurn);
                         }
                         (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
@@ -3777,8 +3832,11 @@ mod approval_parse_tests {
     use super::{
         TuiCmd, apply_selected_at_completion, branch_picker_enter_command,
         completed_at_mention_range_before_cursor, composer_line, delete_completed_at_mention,
-        filtered_branch_indices, parse_approval_verdict,
+        escape_cancels_active_turn, filtered_branch_indices, parse_approval_verdict,
     };
+    use crate::tui::state::TuiSessionState;
+    use nca_common::event::BusyState;
+    use std::path::PathBuf;
 
     #[test]
     fn parses_yes_with_punctuation_and_synonyms() {
@@ -3888,5 +3946,29 @@ mod approval_parse_tests {
             .expect("mention span should exist");
 
         assert_eq!(mention_span.style.bg, Some(super::theme::MENTION_BG));
+    }
+
+    #[test]
+    fn escape_only_cancels_active_turn_states() {
+        let mut state = TuiSessionState::new(
+            "session".into(),
+            "model".into(),
+            "@build".into(),
+            "AcceptEdits".into(),
+            PathBuf::from("."),
+        );
+        assert!(!escape_cancels_active_turn(&state));
+
+        state.set_busy_state(BusyState::Thinking);
+        assert!(escape_cancels_active_turn(&state));
+
+        state.set_busy_state(BusyState::Streaming);
+        assert!(escape_cancels_active_turn(&state));
+
+        state.set_busy_state(BusyState::ToolRunning);
+        assert!(escape_cancels_active_turn(&state));
+
+        state.set_busy_state(BusyState::ApprovalPending);
+        assert!(!escape_cancels_active_turn(&state));
     }
 }
