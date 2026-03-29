@@ -1814,7 +1814,7 @@ pub fn run_blocking(
                     ))
                 } else if g.input_buffer.is_empty() {
                     Line::from(Span::styled(
-                        "Enter send · Tab agent · Ctrl+V image · /image · Ctrl+P palette · Esc exit · Ctrl+L clear",
+                        "Enter send · Tab agent · Ctrl+V image · /image · Ctrl+P palette · Ctrl+L clear",
                         Style::default().fg(theme::MUTED),
                     ))
                 } else {
@@ -3388,11 +3388,6 @@ pub fn run_blocking(
                     }
 
                     match (key.code, key.modifiers) {
-                        (KeyCode::Esc, _) => {
-                            g.should_exit = true;
-                            let _ = cmd_tx.send(TuiCmd::Exit);
-                            break;
-                        }
                         (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                             let _ = cmd_tx.send(TuiCmd::CancelTurn);
                         }
