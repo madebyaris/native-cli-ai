@@ -172,11 +172,23 @@ impl SessionRuntime {
         self.supervisor.event_tx()
     }
 
-    pub async fn list_session_ids(&self) -> Result<Vec<String>, String> {
+    pub async fn list_session_snapshots(&self) -> Result<Vec<SessionSnapshot>, String> {
         let store = nca_runtime::session_store::SessionStore::new(
             self.workspace_root().join(&self.config.session.history_dir),
         );
-        store.list().await.map_err(|err| err.to_string())
+        let mut snapshots = Vec::new();
+        for id in store.list().await.map_err(|err| err.to_string())? {
+            if let Ok(snapshot) = store.load_snapshot(&id).await {
+                snapshots.push(snapshot);
+            }
+        }
+        snapshots.sort_by(|left, right| {
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(snapshots)
     }
 
     pub fn config(&self) -> &NcaConfig {

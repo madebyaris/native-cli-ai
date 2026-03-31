@@ -14,4 +14,6 @@ pub use app::{
 };
 pub use bridge::spawn_tui_bridge;
 pub use replay::replay_event_log_into_state;
-pub use state::{DisplayBlock, ModelPickerAction, ModelPickerEntry, TuiSessionState};
+pub use state::{
+    DisplayBlock, ModelPickerAction, ModelPickerEntry, SessionPickerEntry, TuiSessionState,
+};

@@ -25,6 +25,9 @@ Thumbs.db
 # Logs
 *.log
 
+# Vendored external research snapshots
+research/vendor/
+
 
 # for testing agent build stuff
 for-test/

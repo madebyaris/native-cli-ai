@@ -51,6 +51,12 @@ pub struct SubagentRow {
     pub skill: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SessionPickerEntry {
+    pub id: String,
+    pub label: String,
+}
+
 /// Status of an API key validation during onboarding.
 #[derive(Debug, Clone)]
 pub enum OnboardingValidation {
@@ -166,7 +172,7 @@ pub struct TuiSessionState {
     pub session_picker_open: bool,
     pub session_picker_search: String,
     pub session_picker_index: usize,
-    pub session_picker_entries: Vec<String>,
+    pub session_picker_entries: Vec<SessionPickerEntry>,
     /// Scroll offset for the session picker viewport.
     pub session_picker_scroll: usize,
     /// When true, the onboarding gate is active — connect modal is locked open.
@@ -372,10 +378,10 @@ impl TuiSessionState {
         self.question_modal_scroll = 0;
     }
 
-    pub fn open_session_picker(&mut self, entries: Vec<String>, current: &str) {
+    pub fn open_session_picker(&mut self, entries: Vec<SessionPickerEntry>, current: &str) {
         self.session_picker_open = true;
         self.session_picker_search.clear();
-        self.session_picker_index = entries.iter().position(|e| e == current).unwrap_or(0);
+        self.session_picker_index = entries.iter().position(|e| e.id == current).unwrap_or(0);
         self.session_picker_entries = entries;
         self.session_picker_scroll = 0;
     }
@@ -709,17 +715,21 @@ impl TuiSessionState {
                 ..
             } => {
                 let short = short_session_prefix(child_session_id);
+                let mut task_context = String::new();
                 if let Some(row) = self
                     .subagents
                     .iter_mut()
                     .find(|r| r.id == *child_session_id)
                 {
+                    if !row.task.is_empty() && row.task != "(sub-agent)" {
+                        task_context = format!(" — {}", truncate(&row.task, 80));
+                    }
                     row.running = false;
                     row.phase = "done".into();
                     row.detail = status.clone();
                 }
                 self.blocks.push(DisplayBlock::System(format!(
-                    "Sub-agent {short}… done: {status}"
+                    "Sub-agent {short}… done: {status}{task_context}"
                 )));
             }
             AgentEvent::BusyStateChanged { state } => {
@@ -849,6 +859,37 @@ mod tests {
         });
         assert_eq!(st.subagents[0].phase, "read_file");
         assert_eq!(st.subagents[0].detail, "src/lib.rs");
+    }
+
+    #[test]
+    fn child_session_completion_mentions_task_context() {
+        let mut st = TuiSessionState::new(
+            "session-x".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+        );
+        st.apply_event(&AgentEvent::ChildSessionSpawned {
+            parent_session_id: "session-x".into(),
+            child_session_id: "child-abc".into(),
+            task: "audit resume briefing flow".into(),
+            workspace: std::path::PathBuf::from("/tmp"),
+            branch: None,
+        });
+        st.apply_event(&AgentEvent::ChildSessionCompleted {
+            parent_session_id: "session-x".into(),
+            child_session_id: "child-abc".into(),
+            status: "completed".into(),
+        });
+
+        match st.blocks.last() {
+            Some(DisplayBlock::System(line)) => {
+                assert!(line.contains("completed"));
+                assert!(line.contains("audit resume briefing flow"));
+            }
+            other => panic!("expected system block, got {other:?}"),
+        }
     }
 
     #[test]

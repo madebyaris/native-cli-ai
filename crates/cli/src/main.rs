@@ -6,11 +6,13 @@ mod ipc_pending;
 mod prompt;
 mod repl;
 mod runner;
+mod session_display;
 mod slash_commands;
 mod stream;
 mod tui;
 
 use crate::approval_prompts::InteractiveIpcApprovalHandler;
+use crate::session_display::{format_human_session_lines, format_resume_briefing_lines};
 use clap::CommandFactory;
 use clap::Parser;
 use clap_complete::aot::generate;
@@ -1107,6 +1109,7 @@ async fn resume_session(
     )
     .await
     .map_err(anyhow::Error::msg)?;
+    let snapshot = runtime.snapshot();
     if let Some(prompt) = prompt {
         if let Some(rx) = runtime.take_event_rx() {
             let ipc_handle = runtime.take_ipc_handle();
@@ -1127,6 +1130,12 @@ async fn resume_session(
             .map_err(anyhow::Error::msg)?;
         println!("{output}");
         return Ok(());
+    }
+
+    if !use_tui {
+        for line in format_resume_briefing_lines(&snapshot) {
+            eprintln!("[resume] {line}");
+        }
     }
 
     if !use_tui && let Some(rx) = runtime.take_event_rx() {
@@ -1276,16 +1285,8 @@ async fn print_log_file(
 }
 
 fn print_human_session(session: &SessionSnapshot) {
-    println!(
-        "{}  status={:?}  model={}  updated={}  children={}",
-        session.id,
-        session.status,
-        session.model,
-        session.updated_at.to_rfc3339(),
-        session.child_session_ids.len()
-    );
-    if let Some(summary) = &session.session_summary {
-        println!("  summary: {}", summary.replace('\n', " "));
+    for line in format_human_session_lines(session) {
+        println!("{line}");
     }
 }
 

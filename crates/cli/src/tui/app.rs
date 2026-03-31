@@ -2298,7 +2298,11 @@ pub fn run_blocking(
                 if g.session_picker_open {
                     let filter = g.session_picker_search.to_ascii_lowercase();
                     let filtered_indices: Vec<usize> = g.session_picker_entries.iter().enumerate()
-                        .filter(|(_, s)| filter.is_empty() || s.to_ascii_lowercase().contains(&filter))
+                        .filter(|(_, entry)| {
+                            filter.is_empty()
+                                || entry.label.to_ascii_lowercase().contains(&filter)
+                                || entry.id.to_ascii_lowercase().contains(&filter)
+                        })
                         .map(|(i, _)| i)
                         .collect();
                     const SESSION_PICKER_MAX_ROWS: usize = 16;
@@ -2345,15 +2349,18 @@ pub fn run_blocking(
                             .skip(list_start)
                             .take(list_end.saturating_sub(list_start))
                         {
-                            let id = &g.session_picker_entries[filt_idx];
-                            let is_current = id == &current_session_id;
+                            let entry = &g.session_picker_entries[filt_idx];
+                            let is_current = entry.id == current_session_id;
                             let marker = if is_current { " *" } else { "" };
                             let st = if vis_idx == pick {
                                 Style::default().fg(Color::Black).bg(theme::USER).add_modifier(Modifier::BOLD)
                             } else {
                                 Style::default().fg(theme::TEXT)
                             };
-                            lines.push(Line::from(Span::styled(format!(" {id}{marker}"), st)));
+                            lines.push(Line::from(Span::styled(
+                                format!(" {}{marker}", entry.label),
+                                st,
+                            )));
                         }
                         let remaining_below = n_filtered.saturating_sub(list_end);
                         if remaining_below > 0 {
@@ -3335,8 +3342,10 @@ pub fn run_blocking(
                         let count = g
                             .session_picker_entries
                             .iter()
-                            .filter(|s| {
-                                filter.is_empty() || s.to_ascii_lowercase().contains(&filter)
+                            .filter(|entry| {
+                                filter.is_empty()
+                                    || entry.label.to_ascii_lowercase().contains(&filter)
+                                    || entry.id.to_ascii_lowercase().contains(&filter)
                             })
                             .count();
                         match (key.code, key.modifiers) {
@@ -3353,18 +3362,19 @@ pub fn run_blocking(
                                 }
                             }
                             (KeyCode::Enter, _) => {
-                                let filtered: Vec<&String> = g
+                                let filtered: Vec<&crate::tui::SessionPickerEntry> = g
                                     .session_picker_entries
                                     .iter()
-                                    .filter(|s| {
+                                    .filter(|entry| {
                                         filter.is_empty()
-                                            || s.to_ascii_lowercase().contains(&filter)
+                                            || entry.label.to_ascii_lowercase().contains(&filter)
+                                            || entry.id.to_ascii_lowercase().contains(&filter)
                                     })
                                     .collect();
                                 let pick =
                                     g.session_picker_index.min(filtered.len().saturating_sub(1));
-                                if let Some(id) = filtered.get(pick) {
-                                    let id = (*id).clone();
+                                if let Some(entry) = filtered.get(pick) {
+                                    let id = entry.id.clone();
                                     g.close_session_picker();
                                     drop(g);
                                     let _ = cmd_tx.send(TuiCmd::ResumeSession(id));

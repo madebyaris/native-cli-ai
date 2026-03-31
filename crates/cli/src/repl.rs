@@ -4,12 +4,16 @@ use crate::file_mentions::{
 };
 use crate::prompt::NcaPrompt;
 use crate::runner::{SessionRuntime, dispatch_question_answer, dispatch_tool_approval};
+use crate::session_display::{
+    format_attach_lines, format_cost_lines, format_resume_briefing_lines,
+    format_session_picker_label, should_show_resume_briefing,
+};
 use crate::slash_commands::SLASH_COMMANDS;
 use crate::tui::app::ApprovalAnswer;
 use crate::tui::{
-    DisplayBlock, ModelPickerAction, ModelPickerEntry, TuiCmd, TuiSessionState, git_create_branch,
-    git_current_branch, git_list_branches, git_switch_branch, replay_event_log_into_state,
-    run_blocking, spawn_tui_bridge,
+    DisplayBlock, ModelPickerAction, ModelPickerEntry, SessionPickerEntry, TuiCmd, TuiSessionState,
+    git_create_branch, git_current_branch, git_list_branches, git_switch_branch,
+    replay_event_log_into_state, run_blocking, spawn_tui_bridge,
 };
 use nca_common::config::{PermissionMode, ProviderKind};
 use nca_common::event::{EndReason, QuestionSelection};
@@ -769,8 +773,16 @@ impl Repl {
             }
             "/cost" => {
                 let snapshot = self.runtime.snapshot();
-                out.eprintln(&format!("[cost] Session: {}", snapshot.id));
-                out.eprintln("[cost] Use 'nca logs --follow' to see real-time token usage");
+                let lines = format_cost_lines(&snapshot, &self.runtime.event_log_path());
+                if let ReplOutput::Tui(st) = &out {
+                    if let Ok(mut g) = st.lock() {
+                        g.open_info_modal("cost", lines);
+                    }
+                } else {
+                    for line in &lines {
+                        out.println(line);
+                    }
+                }
             }
             "/stats" => {
                 let snapshot = self.runtime.snapshot();
@@ -1005,8 +1017,15 @@ impl Repl {
                 match tokio::fs::read_to_string(self.runtime.event_log_path()).await {
                     Ok(data) => {
                         if let ReplOutput::Tui(st) = &out {
-                            let lines: Vec<String> = data.lines().rev().take(100).map(String::from).collect();
-                            let lines: Vec<String> = lines.into_iter().rev().collect();
+                            let mut lines = vec![
+                                format!("Session: {}", self.runtime.snapshot().id),
+                                format!("Event log: {}", self.runtime.event_log_path().display()),
+                                String::new(),
+                            ];
+                            let preview: Vec<String> =
+                                data.lines().rev().take(100).map(String::from).collect();
+                            let preview: Vec<String> = preview.into_iter().rev().collect();
+                            lines.extend(preview);
                             if let Ok(mut g) = st.lock() {
                                 g.open_info_modal("logs (last 100)", lines);
                             }
@@ -1021,17 +1040,7 @@ impl Repl {
             }
             "/attach" => {
                 let snapshot = self.runtime.snapshot();
-                let lines = vec![
-                    format!("Session:  {}", snapshot.id),
-                    format!(
-                        "Socket:   {}",
-                        snapshot
-                            .socket_path
-                            .as_ref()
-                            .map(|path| path.display().to_string())
-                            .unwrap_or_else(|| "<none>".into())
-                    ),
-                ];
+                let lines = format_attach_lines(&snapshot, &self.runtime.event_log_path());
                 if let ReplOutput::Tui(st) = &out {
                     if let Ok(mut g) = st.lock() {
                         g.open_info_modal("attach", lines);
@@ -1334,10 +1343,9 @@ impl Repl {
                     );
                 }
             }
-            "/sessions" => match self.runtime.list_session_ids().await {
-                Ok(mut ids) => {
-                    ids.sort();
-                    if ids.is_empty() {
+            "/sessions" => match self.runtime.list_session_snapshots().await {
+                Ok(snapshots) => {
+                    if snapshots.is_empty() {
                         let lines = vec!["No saved sessions.".into()];
                         if let ReplOutput::Tui(st) = &out {
                             if let Ok(mut g) = st.lock() {
@@ -1348,12 +1356,19 @@ impl Repl {
                         }
                     } else if let ReplOutput::Tui(st) = &out {
                         let current = self.runtime.session_id().to_string();
+                        let entries: Vec<SessionPickerEntry> = snapshots
+                            .iter()
+                            .map(|snapshot| SessionPickerEntry {
+                                id: snapshot.id.clone(),
+                                label: format_session_picker_label(snapshot),
+                            })
+                            .collect();
                         if let Ok(mut g) = st.lock() {
-                            g.open_session_picker(ids, &current);
+                            g.open_session_picker(entries, &current);
                         }
                     } else {
-                        for id in ids {
-                            out.println(&id);
+                        for snapshot in snapshots {
+                            out.println(&snapshot.id);
                         }
                     }
                 }
@@ -1545,6 +1560,8 @@ impl Repl {
         let session_id = self.runtime.session_id().to_string();
         let model = self.runtime.model().to_string();
         let perm = format!("{:?}", self.runtime.permission_mode());
+        let snapshot = self.runtime.snapshot();
+        let message_count = self.runtime.messages().len();
         let tui_state: Arc<Mutex<TuiSessionState>> = Arc::new(Mutex::new(TuiSessionState::new(
             session_id,
             model,
@@ -1562,6 +1579,13 @@ impl Repl {
             && let Ok(mut g) = tui_state.lock()
         {
             g.set_current_branch(&branch);
+        }
+        if should_show_resume_briefing(&snapshot, message_count)
+            && let Ok(mut g) = tui_state.lock()
+        {
+            for line in format_resume_briefing_lines(&snapshot) {
+                g.blocks.push(DisplayBlock::System(line));
+            }
         }
 
         let rx = self

@@ -7,6 +7,16 @@ use std::fs;
 use std::path::Path;
 use tempfile::tempdir;
 
+#[derive(Default)]
+struct SessionWriteDetails<'a> {
+    branch: Option<&'a str>,
+    base_branch: Option<&'a str>,
+    session_summary: Option<&'a str>,
+    total_input_tokens: u64,
+    total_output_tokens: u64,
+    estimated_cost_usd: f64,
+}
+
 fn write_local_config(workspace: &Path) {
     write_local_config_contents(workspace, "[provider.minimax]\napi_key = \"test-key\"\n");
 }
@@ -24,6 +34,24 @@ fn write_session(
     model: &str,
     status: SessionStatus,
 ) {
+    write_session_with_details(
+        workspace,
+        id,
+        updated_at,
+        model,
+        status,
+        SessionWriteDetails::default(),
+    );
+}
+
+fn write_session_with_details(
+    workspace: &Path,
+    id: &str,
+    updated_at: chrono::DateTime<Utc>,
+    model: &str,
+    status: SessionStatus,
+    details: SessionWriteDetails<'_>,
+) {
     let sessions_dir = workspace.join(".nca").join("sessions");
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
 
@@ -38,19 +66,19 @@ fn write_session(
             pid: None,
             socket_path: None,
             worktree_path: None,
-            branch: None,
-            base_branch: None,
+            branch: details.branch.map(str::to_string),
+            base_branch: details.base_branch.map(str::to_string),
             parent_session_id: None,
             child_session_ids: Vec::new(),
             inherited_summary: None,
             spawn_reason: None,
-            session_summary: None,
+            session_summary: details.session_summary.map(str::to_string),
             orchestration: None,
         },
         messages: vec![Message::user("hello")],
-        total_input_tokens: 0,
-        total_output_tokens: 0,
-        estimated_cost_usd: 0.0,
+        total_input_tokens: details.total_input_tokens,
+        total_output_tokens: details.total_output_tokens,
+        estimated_cost_usd: details.estimated_cost_usd,
     };
 
     let json = serde_json::to_string_pretty(&session).expect("serialize session");
@@ -112,6 +140,42 @@ fn sessions_lists_newest_saved_sessions_first_with_status() {
         .success()
         .stdout(predicates::str::contains("session-newer  status=Cancelled"))
         .stdout(predicates::str::contains("session-older  status=Completed"));
+}
+
+#[test]
+fn sessions_human_output_includes_branch_cost_and_summary() {
+    let temp = tempdir().expect("tempdir");
+    let now = Utc::now();
+
+    write_session_with_details(
+        temp.path(),
+        "session-rich",
+        now,
+        "MiniMax-M2.5",
+        SessionStatus::Completed,
+        SessionWriteDetails {
+            branch: Some("feature/session-ux"),
+            base_branch: Some("main"),
+            session_summary: Some("Recovered compile errors and staged a cleaner resume summary."),
+            total_input_tokens: 321,
+            total_output_tokens: 654,
+            estimated_cost_usd: 0.0199,
+        },
+    );
+
+    Command::cargo_bin("nca")
+        .expect("binary")
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .arg("sessions")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("branch=feature/session-ux"))
+        .stdout(predicates::str::contains("tokens=321/654"))
+        .stdout(predicates::str::contains("cost=$0.0199"))
+        .stdout(predicates::str::contains(
+            "summary: Recovered compile errors and staged a cleaner resume summary.",
+        ));
 }
 
 /// Same selection rule as `nca --resume` (latest `updated_at`).
@@ -230,6 +294,42 @@ fn status_outputs_session_snapshot_json() {
     assert_eq!(payload["status"], "completed");
     assert_eq!(payload["model"], "MiniMax-M2.5");
     assert_eq!(payload["estimated_cost_usd"], 0.0);
+}
+
+#[test]
+fn status_human_output_includes_branch_and_summary_context() {
+    let temp = tempdir().expect("tempdir");
+    let now = Utc::now();
+    write_session_with_details(
+        temp.path(),
+        "session-status",
+        now,
+        "MiniMax-M2.5",
+        SessionStatus::Completed,
+        SessionWriteDetails {
+            branch: Some("nca/session-status"),
+            base_branch: Some("main"),
+            session_summary: Some("Investigated startup costs and preserved a resume checkpoint."),
+            total_input_tokens: 111,
+            total_output_tokens: 222,
+            estimated_cost_usd: 0.0101,
+        },
+    );
+
+    Command::cargo_bin("nca")
+        .expect("binary")
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .arg("status")
+        .arg("session-status")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("branch=nca/session-status"))
+        .stdout(predicates::str::contains("base=main"))
+        .stdout(predicates::str::contains("tokens=111/222"))
+        .stdout(predicates::str::contains(
+            "summary: Investigated startup costs and preserved a resume checkpoint.",
+        ));
 }
 
 #[test]
