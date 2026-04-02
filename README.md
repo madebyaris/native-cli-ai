@@ -306,7 +306,22 @@ In practice, that means you can start small, branch out when a task gets bigger,
 
 ## Documentation
 
-The root README is the quick-start guide. Use the docs folder for deeper detail:
+Full user-facing documentation lives in [`docs/documentation/`](docs/documentation/index.md):
+
+| Page | Description |
+|---|---|
+| [Getting Started](docs/documentation/getting-started.md) | Installation, first run, and initial configuration |
+| [Commands](docs/documentation/commands.md) | Complete CLI command and flag reference |
+| [Interactive Mode](docs/documentation/interactive-mode.md) | TUI, REPL, slash commands, keyboard shortcuts |
+| [Configuration](docs/documentation/configuration.md) | Config files, TOML format, and environment variables |
+| [Providers](docs/documentation/providers.md) | LLM provider setup — MiniMax, Anthropic, OpenAI, OpenRouter |
+| [Tools](docs/documentation/tools.md) | All agent tools — file ops, search, shell, web, and more |
+| [Sessions](docs/documentation/sessions.md) | Session lifecycle, persistence, resume, and management |
+| [Permissions](docs/documentation/permissions.md) | Approval system, permission modes, and safe mode |
+| [Skills](docs/documentation/skills.md) | Skill discovery, installation, and authoring |
+| [Advanced](docs/documentation/advanced.md) | Sub-agents, MCP servers, hooks, orchestration, and IPC |
+
+Internal design docs:
 
 - [Product Requirements](docs/prd.md)
 - [Tech Stack](docs/tech-stack.md)
