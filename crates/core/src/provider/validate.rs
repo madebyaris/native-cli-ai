@@ -1,6 +1,6 @@
 //! Lightweight API key validation per provider.
 
-use nca_common::config::ProviderKind;
+use nca_common::config::{ProviderCompatibility, ProviderKind};
 
 /// Result of an API key validation attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +22,7 @@ pub async fn validate_api_key(
     provider: ProviderKind,
     api_key: &str,
     base_url: &str,
+    compatibility: Option<ProviderCompatibility>,
 ) -> ValidationResult {
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -54,6 +55,28 @@ pub async fn validate_api_key(
                 .send()
                 .await
         }
+        ProviderKind::Custom => match compatibility.unwrap_or(ProviderCompatibility::OpenAi) {
+            ProviderCompatibility::OpenAi => {
+                let url = format!("{}/v1/models", base_url.trim_end_matches('/'));
+                client
+                    .get(&url)
+                    .header("Authorization", format!("Bearer {api_key}"))
+                    .send()
+                    .await
+            }
+            ProviderCompatibility::Anthropic => {
+                let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
+                client
+                    .post(&url)
+                    .header("Authorization", format!("Bearer {api_key}"))
+                    .header("x-api-key", api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .header("content-type", "application/json")
+                    .body(r#"{"max_tokens":1,"messages":[]}"#)
+                    .send()
+                    .await
+            }
+        },
     };
 
     match result {

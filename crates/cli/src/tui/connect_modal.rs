@@ -45,6 +45,12 @@ pub const CONNECT_CATALOG: &[CatalogEntry] = &[
         title: "OpenRouter",
         subtitle: "Multi-model routing (API key)",
     },
+    CatalogEntry {
+        section: ConnectSection::Other,
+        kind: ProviderKind::Custom,
+        title: "Custom",
+        subtitle: "Bring your own endpoint (/provider → Add custom)",
+    },
 ];
 
 #[derive(Debug, Clone)]

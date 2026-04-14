@@ -22,6 +22,7 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/doctor",
     "/model",
     "/provider",
+    "/custom",
     "/apikey",
     "/editor",
     "/set-editor",

@@ -32,7 +32,7 @@ The product surface is the CLI. No desktop wrapper, no Electron, no browser in t
 - Persists session state and event logs under the current workspace.
 - Exposes machine-readable JSON and NDJSON for automation.
 - Spawns child agents with explicit parent/child lineage and optional git worktrees.
-- Uses MiniMax by default, with OpenAI, Anthropic, and OpenRouter support.
+- Uses MiniMax by default, with OpenAI, Anthropic, OpenRouter, and custom endpoint support.
 - Loads built-in tools plus optional MCP tools from config.
 - Sends **native multimodal** (text + image) messages to MiniMax and other vision-capable models.
 - Auto-summarizes long conversations to prevent token overflow.
@@ -252,6 +252,17 @@ Typical environment variables:
 - `OPENAI_API_KEY`
 - `ANTHROPIC_API_KEY`
 - `OPENROUTER_API_KEY`
+- `CUSTOM_PROVIDER_API_KEY` (for custom endpoints)
+
+### Custom Endpoints
+
+Use `/provider` in the TUI and select **"Add custom provider…"** to configure any OpenAI-compatible or Anthropic-compatible endpoint. Or use the `/custom` slash command:
+
+```
+/custom openai https://my-endpoint.example sk-key my-model
+```
+
+See [Providers](docs/documentation/providers.md) for full details.
 
 Provider config is loaded from defaults, then `~/.nca/config.toml`, then `<workspace>/.nca/config.local.toml`, then environment overrides.
 
@@ -312,7 +323,7 @@ Full user-facing documentation lives in [`docs/documentation/`](docs/documentati
 | [Commands](docs/documentation/commands.md) | Complete CLI command and flag reference |
 | [Interactive Mode](docs/documentation/interactive-mode.md) | TUI, REPL, slash commands, keyboard shortcuts |
 | [Configuration](docs/documentation/configuration.md) | Config files, TOML format, and environment variables |
-| [Providers](docs/documentation/providers.md) | LLM provider setup — MiniMax, Anthropic, OpenAI, OpenRouter |
+| [Providers](docs/documentation/providers.md) | LLM provider setup — MiniMax, Anthropic, OpenAI, OpenRouter, Custom |
 | [Tools](docs/documentation/tools.md) | All agent tools — file ops, search, shell, web, and more |
 | [Sessions](docs/documentation/sessions.md) | Session lifecycle, persistence, resume, and management |
 | [Permissions](docs/documentation/permissions.md) | Approval system, permission modes, and safe mode |

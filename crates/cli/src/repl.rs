@@ -11,7 +11,7 @@ use crate::tui::{
     git_current_branch, git_list_branches, git_switch_branch, replay_event_log_into_state,
     run_blocking, spawn_tui_bridge,
 };
-use nca_common::config::{PermissionMode, ProviderKind};
+use nca_common::config::{PermissionMode, ProviderCompatibility, ProviderKind};
 use nca_common::event::{EndReason, QuestionSelection};
 use nca_core::skills::SkillCatalog;
 use nca_runtime::memory_store::MemoryStore;
@@ -415,6 +415,21 @@ impl Repl {
         p: ProviderKind,
         out: ReplOutput<'_>,
     ) -> anyhow::Result<()> {
+        if p == ProviderKind::Custom
+            && self
+                .runtime
+                .config()
+                .provider
+                .custom
+                .base_url
+                .trim()
+                .is_empty()
+        {
+            out.eprintln(
+                "[provider] custom provider is not configured yet; run /provider → \"Add custom provider…\", or: /custom <openai|anthropic> <base-url> [api-key] [model]",
+            );
+            return Ok(());
+        }
         let mut cfg = self.runtime.config().clone();
         cfg.set_default_provider(p);
         match self.runtime.apply_nca_config(cfg) {
@@ -440,6 +455,53 @@ impl Repl {
                 }
             }
             Err(e) => out.eprintln(&format!("[provider] {e}")),
+        }
+        Ok(())
+    }
+
+    /// Save custom provider fields, switch default to Custom, and persist workspace config.
+    async fn persist_custom_provider_config(
+        &mut self,
+        compatibility: ProviderCompatibility,
+        base_url: String,
+        api_key: Option<String>,
+        model: Option<String>,
+        out: ReplOutput<'_>,
+    ) -> anyhow::Result<()> {
+        let mut cfg = self.runtime.config().clone();
+        cfg.set_custom_compatibility(compatibility);
+        cfg.set_provider_base_url(ProviderKind::Custom, base_url);
+        if let Some(k) = api_key.filter(|k| !k.trim().is_empty()) {
+            cfg.set_provider_api_key(ProviderKind::Custom, k);
+        }
+        if let Some(m) = model.filter(|m| !m.trim().is_empty()) {
+            cfg.provider.set_model_for(ProviderKind::Custom, m);
+        }
+        cfg.set_default_provider(ProviderKind::Custom);
+
+        match self.runtime.apply_nca_config(cfg) {
+            Ok(()) => {
+                if let Err(e) = self
+                    .runtime
+                    .config()
+                    .save_workspace_file(self.runtime.workspace_root())
+                {
+                    out.eprintln(&format!("[custom] applied but workspace save failed: {e}"));
+                } else {
+                    out.println(&format!(
+                        "[custom] {} at {} — model {} — saved .nca/config.local.toml",
+                        compatibility.display_name(),
+                        self.runtime.config().provider.custom.base_url,
+                        self.runtime.model()
+                    ));
+                }
+                if let ReplOutput::Tui(st) = out
+                    && let Ok(mut g) = st.lock()
+                {
+                    g.model = self.runtime.model().to_string();
+                }
+            }
+            Err(e) => out.eprintln(&format!("[custom] {e}")),
         }
         Ok(())
     }
@@ -538,6 +600,7 @@ impl Repl {
                     "  /models            Browse and select models".into(),
                     "  /connect           Connect LLM provider".into(),
                     "  /provider [name]   Default provider".into(),
+                    "  /custom            Configure custom endpoint".into(),
                     "  /apikey <p> <key>  Store provider API key".into(),
                     "  /model [name]      Set active model".into(),
                     "  /editor [seed]     Open external editor".into(),
@@ -1097,7 +1160,7 @@ impl Repl {
             }
             "/config" => {
                 let config = self.runtime.config();
-                let lines = vec![
+                let mut lines = vec![
                     format!("Provider:    {}", config.provider.default.display_name()),
                     format!("Model:       {}", self.runtime.model()),
                     format!("Permission:  {:?}", self.runtime.permission_mode()),
@@ -1107,11 +1170,14 @@ impl Repl {
                     format!("Max tokens:  {}", config.model.max_tokens),
                     String::new(),
                     "Provider endpoints:".into(),
-                    format!("  MiniMax:     {}", config.provider.base_url_for(ProviderKind::MiniMax)),
-                    format!("  OpenAI:      {}", config.provider.base_url_for(ProviderKind::OpenAi)),
-                    format!("  Anthropic:   {}", config.provider.base_url_for(ProviderKind::Anthropic)),
-                    format!("  OpenRouter:  {}", config.provider.base_url_for(ProviderKind::OpenRouter)),
                 ];
+                for provider in ProviderKind::ALL {
+                    lines.push(format!(
+                        "  {:<12} {}",
+                        format!("{}:", provider.display_name()),
+                        config.provider.base_url_for(provider)
+                    ));
+                }
                 if let ReplOutput::Tui(st) = &out {
                     if let Ok(mut g) = st.lock() {
                         g.open_info_modal("config", lines);
@@ -1132,7 +1198,8 @@ impl Repl {
                     );
                 } else {
                     out.println("Connect an LLM provider (non-TUI):");
-                    out.println("  /provider <minimax|openai|anthropic|openrouter>");
+                    out.println("  /provider <minimax|openai|anthropic|openrouter|custom>");
+                    out.println("  /custom <openai|anthropic> <base-url> [api-key] [model]");
                     out.println("  /apikey <provider> <secret>   — save API key to .nca/config.local.toml");
                     out.println("  /model <name>                 — set model after switching provider");
                     out.println(&format!(
@@ -1155,6 +1222,7 @@ impl Repl {
                     "  /connect           OpenCode-style provider picker".into(),
                     "  /models            Browse and select models".into(),
                     "  /provider [name]   Default LLM provider".into(),
+                    "  /custom            Configure custom endpoint".into(),
                     "  /apikey <p> <key>  Store API key for a provider".into(),
                     "  /model [name]      Model for the active provider".into(),
                     "  /editor [seed]     Open external editor".into(),
@@ -1177,22 +1245,96 @@ impl Repl {
                         if let Ok(mut g) = st.lock() {
                             g.open_provider_picker(self.runtime.config().provider.default, false);
                         }
-                        out.println("[provider] choose with ↑↓ + Enter, Esc to cancel");
+                        out.println("[provider] choose with ↑↓ + Enter, Esc cancel, c = custom API help");
                     } else {
                         out.println(&format!(
                             "current default provider: {} (model {})",
                             self.runtime.config().provider.default.display_name(),
                             self.runtime.model()
                         ));
-                        out.println("usage: /provider <minimax|openai|anthropic|openrouter>");
+                        out.println("usage: /provider <minimax|openai|anthropic|openrouter|custom>");
+                        out.println("       /provider add-custom   (TUI: BYO endpoint wizard)");
+                    }
+                } else if rest.eq_ignore_ascii_case("add-custom")
+                    || rest.eq_ignore_ascii_case("custom-wizard")
+                {
+                    if let ReplOutput::Tui(st) = out {
+                        if let Ok(mut g) = st.lock() {
+                            g.open_custom_provider_setup(self.runtime.model().to_string());
+                        }
+                        out.println("[provider] add custom provider wizard opened");
+                    } else {
+                        out.println("Wizard needs the full-screen TUI. Use:");
+                        out.println("  /custom <openai|anthropic> <base-url> [api-key] [model]");
                     }
                 } else if let Some(p) = ProviderKind::from_cli_name(rest)
                     .or_else(|| ProviderKind::parse_display_name(rest))
                 {
                     self.apply_provider_in_session(p, out).await?;
                 } else {
-                    out.eprintln("unknown provider; try: minimax, openai, anthropic, openrouter");
+                    out.eprintln("unknown provider; try: minimax, openai, anthropic, openrouter, custom, add-custom");
                 }
+            }
+            "/custom" => {
+                let mut toks = rest.split_whitespace();
+                let compat_raw = toks.next();
+                let base_url = toks.next();
+                let api_key = toks.next();
+                let model = toks.next();
+                if compat_raw.is_none() || base_url.is_none() {
+                    let custom = &self.runtime.config().provider.custom;
+                    let lines = vec![
+                        format!(
+                            "Compatibility: {}",
+                            custom.compatibility.display_name()
+                        ),
+                        format!(
+                            "Base URL:      {}",
+                            if custom.base_url.trim().is_empty() {
+                                "<not set>"
+                            } else {
+                                custom.base_url.as_str()
+                            }
+                        ),
+                        format!("Model:         {}", custom.model),
+                        format!("API key env:   {}", custom.api_key_env),
+                        format!(
+                            "API key:       {}",
+                            if custom.resolve_api_key().is_some() {
+                                "configured"
+                            } else {
+                                "missing"
+                            }
+                        ),
+                        String::new(),
+                        "usage: /custom <openai|anthropic> <base-url> [api-key] [model]".into(),
+                        "TUI:   /provider → \"Add custom provider…\"".into(),
+                        "example: /custom openai https://sumopod.example sk-test my-model".into(),
+                    ];
+                    if let ReplOutput::Tui(st) = &out {
+                        if let Ok(mut g) = st.lock() {
+                            g.open_info_modal("custom provider", lines);
+                        }
+                    } else {
+                        for line in &lines {
+                            out.println(line);
+                        }
+                    }
+                    return Ok(true);
+                }
+
+                let Some(compatibility) =
+                    ProviderCompatibility::from_cli_name(compat_raw.unwrap_or_default())
+                else {
+                    out.eprintln("compatibility must be `openai` or `anthropic`");
+                    return Ok(true);
+                };
+
+                let base_url = base_url.unwrap_or_default().to_string();
+                let api_key = api_key.map(|s| s.to_string());
+                let model = model.map(|s| s.to_string());
+                self.persist_custom_provider_config(compatibility, base_url, api_key, model, out)
+                    .await?;
             }
             "/apikey" => {
                 let mut toks = rest.split_whitespace();
@@ -1219,7 +1361,7 @@ impl Repl {
                             self.save_provider_api_key(p, key, out).await?;
                         }
                     } else {
-                        out.eprintln("unknown provider; try: minimax, openai, anthropic, openrouter");
+                        out.eprintln("unknown provider; try: minimax, openai, anthropic, openrouter, custom");
                     }
                 } else if let ReplOutput::Tui(st) = out {
                     if let Ok(mut g) = st.lock() {
@@ -1723,16 +1865,70 @@ impl Repl {
                     }
                 }
                 TuiCmd::ApplyDefaultProvider(p) => {
-                    self.apply_provider_in_session(p, ReplOutput::Tui(&tui_state))
-                        .await?;
+                    if p == ProviderKind::Custom
+                        && self
+                            .runtime
+                            .config()
+                            .provider
+                            .custom
+                            .base_url
+                            .trim()
+                            .is_empty()
+                    {
+                        if let Ok(mut g) = tui_state.lock() {
+                            g.open_custom_provider_setup(self.runtime.model().to_string());
+                            g.blocks.push(DisplayBlock::System(
+                                "[provider] add custom provider wizard opened".into(),
+                            ));
+                        }
+                    } else {
+                        self.apply_provider_in_session(p, ReplOutput::Tui(&tui_state))
+                            .await?;
+                    }
+                }
+                TuiCmd::ApplyCustomProviderSetup {
+                    compatibility,
+                    base_url,
+                    api_key,
+                    model,
+                } => {
+                    self.persist_custom_provider_config(
+                        compatibility,
+                        base_url,
+                        Some(api_key),
+                        Some(model),
+                        ReplOutput::Tui(&tui_state),
+                    )
+                    .await?;
+                    if let Ok(mut g) = tui_state.lock() {
+                        g.blocks.push(DisplayBlock::System(
+                            "[custom] provider saved and set as default".into(),
+                        ));
+                    }
                 }
                 TuiCmd::PromptApiKey(p, connect_after_save) => {
                     if let Ok(mut g) = tui_state.lock() {
-                        g.open_api_key_modal(
-                            p,
-                            self.runtime.config().provider.api_key_present_for(p),
-                            connect_after_save,
-                        );
+                        if p == ProviderKind::Custom
+                            && self
+                                .runtime
+                                .config()
+                                .provider
+                                .custom
+                                .base_url
+                                .trim()
+                                .is_empty()
+                        {
+                            g.open_custom_provider_setup(self.runtime.model().to_string());
+                            g.blocks.push(DisplayBlock::System(
+                                "[apikey] configure custom endpoint first (wizard opened)".into(),
+                            ));
+                        } else {
+                            g.open_api_key_modal(
+                                p,
+                                self.runtime.config().provider.api_key_present_for(p),
+                                connect_after_save,
+                            );
+                        }
                     }
                 }
                 TuiCmd::ApplyModel(model_name) => {
@@ -1907,7 +2103,11 @@ impl Repl {
                         .to_string();
                     // Run async validation
                     let result = nca_core::provider::validate::validate_api_key(
-                        provider, &api_key, &base_url,
+                        provider,
+                        &api_key,
+                        &base_url,
+                        (provider == ProviderKind::Custom)
+                            .then_some(self.runtime.config().provider.custom.compatibility),
                     )
                     .await;
                     if let Ok(mut g) = tui_state.lock() {

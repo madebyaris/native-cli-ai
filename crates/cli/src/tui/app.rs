@@ -9,7 +9,8 @@ use crate::tui::connect_modal::{
     row_index_for_selection, selectable_row_indices,
 };
 use crate::tui::state::{
-    ApprovalRequest, DisplayBlock, ModelPickerAction, ModelPickerEntry, TuiSessionState,
+    ApprovalRequest, CustomProviderSetupStep, DisplayBlock, ModelPickerAction, ModelPickerEntry,
+    TuiSessionState,
 };
 use crossterm::{
     cursor::{Hide, MoveToColumn, Show},
@@ -23,7 +24,7 @@ use crossterm::{
         enable_raw_mode,
     },
 };
-use nca_common::config::ProviderKind;
+use nca_common::config::{ProviderCompatibility, ProviderKind};
 use nca_common::event::{BusyState, QuestionSelection};
 use nca_core::approval::suggest_allow_pattern;
 use nca_core::skills::{SkillCatalog, SkillSource};
@@ -100,6 +101,13 @@ pub enum TuiCmd {
     /// Validate an API key for onboarding (provider, api_key).
     /// The repl handler looks up base_url from config.
     ValidateApiKey(ProviderKind, String),
+    /// Apply custom provider settings from the TUI wizard.
+    ApplyCustomProviderSetup {
+        compatibility: ProviderCompatibility,
+        base_url: String,
+        api_key: String,
+        model: String,
+    },
     /// Mark onboarding as complete and persist the flag.
     #[allow(dead_code)]
     CompleteOnboarding,
@@ -132,8 +140,14 @@ const SIDEBAR_MIN_TOTAL_WIDTH: u16 = 110;
 const COMMAND_PALETTE_WIDTH: u16 = 48;
 const COMMAND_PALETTE_MAX_ROWS: usize = 10;
 
+/// Text used for `/command` detection (ignores leading spaces in the composer).
+fn slash_command_buffer(buffer: &str) -> &str {
+    buffer.trim_start()
+}
+
 fn slash_panel_visible(buffer: &str) -> bool {
-    buffer.starts_with('/') && !buffer.contains(' ')
+    let s = slash_command_buffer(buffer);
+    s.starts_with('/') && !s.contains(' ')
 }
 
 fn cursor_byte_index(line: &str, cursor_char_idx: usize) -> usize {
@@ -436,7 +450,8 @@ fn filter_slash_entries<'a>(entries: &'a [SlashEntry], buffer: &str) -> Vec<&'a 
     if !slash_panel_visible(buffer) {
         return Vec::new();
     }
-    let needle = buffer.trim_start_matches('/').to_lowercase();
+    let s = slash_command_buffer(buffer);
+    let needle = s.trim_start_matches('/').to_lowercase();
     entries
         .iter()
         .filter(|e| {
@@ -560,6 +575,10 @@ const PALETTE_CATALOG: &[PaletteRow] = &[
         label: "API key",
         shortcut: "",
     },
+    PaletteRow::Entry {
+        label: "Add custom endpoint",
+        shortcut: "",
+    },
     PaletteRow::Section("System"),
     PaletteRow::Entry {
         label: "View status",
@@ -617,6 +636,7 @@ fn palette_command_for_label(label: &str) -> &'static str {
         "Toggle thinking" => "/thinking",
         "Switch provider" => "/provider",
         "API key" => "/apikey",
+        "Add custom endpoint" => "/provider add-custom",
         "View status" => "/status",
         "Config" => "/config",
         "Doctor" => "/doctor",
@@ -1856,6 +1876,13 @@ pub fn run_blocking(
                         "Enter / 0 = suggested · 1–n = option · click underlined line · /auto-answer · End = transcript bottom (empty input)",
                         Style::default().fg(theme::WARN),
                     ))
+                } else if slash_panel_visible(&g.input_buffer) {
+                    let hint_msg = if slash_filtered.is_empty() {
+                        "No matching /command — try /help or Ctrl+P (palette)"
+                    } else {
+                        "Commands above · ↑↓ select · Tab complete · Ctrl+P palette"
+                    };
+                    Line::from(Span::styled(hint_msg, Style::default().fg(theme::MUTED)))
                 } else if g.input_buffer.is_empty() {
                     Line::from(Span::styled(
                         "Enter send · Tab agent · Ctrl+V image · /image · Ctrl+P palette · Ctrl+Q exit · Ctrl+L clear",
@@ -2054,12 +2081,14 @@ pub fn run_blocking(
 
                 // LLM provider picker (default provider or API-key target).
                 if g.provider_picker_open {
-                    let names: Vec<&'static str> = ProviderKind::ALL
-                        .iter()
-                        .map(|p| p.display_name())
-                        .collect();
-                    let rows = (names.len() as u16).saturating_add(6).max(8);
-                    let popup_area = centered_rect(area, 40, rows);
+                    let all = ProviderKind::ALL;
+                    let n_builtin = all.len();
+                    let n = g.provider_picker_visible_row_count();
+                    let cap = crate::tui::state::TuiSessionState::PROVIDER_PICKER_VISIBLE_ROWS.min(n.max(1));
+                    let scroll = g.provider_picker_scroll.min(n.saturating_sub(1));
+                    let end = (scroll + cap).min(n);
+                    let rows = (cap as u16).saturating_add(9).max(10);
+                    let popup_area = centered_rect(area, 52, rows);
                     let mut lines: Vec<Line> = vec![
                         Line::from(Span::styled(
                             if g.provider_picker_for_api_key {
@@ -2071,7 +2100,33 @@ pub fn run_blocking(
                         )),
                         Line::default(),
                     ];
-                    for (i, name) in names.iter().enumerate() {
+                    if scroll > 0 {
+                        lines.push(Line::from(Span::styled(
+                            "  More above (Up)",
+                            Style::default().fg(theme::MUTED),
+                        )));
+                    }
+                    let row_labels: Vec<String> = (0..n)
+                        .map(|i| {
+                            if i < n_builtin {
+                                let p = all[i];
+                                let name = p.display_name();
+                                if p == ProviderKind::Custom {
+                                    format!("{name} (BYO endpoint)")
+                                } else {
+                                    name.to_string()
+                                }
+                            } else {
+                                "Add custom provider…".to_string()
+                            }
+                        })
+                        .collect();
+                    for (i, label) in row_labels
+                        .iter()
+                        .enumerate()
+                        .skip(scroll)
+                        .take(end.saturating_sub(scroll))
+                    {
                         let st = if i == g.provider_picker_index {
                             Style::default()
                                 .fg(Color::Black)
@@ -2080,11 +2135,17 @@ pub fn run_blocking(
                         } else {
                             Style::default().fg(theme::TEXT)
                         };
-                        lines.push(Line::from(Span::styled(format!(" {name}"), st)));
+                        lines.push(Line::from(Span::styled(format!(" {label}"), st)));
+                    }
+                    if end < n {
+                        lines.push(Line::from(Span::styled(
+                            "  More below (Down)",
+                            Style::default().fg(theme::MUTED),
+                        )));
                     }
                     lines.push(Line::default());
                     lines.push(Line::from(Span::styled(
-                        " Enter confirm · Esc cancel ",
+                        " Enter confirm · Esc cancel · c slash-command help ",
                         Style::default().fg(theme::MUTED),
                     )));
                     frame.render_widget(ClearWidget, popup_area);
@@ -2094,6 +2155,106 @@ pub fn run_blocking(
                                 .borders(Borders::ALL)
                                 .border_style(Style::default().fg(theme::BORDER))
                                 .title(Span::styled(" settings ", Style::default().fg(theme::MUTED))),
+                        )
+                        .style(Style::default().bg(theme::SURFACE))
+                        .wrap(Wrap { trim: false });
+                    frame.render_widget(popup, popup_area);
+                }
+
+                // Add custom provider wizard (`/provider` → Add custom provider…).
+                if g.custom_provider_setup_open {
+                    let rows = 18u16;
+                    let popup_area = centered_rect(area, 72, rows);
+                    let step_title = match g.custom_provider_setup_step {
+                        CustomProviderSetupStep::Compatibility => "Step 1/4 — API compatibility",
+                        CustomProviderSetupStep::BaseUrl => "Step 2/4 — Base URL",
+                        CustomProviderSetupStep::ApiKey => "Step 3/4 — API key",
+                        CustomProviderSetupStep::Model => "Step 4/4 — Model id",
+                    };
+                    let mut lines: Vec<Line> = vec![
+                        Line::from(Span::styled(
+                            step_title,
+                            Style::default().fg(theme::MUTED).add_modifier(Modifier::BOLD),
+                        )),
+                        Line::default(),
+                    ];
+                    match g.custom_provider_setup_step {
+                        CustomProviderSetupStep::Compatibility => {
+                            let opts = [
+                                ("OpenAI-compatible", "POST …/v1/chat/completions (Bearer)"),
+                                ("Anthropic-compatible", "POST …/v1/messages (x-api-key)"),
+                            ];
+                            for (j, (a, b)) in opts.iter().enumerate() {
+                                let st = if j == g.custom_setup_compat_index {
+                                    Style::default()
+                                        .fg(Color::Black)
+                                        .bg(theme::USER)
+                                        .add_modifier(Modifier::BOLD)
+                                } else {
+                                    Style::default().fg(theme::TEXT)
+                                };
+                                lines.push(Line::from(vec![
+                                    Span::styled(format!(" {a}"), st),
+                                    Span::styled(
+                                        format!(" - {b}"),
+                                        Style::default().fg(theme::MUTED),
+                                    ),
+                                ]));
+                            }
+                        }
+                        CustomProviderSetupStep::BaseUrl => {
+                            lines.push(Line::from(Span::styled(
+                                " Example: https://api.example.com (no trailing /v1/…)",
+                                Style::default().fg(theme::MUTED),
+                            )));
+                            lines.push(Line::default());
+                            lines.push(Line::from(Span::styled(
+                                format!(" {}", g.custom_setup_input),
+                                Style::default().fg(theme::TEXT),
+                            )));
+                        }
+                        CustomProviderSetupStep::ApiKey => {
+                            lines.push(Line::from(Span::styled(
+                                " Paste your secret key for this endpoint.",
+                                Style::default().fg(theme::MUTED),
+                            )));
+                            lines.push(Line::default());
+                            let masked = if g.custom_setup_input.is_empty() {
+                                String::new()
+                            } else {
+                                "*".repeat(g.custom_setup_input.chars().count().min(48))
+                            };
+                            lines.push(Line::from(Span::styled(masked, Style::default().fg(theme::TEXT))));
+                        }
+                        CustomProviderSetupStep::Model => {
+                            lines.push(Line::from(Span::styled(
+                                " Model name your host expects (e.g. gpt-4o-mini).",
+                                Style::default().fg(theme::MUTED),
+                            )));
+                            lines.push(Line::default());
+                            lines.push(Line::from(Span::styled(
+                                format!(" {}", g.custom_setup_input),
+                                Style::default().fg(theme::TEXT),
+                            )));
+                        }
+                    }
+                    lines.push(Line::default());
+                    lines.push(Line::from(Span::styled(
+                        match g.custom_provider_setup_step {
+                            CustomProviderSetupStep::Compatibility => {
+                                " Enter confirm · Up/Down · Esc cancel "
+                            }
+                            _ => " Enter confirm · Esc cancel · Backspace edit ",
+                        },
+                        Style::default().fg(theme::MUTED),
+                    )));
+                    frame.render_widget(ClearWidget, popup_area);
+                    let popup = Paragraph::new(Text::from(lines))
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(theme::BORDER))
+                                .title(Span::styled(" custom provider ", Style::default().fg(theme::MUTED))),
                         )
                         .style(Style::default().bg(theme::SURFACE))
                         .wrap(Wrap { trim: false });
@@ -2753,6 +2914,7 @@ pub fn run_blocking(
                 Event::Mouse(_) if g.model_picker_open => continue,
                 Event::Mouse(_) if g.connect_modal_open => continue,
                 Event::Mouse(_) if g.api_key_modal_open => continue,
+                Event::Mouse(_) if g.custom_provider_setup_open => continue,
                 Event::Mouse(_) if g.provider_picker_open => continue,
                 Event::Mouse(_) if g.permission_picker_open => continue,
                 Event::Mouse(_) if g.agent_picker_open => continue,
@@ -3129,28 +3291,164 @@ pub fn run_blocking(
                         continue;
                     }
 
+                    if g.custom_provider_setup_open {
+                        match (key.code, key.modifiers) {
+                            (KeyCode::Esc, _) => {
+                                g.close_custom_provider_setup();
+                            }
+                            (KeyCode::Enter, _) => match g.custom_provider_setup_step {
+                                CustomProviderSetupStep::Compatibility => {
+                                    g.custom_provider_setup_step = CustomProviderSetupStep::BaseUrl;
+                                    g.custom_setup_input.clear();
+                                }
+                                CustomProviderSetupStep::BaseUrl => {
+                                    let t = g.custom_setup_input.trim();
+                                    if t.is_empty() {
+                                        g.push_error(
+                                                "[custom] enter a base URL (e.g. https://api.example.com)"
+                                                    .into(),
+                                            );
+                                    } else {
+                                        g.custom_setup_base_url = t.to_string();
+                                        g.custom_setup_input.clear();
+                                        g.custom_provider_setup_step =
+                                            CustomProviderSetupStep::ApiKey;
+                                    }
+                                }
+                                CustomProviderSetupStep::ApiKey => {
+                                    let t = g.custom_setup_input.trim();
+                                    if t.is_empty() {
+                                        g.push_error("[custom] API key is required".into());
+                                    } else {
+                                        g.custom_setup_api_key = t.to_string();
+                                        g.custom_setup_input = g.custom_setup_model_hint.clone();
+                                        if g.custom_setup_input.trim().is_empty() {
+                                            g.custom_setup_input = "custom-model".into();
+                                        }
+                                        g.custom_provider_setup_step =
+                                            CustomProviderSetupStep::Model;
+                                    }
+                                }
+                                CustomProviderSetupStep::Model => {
+                                    let t = g.custom_setup_input.trim();
+                                    let model = if t.is_empty() {
+                                        "custom-model".to_string()
+                                    } else {
+                                        t.to_string()
+                                    };
+                                    let compatibility = if g.custom_setup_compat_index == 0 {
+                                        ProviderCompatibility::OpenAi
+                                    } else {
+                                        ProviderCompatibility::Anthropic
+                                    };
+                                    let base_url = g.custom_setup_base_url.clone();
+                                    let api_key = g.custom_setup_api_key.clone();
+                                    g.close_custom_provider_setup();
+                                    drop(g);
+                                    let _ = cmd_tx.send(TuiCmd::ApplyCustomProviderSetup {
+                                        compatibility,
+                                        base_url,
+                                        api_key,
+                                        model,
+                                    });
+                                }
+                            },
+                            (KeyCode::Up, _)
+                                if matches!(
+                                    g.custom_provider_setup_step,
+                                    CustomProviderSetupStep::Compatibility
+                                ) =>
+                            {
+                                g.custom_setup_compat_index =
+                                    g.custom_setup_compat_index.saturating_sub(1);
+                            }
+                            (KeyCode::Down, _)
+                                if matches!(
+                                    g.custom_provider_setup_step,
+                                    CustomProviderSetupStep::Compatibility
+                                ) =>
+                            {
+                                if g.custom_setup_compat_index < 1 {
+                                    g.custom_setup_compat_index += 1;
+                                }
+                            }
+                            (KeyCode::Backspace, _)
+                                if !matches!(
+                                    g.custom_provider_setup_step,
+                                    CustomProviderSetupStep::Compatibility
+                                ) =>
+                            {
+                                g.custom_setup_input.pop();
+                            }
+                            (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT)
+                                if !matches!(
+                                    g.custom_provider_setup_step,
+                                    CustomProviderSetupStep::Compatibility
+                                ) =>
+                            {
+                                g.custom_setup_input.push(c);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
                     // Provider picker (settings).
                     if g.provider_picker_open {
-                        let n = ProviderKind::ALL.len();
+                        let n = g.provider_picker_visible_row_count();
+                        let n_builtin = ProviderKind::ALL.len();
                         match (key.code, key.modifiers) {
                             (KeyCode::Esc, _) => {
                                 g.close_provider_picker();
                             }
                             (KeyCode::Up, _) => {
-                                g.provider_picker_index = g.provider_picker_index.saturating_sub(1);
+                                if n > 0 {
+                                    g.provider_picker_index =
+                                        g.provider_picker_index.saturating_sub(1);
+                                }
+                                g.sync_provider_picker_scroll();
                             }
                             (KeyCode::Down, _) => {
                                 if n > 0 {
                                     g.provider_picker_index = (g.provider_picker_index + 1) % n;
                                 }
+                                g.sync_provider_picker_scroll();
+                            }
+                            (KeyCode::Char('c'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                                g.close_provider_picker();
+                                g.open_info_modal(
+                                    "custom API",
+                                    vec![
+                                        "Use a custom base URL that speaks an OpenAI- or Anthropic-compatible HTTP API."
+                                            .to_string(),
+                                        String::new(),
+                                        "Option A — use this wizard: /provider then choose \"Add custom provider…\"."
+                                            .to_string(),
+                                        String::new(),
+                                        "Option B — composer commands:".to_string(),
+                                        "  /custom openai <base-url> [api-key] [model]".to_string(),
+                                        "  /custom anthropic <base-url> [api-key] [model]".to_string(),
+                                        String::new(),
+                                        "Then pick \"Custom\" in /provider or run /provider custom.".to_string(),
+                                    ],
+                                );
                             }
                             (KeyCode::Enter, _) => {
                                 if n == 0 {
                                     g.close_provider_picker();
                                     continue;
                                 }
-                                let p = ProviderKind::ALL[g.provider_picker_index.min(n - 1)];
                                 let for_key = g.provider_picker_for_api_key;
+                                if g.provider_picker_include_add_row
+                                    && g.provider_picker_index == n_builtin
+                                {
+                                    let hint = g.model.clone();
+                                    g.close_provider_picker();
+                                    g.open_custom_provider_setup(hint);
+                                    continue;
+                                }
+                                let p =
+                                    ProviderKind::ALL[g.provider_picker_index.min(n_builtin - 1)];
                                 g.close_provider_picker();
                                 if for_key {
                                     drop(g);
@@ -3832,7 +4130,8 @@ mod approval_parse_tests {
     use super::{
         TuiCmd, apply_selected_at_completion, branch_picker_enter_command,
         completed_at_mention_range_before_cursor, composer_line, delete_completed_at_mention,
-        escape_cancels_active_turn, filtered_branch_indices, parse_approval_verdict,
+        escape_cancels_active_turn, filter_slash_entries, filtered_branch_indices,
+        load_slash_entries, parse_approval_verdict,
     };
     use crate::tui::state::TuiSessionState;
     use nca_common::event::BusyState;
@@ -3893,6 +4192,19 @@ mod approval_parse_tests {
         let branches = vec!["alpha".into(), "main".into(), "main-fix".into()];
         let cmd = branch_picker_enter_command(&branches, "mai", 1);
         assert!(matches!(cmd, Some(TuiCmd::SwitchBranch(name)) if name == "main-fix"));
+    }
+
+    #[test]
+    fn slash_filter_cus_includes_custom_commands() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let entries = load_slash_entries(dir.path(), &[]);
+        let filtered = filter_slash_entries(&entries, "/cus");
+        let names: Vec<String> = filtered.iter().map(|e| e.command_str()).collect();
+        assert!(
+            names.iter().any(|n| n == "/custom"),
+            "expected /custom in {:?}",
+            names
+        );
     }
 
     #[test]
