@@ -1,6 +1,7 @@
 //! Tool that lets the LLM load a skill's full instructions by name.
 
 use crate::skills::SkillCatalog;
+use crate::tools::RecentSkillHints;
 use crate::tools::ToolExecutor;
 use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
 use std::path::PathBuf;
@@ -8,13 +9,19 @@ use std::path::PathBuf;
 pub struct InvokeSkillTool {
     workspace_root: PathBuf,
     skill_directories: Vec<PathBuf>,
+    recent_skills: RecentSkillHints,
 }
 
 impl InvokeSkillTool {
-    pub fn new(workspace_root: PathBuf, skill_directories: Vec<PathBuf>) -> Self {
+    pub fn new(
+        workspace_root: PathBuf,
+        skill_directories: Vec<PathBuf>,
+        recent_skills: RecentSkillHints,
+    ) -> Self {
         Self {
             workspace_root,
             skill_directories,
+            recent_skills,
         }
     }
 }
@@ -71,6 +78,7 @@ impl ToolExecutor for InvokeSkillTool {
 
         if let Some(skill) = skills.iter().find(|s| s.command == skill_name) {
             let body = skill.expanded_body();
+            self.recent_skills.record(&skill.command);
             ToolResult {
                 call_id: call.id.clone(),
                 success: true,
@@ -105,6 +113,7 @@ mod tests {
         InvokeSkillTool::new(
             workspace.to_path_buf(),
             vec![std::path::PathBuf::from(".nca/skills")],
+            RecentSkillHints::default(),
         )
     }
 
@@ -182,5 +191,29 @@ mod tests {
 
         assert!(!result.success);
         assert!(result.error.unwrap().contains("skill_name is required"));
+    }
+
+    #[tokio::test]
+    async fn records_successfully_loaded_skill_for_follow_up_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join(".nca/skills/review");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: Review\ncommand: review\n---\nReview code.\n",
+        )
+        .unwrap();
+
+        let hints = RecentSkillHints::default();
+        let tool = InvokeSkillTool::new(
+            dir.path().to_path_buf(),
+            vec![std::path::PathBuf::from(".nca/skills")],
+            hints.clone(),
+        );
+
+        let result = tool.execute(&make_call("review")).await;
+
+        assert!(result.success);
+        assert_eq!(hints.recent(1), vec!["review"]);
     }
 }
