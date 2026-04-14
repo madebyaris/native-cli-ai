@@ -17,8 +17,10 @@ use nca_core::harness::build_system_prompt;
 use nca_core::hooks::{HookEventKind, HookRunner};
 use nca_core::provider::ProviderError;
 use nca_core::provider::factory::build_provider;
+use nca_core::skills::SkillCatalog;
 use nca_core::tools::AskQuestionTool;
 use nca_core::tools::InvokeSkillTool;
+use nca_core::tools::RecentSkillHints;
 use nca_core::tools::ToolRegistry;
 use nca_core::tools::mcp::load_mcp_tools;
 use nca_core::tools::spawn_subagent::{SpawnRequest, SpawnSubagentTool};
@@ -151,8 +153,12 @@ impl Supervisor {
         tools.register(Box::new(crate::bash_tool::RuntimeBashTool::new(pty)));
 
         let (spawn_tx, spawn_rx) = mpsc::channel::<SpawnRequest>(16);
+        let recent_skills = RecentSkillHints::default();
         if !cfg.safe_mode {
-            tools.register(Box::new(SpawnSubagentTool::new(spawn_tx)));
+            tools.register(Box::new(SpawnSubagentTool::new(
+                spawn_tx,
+                recent_skills.clone(),
+            )));
         }
 
         let approval_pending: Option<ApprovalPendingMap>;
@@ -185,6 +191,7 @@ impl Supervisor {
         tools.register(Box::new(InvokeSkillTool::new(
             workspace_root.clone(),
             config.harness.skill_directories.clone(),
+            recent_skills,
         )));
         let session_id = cfg.session_id.unwrap_or_else(generate_session_id);
         let session_store = SessionStore::new(workspace_root.join(&config.session.history_dir));
@@ -1163,6 +1170,32 @@ pub fn spawn_subagent_consumer(
             let event_tx = event_tx.clone();
             let parent_store = SessionStore::new(parent_sessions_dir.clone());
             let parent_summary = parent_summary.clone();
+            let resolved_skills = match SkillCatalog::resolve_requested_commands(
+                &workspace_root,
+                &config.harness.skill_directories,
+                &req.skills,
+            ) {
+                Ok(skills) => skills,
+                Err(error) => {
+                    if let Some(ref tx) = event_tx {
+                        let _ = tx
+                            .send(AgentEvent::Error {
+                                message: format!("Failed to spawn child session: {error}"),
+                            })
+                            .await;
+                    }
+                    let response = nca_core::tools::spawn_subagent::SpawnResponse {
+                        child_session_id: String::new(),
+                        status: "error".into(),
+                        output: error,
+                        workspace: workspace_root.display().to_string(),
+                        branch: None,
+                        worktree_path: None,
+                    };
+                    let _ = req.reply.send(response);
+                    continue;
+                }
+            };
 
             let child_cfg = ChildSessionConfig {
                 parent_session_id: parent_session_id.clone(),
@@ -1172,6 +1205,7 @@ pub fn spawn_subagent_consumer(
                 parent_summary,
                 use_worktree: req.use_worktree,
                 focus_files: req.focus_files,
+                skills: resolved_skills,
             };
 
             tokio::spawn(async move {
@@ -1329,6 +1363,7 @@ pub struct ChildSessionConfig {
     pub parent_summary: String,
     pub use_worktree: bool,
     pub focus_files: Vec<String>,
+    pub skills: Vec<String>,
 }
 
 /// Result of a spawned child session.
@@ -1340,6 +1375,38 @@ pub struct ChildSessionResult {
     pub workspace: String,
     pub branch: Option<String>,
     pub worktree_path: Option<String>,
+}
+
+fn build_subagent_context_prompt(
+    parent_summary: &str,
+    task: &str,
+    focus_files: &[String],
+    skills: &[String],
+) -> String {
+    let mut context_prompt = format!(
+        "You are a sub-agent spawned by a parent session to handle a specific task.\n\n\
+         ## Parent Context\n{}\n\n\
+         ## Your Task\n{}",
+        parent_summary, task
+    );
+
+    if !skills.is_empty() {
+        context_prompt.push_str(
+            "\n\n## Recommended Skills\nLoad these with invoke_skill before starting if they apply:\n",
+        );
+        for skill in skills {
+            context_prompt.push_str(&format!("- {skill}\n"));
+        }
+    }
+
+    if !focus_files.is_empty() {
+        context_prompt.push_str("\n\n## Focus Files\n");
+        for file in focus_files {
+            context_prompt.push_str(&format!("- {file}\n"));
+        }
+    }
+
+    context_prompt
 }
 
 /// Spawn a child session that inherits parent context and runs to completion.
@@ -1405,19 +1472,12 @@ pub async fn spawn_child_session(
             .await;
     }
 
-    let mut context_prompt = format!(
-        "You are a sub-agent spawned by a parent session to handle a specific task.\n\n\
-         ## Parent Context\n{}\n\n\
-         ## Your Task\n{}",
-        cfg.parent_summary, cfg.task
+    let context_prompt = build_subagent_context_prompt(
+        &cfg.parent_summary,
+        &cfg.task,
+        &cfg.focus_files,
+        &cfg.skills,
     );
-
-    if !cfg.focus_files.is_empty() {
-        context_prompt.push_str("\n\n## Focus Files\n");
-        for f in &cfg.focus_files {
-            context_prompt.push_str(&format!("- {f}\n"));
-        }
-    }
 
     let mut handle = sup.take_handle();
     let event_rx = handle.take_event_rx();
@@ -1696,5 +1756,84 @@ mod tests {
 
         let _ = cmd_tx.send(AgentCommand::Shutdown);
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn spawn_subagent_consumer_rejects_unknown_skill_names() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skill_dir = temp.path().join(".nca/skills/review");
+        std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: Review\ncommand: review\n---\nReview code.\n",
+        )
+        .expect("write skill");
+
+        let (spawn_tx, spawn_rx) = mpsc::channel(1);
+        let handle = spawn_subagent_consumer(
+            spawn_rx,
+            "parent-1".into(),
+            temp.path().to_path_buf(),
+            NcaConfig::default(),
+            vec![],
+            None,
+        );
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        spawn_tx
+            .send(SpawnRequest {
+                task: "Review code".into(),
+                focus_files: vec![],
+                skills: vec!["unknown-skill".into()],
+                use_worktree: false,
+                reply: reply_tx,
+            })
+            .await
+            .expect("send spawn request");
+
+        let response = tokio::time::timeout(std::time::Duration::from_secs(1), reply_rx)
+            .await
+            .expect("reply timeout")
+            .expect("reply channel");
+
+        assert_eq!(response.status, "error");
+        assert!(
+            response
+                .output
+                .contains("Unknown skill name(s): unknown-skill")
+        );
+        assert!(response.output.contains("Available skills:"));
+        assert!(response.output.contains("review"));
+
+        handle.abort();
+    }
+
+    #[test]
+    fn build_subagent_context_prompt_includes_skills_when_present() {
+        let prompt = build_subagent_context_prompt(
+            "Parent discussed parser cleanup.",
+            "Refactor the parser.",
+            &[String::from("src/parser.rs")],
+            &[String::from("rust-refactor"), String::from("testing")],
+        );
+
+        assert!(prompt.contains("## Recommended Skills"));
+        assert!(prompt.contains("Load these with invoke_skill before starting if they apply:"));
+        assert!(prompt.contains("- rust-refactor"));
+        assert!(prompt.contains("- testing"));
+        assert!(prompt.contains("## Focus Files"));
+    }
+
+    #[test]
+    fn build_subagent_context_prompt_omits_skills_section_when_empty() {
+        let prompt = build_subagent_context_prompt(
+            "Parent discussed parser cleanup.",
+            "Refactor the parser.",
+            &[],
+            &[],
+        );
+
+        assert!(!prompt.contains("## Recommended Skills"));
+        assert!(!prompt.contains("invoke_skill before starting"));
     }
 }
