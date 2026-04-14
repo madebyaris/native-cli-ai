@@ -2106,18 +2106,27 @@ pub fn run_blocking(
                             Style::default().fg(theme::MUTED),
                         )));
                     }
-                    for i in scroll..end {
-                        let label = if i < n_builtin {
-                            let p = all[i];
-                            let name = p.display_name();
-                            if p == ProviderKind::Custom {
-                                format!("{name} (BYO endpoint)")
+                    let row_labels: Vec<String> = (0..n)
+                        .map(|i| {
+                            if i < n_builtin {
+                                let p = all[i];
+                                let name = p.display_name();
+                                if p == ProviderKind::Custom {
+                                    format!("{name} (BYO endpoint)")
+                                } else {
+                                    name.to_string()
+                                }
                             } else {
-                                name.to_string()
+                                "Add custom provider…".to_string()
                             }
-                        } else {
-                            "Add custom provider…".to_string()
-                        };
+                        })
+                        .collect();
+                    for (i, label) in row_labels
+                        .iter()
+                        .enumerate()
+                        .skip(scroll)
+                        .take(end.saturating_sub(scroll))
+                    {
                         let st = if i == g.provider_picker_index {
                             Style::default()
                                 .fg(Color::Black)
@@ -3287,72 +3296,71 @@ pub fn run_blocking(
                             (KeyCode::Esc, _) => {
                                 g.close_custom_provider_setup();
                             }
-                            (KeyCode::Enter, _) => {
-                                match g.custom_provider_setup_step {
-                                    CustomProviderSetupStep::Compatibility => {
-                                        g.custom_provider_setup_step = CustomProviderSetupStep::BaseUrl;
-                                        g.custom_setup_input.clear();
-                                    }
-                                    CustomProviderSetupStep::BaseUrl => {
-                                        let t = g.custom_setup_input.trim();
-                                        if t.is_empty() {
-                                            g.push_error(
+                            (KeyCode::Enter, _) => match g.custom_provider_setup_step {
+                                CustomProviderSetupStep::Compatibility => {
+                                    g.custom_provider_setup_step = CustomProviderSetupStep::BaseUrl;
+                                    g.custom_setup_input.clear();
+                                }
+                                CustomProviderSetupStep::BaseUrl => {
+                                    let t = g.custom_setup_input.trim();
+                                    if t.is_empty() {
+                                        g.push_error(
                                                 "[custom] enter a base URL (e.g. https://api.example.com)"
                                                     .into(),
                                             );
-                                        } else {
-                                            g.custom_setup_base_url = t.to_string();
-                                            g.custom_setup_input.clear();
-                                            g.custom_provider_setup_step =
-                                                CustomProviderSetupStep::ApiKey;
-                                        }
-                                    }
-                                    CustomProviderSetupStep::ApiKey => {
-                                        let t = g.custom_setup_input.trim();
-                                        if t.is_empty() {
-                                            g.push_error("[custom] API key is required".into());
-                                        } else {
-                                            g.custom_setup_api_key = t.to_string();
-                                            g.custom_setup_input = g.custom_setup_model_hint.clone();
-                                            if g.custom_setup_input.trim().is_empty() {
-                                                g.custom_setup_input = "custom-model".into();
-                                            }
-                                            g.custom_provider_setup_step =
-                                                CustomProviderSetupStep::Model;
-                                        }
-                                    }
-                                    CustomProviderSetupStep::Model => {
-                                        let t = g.custom_setup_input.trim();
-                                        let model = if t.is_empty() {
-                                            "custom-model".to_string()
-                                        } else {
-                                            t.to_string()
-                                        };
-                                        let compatibility = if g.custom_setup_compat_index == 0 {
-                                            ProviderCompatibility::OpenAi
-                                        } else {
-                                            ProviderCompatibility::Anthropic
-                                        };
-                                        let base_url = g.custom_setup_base_url.clone();
-                                        let api_key = g.custom_setup_api_key.clone();
-                                        g.close_custom_provider_setup();
-                                        drop(g);
-                                        let _ = cmd_tx.send(TuiCmd::ApplyCustomProviderSetup {
-                                            compatibility,
-                                            base_url,
-                                            api_key,
-                                            model,
-                                        });
+                                    } else {
+                                        g.custom_setup_base_url = t.to_string();
+                                        g.custom_setup_input.clear();
+                                        g.custom_provider_setup_step =
+                                            CustomProviderSetupStep::ApiKey;
                                     }
                                 }
-                            }
+                                CustomProviderSetupStep::ApiKey => {
+                                    let t = g.custom_setup_input.trim();
+                                    if t.is_empty() {
+                                        g.push_error("[custom] API key is required".into());
+                                    } else {
+                                        g.custom_setup_api_key = t.to_string();
+                                        g.custom_setup_input = g.custom_setup_model_hint.clone();
+                                        if g.custom_setup_input.trim().is_empty() {
+                                            g.custom_setup_input = "custom-model".into();
+                                        }
+                                        g.custom_provider_setup_step =
+                                            CustomProviderSetupStep::Model;
+                                    }
+                                }
+                                CustomProviderSetupStep::Model => {
+                                    let t = g.custom_setup_input.trim();
+                                    let model = if t.is_empty() {
+                                        "custom-model".to_string()
+                                    } else {
+                                        t.to_string()
+                                    };
+                                    let compatibility = if g.custom_setup_compat_index == 0 {
+                                        ProviderCompatibility::OpenAi
+                                    } else {
+                                        ProviderCompatibility::Anthropic
+                                    };
+                                    let base_url = g.custom_setup_base_url.clone();
+                                    let api_key = g.custom_setup_api_key.clone();
+                                    g.close_custom_provider_setup();
+                                    drop(g);
+                                    let _ = cmd_tx.send(TuiCmd::ApplyCustomProviderSetup {
+                                        compatibility,
+                                        base_url,
+                                        api_key,
+                                        model,
+                                    });
+                                }
+                            },
                             (KeyCode::Up, _)
                                 if matches!(
                                     g.custom_provider_setup_step,
                                     CustomProviderSetupStep::Compatibility
                                 ) =>
                             {
-                                g.custom_setup_compat_index = g.custom_setup_compat_index.saturating_sub(1);
+                                g.custom_setup_compat_index =
+                                    g.custom_setup_compat_index.saturating_sub(1);
                             }
                             (KeyCode::Down, _)
                                 if matches!(
@@ -3395,7 +3403,8 @@ pub fn run_blocking(
                             }
                             (KeyCode::Up, _) => {
                                 if n > 0 {
-                                    g.provider_picker_index = g.provider_picker_index.saturating_sub(1);
+                                    g.provider_picker_index =
+                                        g.provider_picker_index.saturating_sub(1);
                                 }
                                 g.sync_provider_picker_scroll();
                             }
@@ -3438,7 +3447,8 @@ pub fn run_blocking(
                                     g.open_custom_provider_setup(hint);
                                     continue;
                                 }
-                                let p = ProviderKind::ALL[g.provider_picker_index.min(n_builtin - 1)];
+                                let p =
+                                    ProviderKind::ALL[g.provider_picker_index.min(n_builtin - 1)];
                                 g.close_provider_picker();
                                 if for_key {
                                     drop(g);

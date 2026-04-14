@@ -415,7 +415,15 @@ impl Repl {
         p: ProviderKind,
         out: ReplOutput<'_>,
     ) -> anyhow::Result<()> {
-        if p == ProviderKind::Custom && self.runtime.config().provider.custom.base_url.trim().is_empty()
+        if p == ProviderKind::Custom
+            && self
+                .runtime
+                .config()
+                .provider
+                .custom
+                .base_url
+                .trim()
+                .is_empty()
         {
             out.eprintln(
                 "[provider] custom provider is not configured yet; run /provider → \"Add custom provider…\", or: /custom <openai|anthropic> <base-url> [api-key] [model]",
@@ -1858,7 +1866,14 @@ impl Repl {
                 }
                 TuiCmd::ApplyDefaultProvider(p) => {
                     if p == ProviderKind::Custom
-                        && self.runtime.config().provider.custom.base_url.trim().is_empty()
+                        && self
+                            .runtime
+                            .config()
+                            .provider
+                            .custom
+                            .base_url
+                            .trim()
+                            .is_empty()
                     {
                         if let Ok(mut g) = tui_state.lock() {
                             g.open_custom_provider_setup(self.runtime.model().to_string());
@@ -1894,7 +1909,14 @@ impl Repl {
                 TuiCmd::PromptApiKey(p, connect_after_save) => {
                     if let Ok(mut g) = tui_state.lock() {
                         if p == ProviderKind::Custom
-                            && self.runtime.config().provider.custom.base_url.trim().is_empty()
+                            && self
+                                .runtime
+                                .config()
+                                .provider
+                                .custom
+                                .base_url
+                                .trim()
+                                .is_empty()
                         {
                             g.open_custom_provider_setup(self.runtime.model().to_string());
                             g.blocks.push(DisplayBlock::System(

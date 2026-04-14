@@ -30,7 +30,10 @@ fn onboarding_connect_rows(search: &str) -> Vec<ConnectRow> {
     for row in build_connect_rows(search) {
         match row {
             ConnectRow::SectionHeader(label) => pending_header = Some(label),
-            ConnectRow::Provider { kind, .. } if kind == ProviderKind::Custom => {}
+            ConnectRow::Provider {
+                kind: ProviderKind::Custom,
+                ..
+            } => {}
             provider @ ConnectRow::Provider { .. } => {
                 if let Some(label) = pending_header.take() {
                     out.push(ConnectRow::SectionHeader(label));
@@ -166,10 +169,7 @@ async fn run_onboarding_inner(
                                 let vs = validation_state.clone();
                                 tokio::spawn(async move {
                                     let result = nca_core::provider::validate::validate_api_key(
-                                        provider,
-                                        &key_str,
-                                        &base_url,
-                                        None,
+                                        provider, &key_str, &base_url, None,
                                     )
                                     .await;
                                     if let Ok(mut g) = vs.lock() {

@@ -139,7 +139,9 @@ pub async fn resolve_model_limits(config: &NcaConfig, model: &str) -> ModelLimit
             };
             let base = config.provider.custom.base_url.trim_end_matches('/');
             match config.provider.custom.compatibility {
-                ProviderCompatibility::OpenAi => fetch_openai_context(&client, base, &key, model).await,
+                ProviderCompatibility::OpenAi => {
+                    fetch_openai_context(&client, base, &key, model).await
+                }
                 ProviderCompatibility::Anthropic => {
                     fetch_anthropic_context(&client, base, &key, model).await
                 }
