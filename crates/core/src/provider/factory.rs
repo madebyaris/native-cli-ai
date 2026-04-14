@@ -1,6 +1,7 @@
 use nca_common::config::{NcaConfig, ProviderKind};
 
 use super::anthropic::AnthropicProvider;
+use super::custom::CustomProvider;
 use super::minimax::MiniMaxProvider;
 use super::openai::OpenAiProvider;
 use super::openrouter::OpenRouterProvider;
@@ -13,6 +14,7 @@ pub fn build_provider(config: &NcaConfig) -> Result<Box<dyn Provider>, ProviderE
         ProviderKind::OpenRouter => Ok(Box::new(OpenRouterProvider::from_config(config)?)),
         ProviderKind::Anthropic => Ok(Box::new(AnthropicProvider::from_config(config)?)),
         ProviderKind::OpenAi => Ok(Box::new(OpenAiProvider::from_config(config)?)),
+        ProviderKind::Custom => Ok(Box::new(CustomProvider::from_config(config)?)),
     }
 }
 
@@ -37,6 +39,10 @@ mod tests {
                 }
                 ProviderKind::OpenRouter => {
                     config.provider.openrouter.api_key = Some("openrouter-key".into());
+                }
+                ProviderKind::Custom => {
+                    config.provider.custom.api_key = Some("custom-key".into());
+                    config.provider.custom.base_url = "https://custom.example".into();
                 }
             }
 

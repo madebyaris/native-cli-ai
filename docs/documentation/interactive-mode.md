@@ -99,6 +99,7 @@ Available agent profiles:
 | `/model [name]` | Set the active model for the session |
 | `/connect` | Open the provider connection picker |
 | `/provider [name]` | Show or set the default LLM provider |
+| `/custom <compat> <url> [key] [model]` | Configure a custom endpoint (OpenAI or Anthropic compatible) |
 | `/apikey <provider> <key>` | Store an API key for a provider |
 
 ### Session and Context

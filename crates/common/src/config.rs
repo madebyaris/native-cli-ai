@@ -217,6 +217,24 @@ impl NcaConfig {
             self.provider.openrouter.app_name = Some(app_name);
         }
 
+        if let Ok(api_key) = env::var("CUSTOM_PROVIDER_API_KEY") {
+            self.provider.custom.api_key = Some(api_key);
+        }
+
+        if let Ok(base_url) = env::var("CUSTOM_PROVIDER_BASE_URL") {
+            self.provider.custom.base_url = base_url;
+        }
+
+        if let Ok(model) = env::var("CUSTOM_PROVIDER_MODEL") {
+            self.provider.custom.model = model;
+        }
+
+        if let Ok(raw) = env::var("CUSTOM_PROVIDER_COMPATIBILITY")
+            && let Some(compatibility) = ProviderCompatibility::from_cli_name(&raw)
+        {
+            self.provider.custom.compatibility = compatibility;
+        }
+
         if let Ok(memory_path) = env::var("NCA_MEMORY_PATH") {
             self.memory.file_path = PathBuf::from(memory_path);
         }
@@ -256,7 +274,23 @@ impl NcaConfig {
             ProviderKind::OpenAi => self.provider.openai.api_key = Some(key),
             ProviderKind::Anthropic => self.provider.anthropic.api_key = Some(key),
             ProviderKind::OpenRouter => self.provider.openrouter.api_key = Some(key),
+            ProviderKind::Custom => self.provider.custom.api_key = Some(key),
         }
+    }
+
+    pub fn set_provider_base_url(&mut self, provider: ProviderKind, base_url: impl Into<String>) {
+        let base_url = base_url.into();
+        match provider {
+            ProviderKind::MiniMax => self.provider.minimax.base_url = base_url,
+            ProviderKind::OpenAi => self.provider.openai.base_url = base_url,
+            ProviderKind::Anthropic => self.provider.anthropic.base_url = base_url,
+            ProviderKind::OpenRouter => self.provider.openrouter.base_url = base_url,
+            ProviderKind::Custom => self.provider.custom.base_url = base_url,
+        }
+    }
+
+    pub fn set_custom_compatibility(&mut self, compatibility: ProviderCompatibility) {
+        self.provider.custom.compatibility = compatibility;
     }
 
     /// Editor command: `NCA_EDITOR`, then `[ui].editor`, then `EDITOR`, then `vim`.
@@ -498,6 +532,7 @@ pub struct ProviderConfig {
     pub openai: OpenAiConfig,
     pub anthropic: AnthropicConfig,
     pub openrouter: OpenRouterConfig,
+    pub custom: CustomProviderConfig,
 }
 
 impl Default for ProviderConfig {
@@ -508,6 +543,7 @@ impl Default for ProviderConfig {
             openai: OpenAiConfig::default(),
             anthropic: AnthropicConfig::default(),
             openrouter: OpenRouterConfig::default(),
+            custom: CustomProviderConfig::default(),
         }
     }
 }
@@ -530,6 +566,9 @@ impl ProviderConfig {
         if let Some(openrouter) = partial.openrouter {
             self.openrouter.merge(openrouter);
         }
+        if let Some(custom) = partial.custom {
+            self.custom.merge(custom);
+        }
     }
 
     pub fn active_model(&self) -> &str {
@@ -538,6 +577,7 @@ impl ProviderConfig {
             ProviderKind::OpenRouter => &self.openrouter.model,
             ProviderKind::Anthropic => &self.anthropic.model,
             ProviderKind::OpenAi => &self.openai.model,
+            ProviderKind::Custom => &self.custom.model,
         }
     }
 
@@ -552,6 +592,7 @@ impl ProviderConfig {
             ProviderKind::OpenRouter => self.openrouter.model = model,
             ProviderKind::Anthropic => self.anthropic.model = model,
             ProviderKind::OpenAi => self.openai.model = model,
+            ProviderKind::Custom => self.custom.model = model,
         }
     }
 
@@ -561,6 +602,7 @@ impl ProviderConfig {
             ProviderKind::OpenRouter => &self.openrouter.model,
             ProviderKind::Anthropic => &self.anthropic.model,
             ProviderKind::OpenAi => &self.openai.model,
+            ProviderKind::Custom => &self.custom.model,
         }
     }
 
@@ -570,6 +612,7 @@ impl ProviderConfig {
             ProviderKind::OpenRouter => &self.openrouter.base_url,
             ProviderKind::Anthropic => &self.anthropic.base_url,
             ProviderKind::OpenAi => &self.openai.base_url,
+            ProviderKind::Custom => &self.custom.base_url,
         }
     }
 
@@ -579,6 +622,7 @@ impl ProviderConfig {
             ProviderKind::OpenRouter => &self.openrouter.api_key_env,
             ProviderKind::Anthropic => &self.anthropic.api_key_env,
             ProviderKind::OpenAi => &self.openai.api_key_env,
+            ProviderKind::Custom => &self.custom.api_key_env,
         }
     }
 
@@ -588,6 +632,7 @@ impl ProviderConfig {
             ProviderKind::OpenRouter => self.openrouter.resolve_api_key().is_some(),
             ProviderKind::Anthropic => self.anthropic.resolve_api_key().is_some(),
             ProviderKind::OpenAi => self.openai.resolve_api_key().is_some(),
+            ProviderKind::Custom => self.custom.resolve_api_key().is_some(),
         }
     }
 
@@ -607,14 +652,16 @@ pub enum ProviderKind {
     OpenRouter,
     Anthropic,
     OpenAi,
+    Custom,
 }
 
 impl ProviderKind {
-    pub const ALL: [ProviderKind; 4] = [
+    pub const ALL: [ProviderKind; 5] = [
         ProviderKind::MiniMax,
         ProviderKind::OpenAi,
         ProviderKind::Anthropic,
         ProviderKind::OpenRouter,
+        ProviderKind::Custom,
     ];
 
     /// Parse user/CLI input (slash commands, TUI pickers).
@@ -624,6 +671,7 @@ impl ProviderKind {
             "openai" | "open-ai" | "gpt" => Some(Self::OpenAi),
             "anthropic" | "claude" => Some(Self::Anthropic),
             "openrouter" | "open-router" => Some(Self::OpenRouter),
+            "custom" => Some(Self::Custom),
             _ => None,
         }
     }
@@ -633,6 +681,7 @@ impl ProviderKind {
             "openrouter" => Self::OpenRouter,
             "anthropic" => Self::Anthropic,
             "openai" => Self::OpenAi,
+            "custom" => Self::Custom,
             _ => Self::MiniMax,
         }
     }
@@ -643,6 +692,7 @@ impl ProviderKind {
             ProviderKind::OpenRouter => "OpenRouter",
             ProviderKind::Anthropic => "Anthropic",
             ProviderKind::OpenAi => "OpenAI",
+            ProviderKind::Custom => "Custom",
         }
     }
 
@@ -652,6 +702,30 @@ impl ProviderKind {
         Self::ALL
             .into_iter()
             .find(|k| k.display_name().eq_ignore_ascii_case(t))
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderCompatibility {
+    OpenAi,
+    Anthropic,
+}
+
+impl ProviderCompatibility {
+    pub fn from_cli_name(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "openai" | "open-ai" => Some(Self::OpenAi),
+            "anthropic" | "claude" => Some(Self::Anthropic),
+            _ => None,
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::OpenAi => "OpenAI-compatible",
+            Self::Anthropic => "Anthropic-compatible",
+        }
     }
 }
 
@@ -846,6 +920,56 @@ impl OpenRouterConfig {
         }
         if let Some(app_name) = partial.app_name {
             self.app_name = Some(app_name);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomProviderConfig {
+    pub api_key_env: String,
+    pub api_key: Option<String>,
+    pub base_url: String,
+    pub model: String,
+    pub temperature: f32,
+    pub compatibility: ProviderCompatibility,
+}
+
+impl Default for CustomProviderConfig {
+    fn default() -> Self {
+        Self {
+            api_key_env: "CUSTOM_PROVIDER_API_KEY".into(),
+            api_key: None,
+            base_url: String::new(),
+            model: "custom-model".into(),
+            temperature: 0.7,
+            compatibility: ProviderCompatibility::OpenAi,
+        }
+    }
+}
+
+impl CustomProviderConfig {
+    pub fn resolve_api_key(&self) -> Option<String> {
+        resolve_api_key_value(&self.api_key, &self.api_key_env)
+    }
+
+    fn merge(&mut self, partial: PartialCustomProviderConfig) {
+        if let Some(api_key_env) = partial.api_key_env {
+            self.api_key_env = api_key_env;
+        }
+        if let Some(api_key) = partial.api_key {
+            self.api_key = Some(api_key);
+        }
+        if let Some(base_url) = partial.base_url {
+            self.base_url = base_url;
+        }
+        if let Some(model) = partial.model {
+            self.model = model;
+        }
+        if let Some(temperature) = partial.temperature {
+            self.temperature = temperature;
+        }
+        if let Some(compatibility) = partial.compatibility {
+            self.compatibility = compatibility;
         }
     }
 }
@@ -1310,6 +1434,7 @@ struct PartialProviderConfig {
     openai: Option<PartialOpenAiConfig>,
     anthropic: Option<PartialAnthropicConfig>,
     openrouter: Option<PartialOpenRouterConfig>,
+    custom: Option<PartialCustomProviderConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -1348,6 +1473,16 @@ struct PartialOpenRouterConfig {
     temperature: Option<f32>,
     site_url: Option<String>,
     app_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialCustomProviderConfig {
+    api_key_env: Option<String>,
+    api_key: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+    temperature: Option<f32>,
+    compatibility: Option<ProviderCompatibility>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -1500,7 +1635,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_env_supports_openai_anthropic_and_openrouter() {
+    fn apply_env_supports_openai_anthropic_openrouter_and_custom() {
         let _guard = EnvGuard::set(&[
             ("NCA_DEFAULT_PROVIDER", Some("openrouter")),
             ("OPENAI_API_KEY", Some("openai-key")),
@@ -1511,6 +1646,10 @@ mod tests {
             ("OPENROUTER_MODEL", Some("anthropic/claude-3.7-sonnet")),
             ("OPENROUTER_SITE_URL", Some("https://nca.test")),
             ("OPENROUTER_APP_NAME", Some("Native CLI AI")),
+            ("CUSTOM_PROVIDER_API_KEY", Some("custom-key")),
+            ("CUSTOM_PROVIDER_BASE_URL", Some("https://custom.example")),
+            ("CUSTOM_PROVIDER_MODEL", Some("custom-model-x")),
+            ("CUSTOM_PROVIDER_COMPATIBILITY", Some("anthropic")),
         ]);
 
         let mut config = NcaConfig::default();
@@ -1545,6 +1684,16 @@ mod tests {
         assert_eq!(
             config.provider.openrouter.app_name.as_deref(),
             Some("Native CLI AI")
+        );
+        assert_eq!(
+            config.provider.custom.resolve_api_key().as_deref(),
+            Some("custom-key")
+        );
+        assert_eq!(config.provider.custom.base_url, "https://custom.example");
+        assert_eq!(config.provider.custom.model, "custom-model-x");
+        assert_eq!(
+            config.provider.custom.compatibility,
+            ProviderCompatibility::Anthropic
         );
         assert_eq!(config.model.default_model, "anthropic/claude-3.7-sonnet");
     }
@@ -1613,6 +1762,10 @@ mod tests {
             ProviderKind::from_cli_name("openai"),
             Some(ProviderKind::OpenAi)
         );
+        assert_eq!(
+            ProviderKind::from_cli_name("custom"),
+            Some(ProviderKind::Custom)
+        );
         assert_eq!(ProviderKind::from_cli_name("nope"), None);
     }
 
@@ -1655,6 +1808,7 @@ onboarding_completed = true
         config.provider.openai.api_key_env = "__NCA_TEST_NONE__".into();
         config.provider.anthropic.api_key_env = "__NCA_TEST_NONE__".into();
         config.provider.openrouter.api_key_env = "__NCA_TEST_NONE__".into();
+        config.provider.custom.api_key_env = "__NCA_TEST_NONE__".into();
         config
     }
 

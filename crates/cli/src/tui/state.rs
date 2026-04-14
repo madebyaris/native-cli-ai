@@ -40,6 +40,15 @@ pub struct ApprovalRequest {
     pub input: String,
 }
 
+/// Steps for the in-TUI “add custom provider” wizard (`/provider` → Add custom provider…).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustomProviderSetupStep {
+    Compatibility,
+    BaseUrl,
+    ApiKey,
+    Model,
+}
+
 /// One row in the sidebar for a child / sub-agent session.
 #[derive(Debug, Clone)]
 pub struct SubagentRow {
@@ -118,6 +127,21 @@ pub struct TuiSessionState {
     pub provider_picker_index: usize,
     /// When true, picking a row sets `pending_api_key_provider` instead of applying provider.
     pub provider_picker_for_api_key: bool,
+    /// When true, the provider list includes a trailing “Add custom provider…” row (default provider only).
+    pub provider_picker_include_add_row: bool,
+    /// First visible row index into [`ProviderKind::ALL`] when the picker is taller than the terminal.
+    pub provider_picker_scroll: usize,
+    /// Multi-step wizard: OpenAI- vs Anthropic-compatible URL, key, model.
+    pub custom_provider_setup_open: bool,
+    pub custom_provider_setup_step: CustomProviderSetupStep,
+    /// 0 = OpenAI-compatible, 1 = Anthropic-compatible.
+    pub custom_setup_compat_index: usize,
+    /// Current line being edited (base URL, API key, or model id).
+    pub custom_setup_input: String,
+    pub custom_setup_base_url: String,
+    pub custom_setup_api_key: String,
+    /// Default model name when opening the wizard (usually the session model).
+    pub custom_setup_model_hint: String,
     /// After choosing a provider for API key, next non-command line is the secret.
     pub pending_api_key_provider: Option<ProviderKind>,
     /// Selected row when `@` file completion panel is visible.
@@ -234,6 +258,15 @@ impl TuiSessionState {
             provider_picker_open: false,
             provider_picker_index: 0,
             provider_picker_for_api_key: false,
+            provider_picker_include_add_row: false,
+            provider_picker_scroll: 0,
+            custom_provider_setup_open: false,
+            custom_provider_setup_step: CustomProviderSetupStep::Compatibility,
+            custom_setup_compat_index: 0,
+            custom_setup_input: String::new(),
+            custom_setup_base_url: String::new(),
+            custom_setup_api_key: String::new(),
+            custom_setup_model_hint: String::new(),
             pending_api_key_provider: None,
             at_menu_index: 0,
             connect_modal_open: false,
@@ -391,15 +424,64 @@ impl TuiSessionState {
     pub fn open_provider_picker(&mut self, current: ProviderKind, for_api_key: bool) {
         self.provider_picker_open = true;
         self.provider_picker_for_api_key = for_api_key;
+        self.provider_picker_include_add_row = !for_api_key;
+        self.provider_picker_scroll = 0;
         self.provider_picker_index = ProviderKind::ALL
             .iter()
             .position(|p| *p == current)
             .unwrap_or(0);
+        self.sync_provider_picker_scroll();
     }
 
     pub fn close_provider_picker(&mut self) {
         self.provider_picker_open = false;
         self.provider_picker_for_api_key = false;
+        self.provider_picker_include_add_row = false;
+        self.provider_picker_scroll = 0;
+    }
+
+    /// Row count for the open provider picker (built-ins plus optional “Add custom…” row).
+    pub fn provider_picker_visible_row_count(&self) -> usize {
+        ProviderKind::ALL.len() + usize::from(self.provider_picker_include_add_row)
+    }
+
+    /// Max provider rows shown at once (smaller than [`ProviderKind::ALL`] so short terminals can scroll).
+    pub const PROVIDER_PICKER_VISIBLE_ROWS: usize = 4;
+
+    /// Keep [`provider_picker_index`](Self::provider_picker_index) inside the visible window.
+    pub fn sync_provider_picker_scroll(&mut self) {
+        let n = self.provider_picker_visible_row_count();
+        let cap = Self::PROVIDER_PICKER_VISIBLE_ROWS.min(n.max(1));
+        if self.provider_picker_index < self.provider_picker_scroll {
+            self.provider_picker_scroll = self.provider_picker_index;
+        }
+        while self.provider_picker_index >= self.provider_picker_scroll + cap {
+            self.provider_picker_scroll += 1;
+        }
+        let max_scroll = n.saturating_sub(cap);
+        if self.provider_picker_scroll > max_scroll {
+            self.provider_picker_scroll = max_scroll;
+        }
+    }
+
+    pub fn open_custom_provider_setup(&mut self, model_hint: impl Into<String>) {
+        self.custom_provider_setup_open = true;
+        self.custom_provider_setup_step = CustomProviderSetupStep::Compatibility;
+        self.custom_setup_compat_index = 0;
+        self.custom_setup_input.clear();
+        self.custom_setup_base_url.clear();
+        self.custom_setup_api_key.clear();
+        self.custom_setup_model_hint = model_hint.into();
+    }
+
+    pub fn close_custom_provider_setup(&mut self) {
+        self.custom_provider_setup_open = false;
+        self.custom_provider_setup_step = CustomProviderSetupStep::Compatibility;
+        self.custom_setup_compat_index = 0;
+        self.custom_setup_input.clear();
+        self.custom_setup_base_url.clear();
+        self.custom_setup_api_key.clear();
+        self.custom_setup_model_hint.clear();
     }
 
     pub fn set_busy(&mut self, busy: bool) {

@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod anthropic_compat;
+pub mod custom;
 pub mod factory;
 pub mod minimax;
 pub mod minimax_vlm;

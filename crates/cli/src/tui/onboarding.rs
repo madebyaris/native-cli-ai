@@ -24,6 +24,24 @@ type ValidationState = Arc<Mutex<Option<OnboardingValidation>>>;
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+fn onboarding_connect_rows(search: &str) -> Vec<ConnectRow> {
+    let mut out = Vec::new();
+    let mut pending_header: Option<&'static str> = None;
+    for row in build_connect_rows(search) {
+        match row {
+            ConnectRow::SectionHeader(label) => pending_header = Some(label),
+            ConnectRow::Provider { kind, .. } if kind == ProviderKind::Custom => {}
+            provider @ ConnectRow::Provider { .. } => {
+                if let Some(label) = pending_header.take() {
+                    out.push(ConnectRow::SectionHeader(label));
+                }
+                out.push(provider);
+            }
+        }
+    }
+    out
+}
+
 /// Runs the onboarding TUI. Returns the updated config with the validated key
 /// and onboarding_completed = true, or an error if the user quits (Ctrl+C).
 pub async fn run_onboarding(config: NcaConfig) -> anyhow::Result<NcaConfig> {
@@ -148,7 +166,10 @@ async fn run_onboarding_inner(
                                 let vs = validation_state.clone();
                                 tokio::spawn(async move {
                                     let result = nca_core::provider::validate::validate_api_key(
-                                        provider, &key_str, &base_url,
+                                        provider,
+                                        &key_str,
+                                        &base_url,
+                                        None,
                                     )
                                     .await;
                                     if let Ok(mut g) = vs.lock() {
@@ -183,7 +204,7 @@ async fn run_onboarding_inner(
                     _ => {}
                 }
             } else if connect_open {
-                let rows = build_connect_rows(&connect_search);
+                let rows = onboarding_connect_rows(&connect_search);
                 let sel_indices = selectable_row_indices(&rows);
                 let n_sel = sel_indices.len();
 
@@ -248,7 +269,7 @@ fn render_connect_modal(f: &mut Frame, area: Rect, search: &str, selected: usize
     let inner = block.inner(modal_rect);
     f.render_widget(block, modal_rect);
 
-    let rows = build_connect_rows(search);
+    let rows = onboarding_connect_rows(search);
     let sel_indices = selectable_row_indices(&rows);
 
     let mut lines = Vec::new();

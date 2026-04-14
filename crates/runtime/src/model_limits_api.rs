@@ -12,7 +12,7 @@
 //! lookups entirely.
 
 use crate::model_limits::ModelLimits;
-use nca_common::config::{NcaConfig, ProviderKind};
+use nca_common::config::{NcaConfig, ProviderCompatibility, ProviderKind};
 use serde::Deserialize;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -128,6 +128,22 @@ pub async fn resolve_model_limits(config: &NcaConfig, model: &str) -> ModelLimit
             };
             let base = config.provider.openai.base_url.trim_end_matches('/');
             fetch_openai_context(&client, base, &key, model).await
+        }
+        ProviderKind::Custom => {
+            let key = match config.provider.custom.resolve_api_key() {
+                Some(k) => k,
+                None => {
+                    tracing::debug!("context API: custom selected but no API key");
+                    return static_limits;
+                }
+            };
+            let base = config.provider.custom.base_url.trim_end_matches('/');
+            match config.provider.custom.compatibility {
+                ProviderCompatibility::OpenAi => fetch_openai_context(&client, base, &key, model).await,
+                ProviderCompatibility::Anthropic => {
+                    fetch_anthropic_context(&client, base, &key, model).await
+                }
+            }
         }
         ProviderKind::MiniMax => None,
     };
@@ -400,7 +416,32 @@ pub async fn fetch_provider_model_ids(config: &NcaConfig) -> Vec<String> {
         ProviderKind::OpenRouter => fetch_openrouter_model_ids(&client, config).await,
         ProviderKind::Anthropic => fetch_anthropic_model_ids(&client, config).await,
         ProviderKind::OpenAi => fetch_openai_model_ids(&client, config).await,
+        ProviderKind::Custom => fetch_custom_model_ids(&client, config).await,
         ProviderKind::MiniMax => vec!["MiniMax-M2.5".into(), "MiniMax-M2.7".into()],
+    }
+}
+
+async fn fetch_custom_model_ids(client: &reqwest::Client, config: &NcaConfig) -> Vec<String> {
+    let key = match config.provider.custom.resolve_api_key() {
+        Some(k) => k,
+        None => return Vec::new(),
+    };
+    if config.provider.custom.base_url.trim().is_empty() {
+        return Vec::new();
+    }
+
+    let mut shadow = config.clone();
+    match config.provider.custom.compatibility {
+        ProviderCompatibility::OpenAi => {
+            shadow.provider.openai.api_key = Some(key);
+            shadow.provider.openai.base_url = config.provider.custom.base_url.clone();
+            fetch_openai_model_ids(client, &shadow).await
+        }
+        ProviderCompatibility::Anthropic => {
+            shadow.provider.anthropic.api_key = Some(key);
+            shadow.provider.anthropic.base_url = config.provider.custom.base_url.clone();
+            fetch_anthropic_model_ids(client, &shadow).await
+        }
     }
 }
 
