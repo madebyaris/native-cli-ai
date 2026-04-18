@@ -4,6 +4,7 @@ use super::anthropic::AnthropicProvider;
 use super::minimax::MiniMaxProvider;
 use super::openai::OpenAiProvider;
 use super::openrouter::OpenRouterProvider;
+use super::zhipuai::ZhipuAIProvider;
 use super::{Provider, ProviderError};
 
 /// Build the configured provider for the current workspace.
@@ -13,6 +14,7 @@ pub fn build_provider(config: &NcaConfig) -> Result<Box<dyn Provider>, ProviderE
         ProviderKind::OpenRouter => Ok(Box::new(OpenRouterProvider::from_config(config)?)),
         ProviderKind::Anthropic => Ok(Box::new(AnthropicProvider::from_config(config)?)),
         ProviderKind::OpenAi => Ok(Box::new(OpenAiProvider::from_config(config)?)),
+        ProviderKind::ZhipuAI => Ok(Box::new(ZhipuAIProvider::from_config(config)?)),
     }
 }
 
@@ -37,6 +39,9 @@ mod tests {
                 }
                 ProviderKind::OpenRouter => {
                     config.provider.openrouter.api_key = Some("openrouter-key".into());
+                }
+                ProviderKind::ZhipuAI => {
+                    config.provider.zhipuai.api_key = Some("zhipuai-key".into());
                 }
             }
 

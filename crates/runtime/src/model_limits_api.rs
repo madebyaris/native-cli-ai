@@ -130,6 +130,7 @@ pub async fn resolve_model_limits(config: &NcaConfig, model: &str) -> ModelLimit
             fetch_openai_context(&client, base, &key, model).await
         }
         ProviderKind::MiniMax => None,
+        ProviderKind::ZhipuAI => None,
     };
 
     match from_api {
@@ -401,6 +402,7 @@ pub async fn fetch_provider_model_ids(config: &NcaConfig) -> Vec<String> {
         ProviderKind::Anthropic => fetch_anthropic_model_ids(&client, config).await,
         ProviderKind::OpenAi => fetch_openai_model_ids(&client, config).await,
         ProviderKind::MiniMax => vec!["MiniMax-M2.5".into(), "MiniMax-M2.7".into()],
+        ProviderKind::ZhipuAI => vec!["glm-5-turbo".into()],
     }
 }
 

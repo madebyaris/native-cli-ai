@@ -35,6 +35,7 @@ pub fn model_accepts_native_images(kind: ProviderKind, model: &str) -> bool {
                 || m.contains("vision")
                 || m.contains("qwen-vl")
         }
+        ProviderKind::ZhipuAI => m.contains("glm-5") || m.contains("glm-4v") || m.contains("glm-4"),
     }
 }
 

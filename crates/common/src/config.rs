@@ -217,6 +217,18 @@ impl NcaConfig {
             self.provider.openrouter.app_name = Some(app_name);
         }
 
+        if let Ok(api_key) = env::var("ZHIPUAI_API_KEY") {
+            self.provider.zhipuai.api_key = Some(api_key);
+        }
+
+        if let Ok(base_url) = env::var("ZHIPUAI_BASE_URL") {
+            self.provider.zhipuai.base_url = base_url;
+        }
+
+        if let Ok(model) = env::var("ZHIPUAI_MODEL") {
+            self.provider.zhipuai.model = model;
+        }
+
         if let Ok(memory_path) = env::var("NCA_MEMORY_PATH") {
             self.memory.file_path = PathBuf::from(memory_path);
         }
@@ -256,6 +268,7 @@ impl NcaConfig {
             ProviderKind::OpenAi => self.provider.openai.api_key = Some(key),
             ProviderKind::Anthropic => self.provider.anthropic.api_key = Some(key),
             ProviderKind::OpenRouter => self.provider.openrouter.api_key = Some(key),
+            ProviderKind::ZhipuAI => self.provider.zhipuai.api_key = Some(key),
         }
     }
 
@@ -498,6 +511,7 @@ pub struct ProviderConfig {
     pub openai: OpenAiConfig,
     pub anthropic: AnthropicConfig,
     pub openrouter: OpenRouterConfig,
+    pub zhipuai: ZhipuAIConfig,
 }
 
 impl Default for ProviderConfig {
@@ -508,6 +522,7 @@ impl Default for ProviderConfig {
             openai: OpenAiConfig::default(),
             anthropic: AnthropicConfig::default(),
             openrouter: OpenRouterConfig::default(),
+            zhipuai: ZhipuAIConfig::default(),
         }
     }
 }
@@ -530,6 +545,9 @@ impl ProviderConfig {
         if let Some(openrouter) = partial.openrouter {
             self.openrouter.merge(openrouter);
         }
+        if let Some(zhipuai) = partial.zhipuai {
+            self.zhipuai.merge(zhipuai);
+        }
     }
 
     pub fn active_model(&self) -> &str {
@@ -538,6 +556,7 @@ impl ProviderConfig {
             ProviderKind::OpenRouter => &self.openrouter.model,
             ProviderKind::Anthropic => &self.anthropic.model,
             ProviderKind::OpenAi => &self.openai.model,
+            ProviderKind::ZhipuAI => &self.zhipuai.model,
         }
     }
 
@@ -552,6 +571,7 @@ impl ProviderConfig {
             ProviderKind::OpenRouter => self.openrouter.model = model,
             ProviderKind::Anthropic => self.anthropic.model = model,
             ProviderKind::OpenAi => self.openai.model = model,
+            ProviderKind::ZhipuAI => self.zhipuai.model = model,
         }
     }
 
@@ -561,6 +581,7 @@ impl ProviderConfig {
             ProviderKind::OpenRouter => &self.openrouter.model,
             ProviderKind::Anthropic => &self.anthropic.model,
             ProviderKind::OpenAi => &self.openai.model,
+            ProviderKind::ZhipuAI => &self.zhipuai.model,
         }
     }
 
@@ -570,6 +591,7 @@ impl ProviderConfig {
             ProviderKind::OpenRouter => &self.openrouter.base_url,
             ProviderKind::Anthropic => &self.anthropic.base_url,
             ProviderKind::OpenAi => &self.openai.base_url,
+            ProviderKind::ZhipuAI => &self.zhipuai.base_url,
         }
     }
 
@@ -579,6 +601,7 @@ impl ProviderConfig {
             ProviderKind::OpenRouter => &self.openrouter.api_key_env,
             ProviderKind::Anthropic => &self.anthropic.api_key_env,
             ProviderKind::OpenAi => &self.openai.api_key_env,
+            ProviderKind::ZhipuAI => &self.zhipuai.api_key_env,
         }
     }
 
@@ -588,6 +611,7 @@ impl ProviderConfig {
             ProviderKind::OpenRouter => self.openrouter.resolve_api_key().is_some(),
             ProviderKind::Anthropic => self.anthropic.resolve_api_key().is_some(),
             ProviderKind::OpenAi => self.openai.resolve_api_key().is_some(),
+            ProviderKind::ZhipuAI => self.zhipuai.resolve_api_key().is_some(),
         }
     }
 
@@ -607,14 +631,16 @@ pub enum ProviderKind {
     OpenRouter,
     Anthropic,
     OpenAi,
+    ZhipuAI,
 }
 
 impl ProviderKind {
-    pub const ALL: [ProviderKind; 4] = [
+    pub const ALL: [ProviderKind; 5] = [
         ProviderKind::MiniMax,
         ProviderKind::OpenAi,
         ProviderKind::Anthropic,
         ProviderKind::OpenRouter,
+        ProviderKind::ZhipuAI,
     ];
 
     /// Parse user/CLI input (slash commands, TUI pickers).
@@ -624,6 +650,7 @@ impl ProviderKind {
             "openai" | "open-ai" | "gpt" => Some(Self::OpenAi),
             "anthropic" | "claude" => Some(Self::Anthropic),
             "openrouter" | "open-router" => Some(Self::OpenRouter),
+            "zhipuai" | "zhipu" | "glm" | "glm-5" => Some(Self::ZhipuAI),
             _ => None,
         }
     }
@@ -633,6 +660,7 @@ impl ProviderKind {
             "openrouter" => Self::OpenRouter,
             "anthropic" => Self::Anthropic,
             "openai" => Self::OpenAi,
+            "zhipuai" | "zhipu" | "glm" => Self::ZhipuAI,
             _ => Self::MiniMax,
         }
     }
@@ -643,6 +671,7 @@ impl ProviderKind {
             ProviderKind::OpenRouter => "OpenRouter",
             ProviderKind::Anthropic => "Anthropic",
             ProviderKind::OpenAi => "OpenAI",
+            ProviderKind::ZhipuAI => "ZhipuAI",
         }
     }
 
@@ -820,7 +849,7 @@ impl Default for OpenRouterConfig {
     }
 }
 
-impl OpenRouterConfig {
+    impl OpenRouterConfig {
     pub fn resolve_api_key(&self) -> Option<String> {
         resolve_api_key_value(&self.api_key, &self.api_key_env)
     }
@@ -846,6 +875,51 @@ impl OpenRouterConfig {
         }
         if let Some(app_name) = partial.app_name {
             self.app_name = Some(app_name);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZhipuAIConfig {
+    pub api_key_env: String,
+    pub api_key: Option<String>,
+    pub base_url: String,
+    pub model: String,
+    pub temperature: f32,
+}
+
+impl Default for ZhipuAIConfig {
+    fn default() -> Self {
+        Self {
+            api_key_env: "ZHIPUAI_API_KEY".into(),
+            api_key: None,
+            base_url: "https://open.bigmodel.cn/api/coding/paas/v4".into(),
+            model: "glm-5-turbo".into(),
+            temperature: 0.7,
+        }
+    }
+}
+
+impl ZhipuAIConfig {
+    pub fn resolve_api_key(&self) -> Option<String> {
+        resolve_api_key_value(&self.api_key, &self.api_key_env)
+    }
+
+    fn merge(&mut self, partial: PartialZhipuAIConfig) {
+        if let Some(api_key_env) = partial.api_key_env {
+            self.api_key_env = api_key_env;
+        }
+        if let Some(api_key) = partial.api_key {
+            self.api_key = Some(api_key);
+        }
+        if let Some(base_url) = partial.base_url {
+            self.base_url = base_url;
+        }
+        if let Some(model) = partial.model {
+            self.model = model;
+        }
+        if let Some(temperature) = partial.temperature {
+            self.temperature = temperature;
         }
     }
 }
@@ -1310,6 +1384,7 @@ struct PartialProviderConfig {
     openai: Option<PartialOpenAiConfig>,
     anthropic: Option<PartialAnthropicConfig>,
     openrouter: Option<PartialOpenRouterConfig>,
+    zhipuai: Option<PartialZhipuAIConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -1348,6 +1423,15 @@ struct PartialOpenRouterConfig {
     temperature: Option<f32>,
     site_url: Option<String>,
     app_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialZhipuAIConfig {
+    api_key_env: Option<String>,
+    api_key: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+    temperature: Option<f32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -1452,6 +1536,9 @@ fn default_model_aliases() -> BTreeMap<String, String> {
         ("claude".into(), "claude-3-7-sonnet-latest".into()),
         ("claude-sonnet".into(), "claude-3-7-sonnet-latest".into()),
         ("openrouter".into(), "openai/gpt-4o-mini".into()),
+        ("zhipuai".into(), "glm-5-turbo".into()),
+        ("glm".into(), "glm-5-turbo".into()),
+        ("glm5".into(), "glm-5-turbo".into()),
     ])
 }
 

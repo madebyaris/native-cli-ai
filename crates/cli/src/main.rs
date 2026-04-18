@@ -1886,6 +1886,7 @@ fn classify_exit_code(error: &anyhow::Error) -> ExitCode {
     } else if combined.contains("run cancelled") {
         EXIT_CANCELLED
     } else if combined.contains("missing minimax api key")
+        || combined.contains("missing zhipuai api key")
         || combined.contains("failed to parse config file")
         || combined.contains("unable to determine the home directory")
         || combined.contains("invalid workspace root")
