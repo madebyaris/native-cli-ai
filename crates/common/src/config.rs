@@ -849,7 +849,7 @@ impl Default for OpenRouterConfig {
     }
 }
 
-    impl OpenRouterConfig {
+impl OpenRouterConfig {
     pub fn resolve_api_key(&self) -> Option<String> {
         resolve_api_key_value(&self.api_key, &self.api_key_env)
     }
