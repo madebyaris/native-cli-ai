@@ -173,6 +173,14 @@ pub struct TuiSessionState {
     pub onboarding_mode: bool,
     /// Result of the most recent API key validation attempt (None = no attempt yet).
     pub validation_status: Option<OnboardingValidation>,
+    // ── Text selection in transcript ─────────────────────────────────────
+    /// When `Some`, a range of flattened transcript lines + columns is selected (inclusive).
+    /// Inner tuples are `(line, col)`. `None` means no selection is active.
+    pub transcript_selection: Option<((usize, usize), (usize, usize))>,
+    /// True while a mouse drag is in progress (started inside the transcript area).
+    pub transcript_dragging: bool,
+    /// The (line, col) where the current drag started. Cleared on mouse-up.
+    pub transcript_drag_anchor: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Clone)]
@@ -270,6 +278,9 @@ impl TuiSessionState {
             session_picker_scroll: 0,
             onboarding_mode: false,
             validation_status: None,
+            transcript_selection: None,
+            transcript_dragging: false,
+            transcript_drag_anchor: None,
         }
     }
 

@@ -178,6 +178,7 @@ Available agent profiles:
 | Shortcut | Action |
 |----------|--------|
 | `Ctrl+P` | Open command palette |
+| `Ctrl+Shift+C` | Copy selected transcript text to system clipboard |
 | `Ctrl+V` | Paste image from clipboard (TUI only) |
 | `Ctrl+X M` | Switch model (model picker) |
 | `Ctrl+X E` | Open external editor |

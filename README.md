@@ -120,6 +120,7 @@ The full-screen UI appears when `stdin` and `stdout` are TTYs and `--stream huma
 In the default TUI you can attach images for the **next** user message:
 
 - **Ctrl+V** — paste a bitmap from the system clipboard (saved as PNG under the session).
+- **Ctrl+Shift+C** — copy selected transcript text to the system clipboard.
 - **`/image paste`** — same as clipboard paste if Ctrl+V is not available.
 - **`/image path/to/screenshot.png`** — copy a file into the session attachment dir.
 - **`/image clear`** — remove staged images before you press Enter.

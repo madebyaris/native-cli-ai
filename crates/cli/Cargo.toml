@@ -33,7 +33,7 @@ colored = "3"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["clock"] }
 similar = "2"
-arboard = "3"
+arboard = { version = "3", features = ["wayland-data-control"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 unicode-width = "0.2.2"
 

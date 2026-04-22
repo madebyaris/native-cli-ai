@@ -1,8 +1,10 @@
 //! Stage image attachments under `.nca/sessions/<id>/attachments/`.
+//! Also provides clipboard helpers for both images and text.
 
 use arboard::Clipboard;
 use image::{DynamicImage, ImageBuffer, Rgba};
 use nca_common::message::ImageAttachment;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -101,4 +103,86 @@ pub fn paste_clipboard_image(
         media_type: "image/png".into(),
         path: relative_attachment_path(session_id, &filename),
     })
+}
+
+/// Copy a text string to the system clipboard.
+///
+/// Strategy: arboard first; on failure fall back to `wl-copy` (Wayland) or
+/// `xclip`/`xsel` (X11). This ensures clipboard works even when the
+/// compositor doesn't support the data-control protocol (e.g. GNOME Wayland).
+pub fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
+    // 1. Try arboard (covers X11, macOS, Windows, and Wayland with data-control).
+    if let Ok(mut cb) = Clipboard::new()
+        && cb.set_text(text.to_owned()).is_ok()
+    {
+        return Ok(());
+    }
+    // 2. Fallback: shell out to system clipboard tools.
+    fallback_copy(text)
+}
+
+fn fallback_copy(text: &str) -> Result<(), String> {
+    let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
+    if is_wayland {
+        // wl-copy from wl-clipboard
+        let status = std::process::Command::new("wl-copy")
+            .arg("--")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                {
+                    let stdin = child.stdin.as_mut().ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::BrokenPipe, "no stdin")
+                    })?;
+                    stdin.write_all(text.as_bytes())?;
+                }
+                child.wait()
+            });
+        match status {
+            Ok(s) if s.success() => return Ok(()),
+            Ok(s) => return Err(format!("wl-copy exited with {s}")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err("wl-copy not found (install wl-clipboard)".into());
+            }
+            Err(e) => return Err(format!("wl-copy: {e}")),
+        }
+    }
+    // X11 fallback: xclip then xsel
+    for cmd in &["xclip", "xsel"] {
+        let result = match *cmd {
+            "xclip" => std::process::Command::new("xclip")
+                .args(["-selection", "clipboard"])
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .and_then(|mut child| {
+                    {
+                        let stdin = child.stdin.as_mut().ok_or_else(|| {
+                            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "no stdin")
+                        })?;
+                        stdin.write_all(text.as_bytes())?;
+                    }
+                    child.wait()
+                }),
+            _ => std::process::Command::new("xsel")
+                .args(["--clipboard", "--input"])
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .and_then(|mut child| {
+                    {
+                        let stdin = child.stdin.as_mut().ok_or_else(|| {
+                            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "no stdin")
+                        })?;
+                        stdin.write_all(text.as_bytes())?;
+                    }
+                    child.wait()
+                }),
+        };
+        match result {
+            Ok(s) if s.success() => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Ok(s) => return Err(format!("{cmd} exited with {s}")),
+            Err(e) => return Err(format!("{cmd}: {e}")),
+        }
+    }
+    Err("no clipboard tool available (tried wl-copy, xclip, xsel)".into())
 }

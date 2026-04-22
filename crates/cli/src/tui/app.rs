@@ -901,6 +901,85 @@ fn push_transcript_line(
     hits.push(hit);
 }
 
+/// Extract plain text from a range of `Line` items (used for clipboard copy).
+/// Takes column-aware selection: `((start_line, start_col), (end_line, end_col))`.
+fn plain_text_from_lines(
+    lines: &[Line<'_>],
+    sel_start: (usize, usize),
+    sel_end: (usize, usize),
+) -> String {
+    let (sl, sc) = sel_start;
+    let (el, ec) = sel_end;
+    let s = sl.min(lines.len());
+    let e = (el + 1).min(lines.len());
+    let mut out = String::new();
+    for (idx, line) in lines[s..e].iter().enumerate() {
+        let global_line = s + idx;
+        let full_text: String = line.spans.iter().map(|sp| sp.content.as_ref()).collect();
+        if global_line == sl && global_line == el {
+            // Single line: extract substring by column range.
+            let start_col = sc.min(ec);
+            let end_col = sc.max(ec);
+            let truncated = truncate_by_columns(&full_text, end_col);
+            let remaining = truncate_by_columns_skip(&truncated, start_col);
+            out.push_str(&remaining);
+        } else if global_line == sl {
+            // First line: skip columns before start_col.
+            out.push_str(&truncate_by_columns_skip(&full_text, sc));
+        } else if global_line == el {
+            // Last line: truncate at end_col.
+            out.push_str(&truncate_by_columns(&full_text, ec));
+        } else {
+            out.push_str(&full_text);
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Keep only the first `max_cols` display columns of text.
+fn truncate_by_columns(text: &str, max_cols: usize) -> String {
+    let mut col = 0usize;
+    let mut result = String::new();
+    for c in text.chars() {
+        if col >= max_cols {
+            break;
+        }
+        let w = if c == '\t' {
+            4
+        } else {
+            unicode_width::UnicodeWidthChar::width(c).unwrap_or(1)
+        };
+        result.push(c);
+        col += w;
+    }
+    result
+}
+
+/// Skip the first `skip_cols` display columns of text, return the rest.
+fn truncate_by_columns_skip(text: &str, skip_cols: usize) -> String {
+    let mut col = 0usize;
+    let mut skipping = true;
+    let mut result = String::new();
+    for c in text.chars() {
+        if skipping {
+            let w = if c == '\t' {
+                4
+            } else {
+                unicode_width::UnicodeWidthChar::width(c).unwrap_or(1)
+            };
+            col += w;
+            if col > skip_cols {
+                result.push(c);
+                skipping = false;
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
 /// Build scrollable transcript lines + optional mouse/click targets per line.
 fn transcript_lines_and_hits(
     state: &TuiSessionState,
@@ -1173,7 +1252,7 @@ fn transcript_lines_and_hits(
             &mut lines,
             &mut hits,
             Line::from(Span::styled(
-                "Tab  agent   Ctrl+V  image   Ctrl+P  commands   !cmd  shell   @path  search   /  inline   wheel  scroll",
+                "Tab  agent   Ctrl+V  image   Ctrl+P  commands   !cmd  shell   @path  search   /  inline   wheel  scroll\n\n                drag to select  ·  release to copy to clipboard",
                 Style::default().fg(theme::MUTED),
             )),
             None,
@@ -1209,25 +1288,53 @@ fn wrap_text(s: &str, width: usize) -> Vec<String> {
             continue;
         }
         let mut line = String::new();
+        let mut line_w = 0usize;
         for word in paragraph.split_whitespace() {
+            let word_w: usize = word.chars().map(char_width).sum();
             if line.is_empty() {
                 line = word.to_string();
-            } else if line.len() + 1 + word.len() <= width {
+                line_w = word_w;
+            } else if line_w + 1 + word_w <= width {
                 line.push(' ');
                 line.push_str(word);
+                line_w += 1 + word_w;
             } else {
                 out.push(line);
                 line = word.to_string();
+                line_w = word_w;
             }
         }
         if !line.is_empty() {
             out.push(line);
         }
     }
-    if out.is_empty() && !s.is_empty() {
-        out.push(s.to_string());
+    // Second pass: split any line that still exceeds width (CJK text without spaces).
+    let mut final_out = Vec::new();
+    for l in out {
+        if l.chars().map(char_width).sum::<usize>() <= width {
+            final_out.push(l);
+        } else {
+            let mut cur = String::new();
+            let mut cur_w = 0usize;
+            for ch in l.chars() {
+                let w = char_width(ch);
+                if cur_w + w > width {
+                    final_out.push(cur);
+                    cur = String::new();
+                    cur_w = 0;
+                }
+                cur.push(ch);
+                cur_w += w;
+            }
+            if !cur.is_empty() {
+                final_out.push(cur);
+            }
+        }
     }
-    out
+    if final_out.is_empty() && !s.is_empty() {
+        final_out.push(s.to_string());
+    }
+    final_out
 }
 
 fn wrap_preformatted_line(line: &str, width: usize) -> Vec<String> {
@@ -1236,15 +1343,16 @@ fn wrap_preformatted_line(line: &str, width: usize) -> Vec<String> {
     }
     let mut out = Vec::new();
     let mut current = String::new();
-    let mut current_len = 0usize;
+    let mut current_w = 0usize;
     for ch in line.chars() {
-        if current_len >= width {
+        let w = char_width(ch);
+        if current_w + w > width {
             out.push(current);
             current = String::new();
-            current_len = 0;
+            current_w = 0;
         }
         current.push(ch);
-        current_len += 1;
+        current_w += w;
     }
     if out.is_empty() || !current.is_empty() {
         out.push(current);
@@ -1485,8 +1593,166 @@ pub fn run_blocking(
                 }
                 let start = g.scroll_lines;
                 let end = (start + transcript_h).min(total);
+                let sel = g.transcript_selection; // ((line, col), (line, col)) in global coords
                 let visible: Vec<Line> = if start < end {
-                    lines[start..end].to_vec()
+                    lines[start..end]
+                        .iter()
+                        .enumerate()
+                        .map(|(i, line)| {
+                            let global = start + i;
+                            let in_selection = sel
+                                .map(|((sl, sc), (el, ec))| {
+                                    if global < sl || global > el {
+                                        false
+                                    } else if global == sl && global == el {
+                                        // Single line selection: column range matters.
+                                        let lo = sc.min(ec);
+                                        let hi = sc.max(ec);
+                                        lo <= hi // always true, but column check for spans
+                                    } else {
+                                        true
+                                    }
+                                })
+                                .unwrap_or(false);
+                            if in_selection {
+                                let ((sl, sc), (el, ec)) = sel.unwrap();
+                                let (lo_line, lo_col) = if sl < el || (sl == el && sc <= ec) {
+                                    (sl, sc)
+                                } else {
+                                    (el, ec)
+                                };
+                                let (hi_line, hi_col) = if sl < el || (sl == el && sc <= ec) {
+                                    (el, ec)
+                                } else {
+                                    (sl, sc)
+                                };
+                                // Clamp columns to line width.
+                                let line_width: usize = line.spans.iter().map(|s| s.width()).sum();
+                                let sel_start_col = if global == lo_line { lo_col.min(line_width) } else { 0 };
+                                let sel_end_col = if global == hi_line { hi_col.min(line_width) } else { line_width };
+
+                                // Empty column range → no visible highlight on this line.
+                                if sel_start_col >= sel_end_col {
+                                    return line.clone();
+                                }
+
+                                // Build highlighted spans with partial selection support.
+                                let mut highlighted_spans: Vec<Span<'static>> = Vec::new();
+                                let mut col_acc: usize = 0; // running column accumulator (NOT mutated inside closures)
+                                for sp in &line.spans {
+                                    let span_width = sp.width();
+                                    let span_start = col_acc;
+                                    let span_end = col_acc + span_width;
+
+                                    if span_end <= sel_start_col || span_start >= sel_end_col {
+                                        // Span is entirely outside selection.
+                                        highlighted_spans.push(sp.clone());
+                                    } else if span_start >= sel_start_col && span_end <= sel_end_col {
+                                        // Span is entirely inside selection.
+                                        highlighted_spans.push(Span::styled(
+                                            sp.content.clone(),
+                                            sp.style.bg(theme::USER).fg(Color::Black),
+                                        ));
+                                    } else {
+                                        // Span partially overlaps selection — split it.
+                                        let content = sp.content.as_ref();
+                                        if span_start < sel_start_col && span_end > sel_end_col {
+                                            // Selection starts AND ends mid-span: three-way split.
+                                            // left (outside) | middle (inside) | right (outside)
+                                            let mut tmp_col = span_start;
+                                            let left_chars = content.chars().take_while(|c| {
+                                                let w = char_width(*c);
+                                                if tmp_col < sel_start_col {
+                                                    tmp_col += w;
+                                                    true
+                                                } else {
+                                                    false
+                                                }
+                                            }).count();
+                                            highlighted_spans.push(Span::styled(
+                                                content.chars().take(left_chars).collect::<String>(),
+                                                sp.style,
+                                            ));
+                                            let mid_chars = content.chars().skip(left_chars).take_while(|c| {
+                                                let w = char_width(*c);
+                                                if tmp_col < sel_end_col {
+                                                    tmp_col += w;
+                                                    true
+                                                } else {
+                                                    false
+                                                }
+                                            }).count();
+                                            let mid: String = content.chars().skip(left_chars).take(mid_chars).collect();
+                                            if !mid.is_empty() {
+                                                highlighted_spans.push(Span::styled(
+                                                    mid,
+                                                    sp.style.bg(theme::USER).fg(Color::Black),
+                                                ));
+                                            }
+                                            let right: String = content.chars().skip(left_chars + mid_chars).collect();
+                                            if !right.is_empty() {
+                                                highlighted_spans.push(Span::styled(
+                                                    right,
+                                                    sp.style,
+                                                ));
+                                            }
+                                        } else if span_start < sel_start_col {
+                                            // Selection starts mid-span, extends to span end.
+                                            let mut tmp_col = span_start;
+                                            let left_chars = content.chars().take_while(|c| {
+                                                let w = char_width(*c);
+                                                if tmp_col < sel_start_col {
+                                                    tmp_col += w;
+                                                    true
+                                                } else {
+                                                    false
+                                                }
+                                            }).count();
+                                            highlighted_spans.push(Span::styled(
+                                                content.chars().take(left_chars).collect::<String>(),
+                                                sp.style,
+                                            ));
+                                            let remaining: String = content.chars().skip(left_chars).collect();
+                                            highlighted_spans.push(Span::styled(
+                                                remaining,
+                                                sp.style.bg(theme::USER).fg(Color::Black),
+                                            ));
+                                        } else {
+                                            // Selection ends mid-span: left=inside, right=outside.
+                                            let mut tmp_col = span_start;
+                                            let inside_chars = content.chars().take_while(|c| {
+                                                let w = char_width(*c);
+                                                if tmp_col < sel_end_col {
+                                                    tmp_col += w;
+                                                    true
+                                                } else {
+                                                    false
+                                                }
+                                            }).count();
+                                            let inside: String = content.chars().take(inside_chars).collect();
+                                            let outside: String = content.chars().skip(inside_chars).collect();
+                                            if !inside.is_empty() {
+                                                highlighted_spans.push(Span::styled(
+                                                    inside,
+                                                    sp.style.bg(theme::USER).fg(Color::Black),
+                                                ));
+                                            }
+                                            if !outside.is_empty() {
+                                                highlighted_spans.push(Span::styled(
+                                                    outside,
+                                                    sp.style,
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    col_acc += span_width;
+                                }
+                                Line::from(highlighted_spans)
+                            } else {
+                                line.clone()
+                            }
+                        })
+                        .collect()
                 } else {
                     vec![]
                 };
@@ -1915,7 +2181,7 @@ pub fn run_blocking(
                     ))
                 } else if g.input_buffer.is_empty() {
                     Line::from(Span::styled(
-                        "Enter send · Tab agent · Ctrl+V image · /image · Ctrl+P palette · Ctrl+Q exit · Ctrl+L clear",
+                        "Enter send · Tab agent · Ctrl+V image · /image · Ctrl+P palette · Ctrl+Q exit · Ctrl+L clear · drag select → copy",
                         Style::default().fg(theme::MUTED),
                     ))
                 } else {
@@ -2837,12 +3103,26 @@ pub fn run_blocking(
                         let total = lines.len();
                         let th = tr.height.saturating_sub(2) as usize;
                         let max_scroll = total.saturating_sub(th);
+                        let inner_top = tr.y.saturating_add(1);
+                        let row_in_area = if m.row >= inner_top {
+                            Some((m.row - inner_top) as usize)
+                        } else {
+                            None
+                        };
+                        let gline = row_in_area.filter(|r| *r < th).map(|r| g.scroll_lines + r);
+                        // Column within the text area (0-indexed, excluding border).
+                        let gcol = m.column.saturating_sub(tr.x).saturating_sub(1) as usize;
+
                         match m.kind {
                             MouseEventKind::ScrollUp => {
+                                g.transcript_selection = None;
+                                g.transcript_dragging = false;
                                 g.transcript_follow_tail = false;
                                 g.scroll_lines = g.scroll_lines.saturating_sub(MOUSE_SCROLL_LINES);
                             }
                             MouseEventKind::ScrollDown => {
+                                g.transcript_selection = None;
+                                g.transcript_dragging = false;
                                 g.scroll_lines =
                                     (g.scroll_lines + MOUSE_SCROLL_LINES).min(max_scroll);
                                 if g.scroll_lines >= max_scroll {
@@ -2850,29 +3130,110 @@ pub fn run_blocking(
                                 }
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
-                                // Inner content starts below top border (y+1).
-                                let inner_top = tr.y.saturating_add(1);
-                                if m.row >= inner_top {
-                                    let row_in_area = (m.row - inner_top) as usize;
-                                    if row_in_area < th {
-                                        let gline = g.scroll_lines + row_in_area;
-                                        let picked = if gline < hits.len() {
-                                            hits[gline].clone().zip(
-                                                g.active_question
-                                                    .as_ref()
-                                                    .map(|q| q.question_id.clone()),
-                                            )
+                                if let Some(gl) = gline {
+                                    let picked = if gl < hits.len() {
+                                        hits[gl].clone().zip(
+                                            g.active_question
+                                                .as_ref()
+                                                .map(|q| q.question_id.clone()),
+                                        )
+                                    } else {
+                                        None
+                                    };
+                                    if let Some((sel, qid)) = picked {
+                                        // Clear any text selection when clicking a question option.
+                                        g.transcript_selection = None;
+                                        g.transcript_dragging = false;
+                                        drop(g);
+                                        if let Some(ref tx) = question_answer_tx {
+                                            let _ = tx.send((qid, sel));
                                         } else {
-                                            None
-                                        };
-                                        if let Some((sel, qid)) = picked {
-                                            drop(g);
-                                            if let Some(ref tx) = question_answer_tx {
-                                                let _ = tx.send((qid, sel));
-                                            } else {
-                                                let _ = cmd_tx.send(TuiCmd::QuestionAnswer(sel));
+                                            let _ = cmd_tx.send(TuiCmd::QuestionAnswer(sel));
+                                        }
+                                        continue;
+                                    }
+                                    // No question hit — start a new text selection or extend existing.
+                                    if m.modifiers.contains(KeyModifiers::SHIFT) {
+                                        // Shift+click: extend existing selection.
+                                        if let Some(((anchor_line, _), _)) = g.transcript_selection
+                                        {
+                                            let start = (anchor_line.min(gl), 0);
+                                            let end = (anchor_line.max(gl), gcol);
+                                            g.transcript_selection =
+                                                Some((start.min(end), start.max(end)));
+                                        } else {
+                                            g.transcript_drag_anchor = Some((gl, gcol));
+                                        }
+                                    } else {
+                                        // Plain click: set selection at click position (immediate highlight).
+                                        let click_pos = (gl, gcol);
+                                        g.transcript_selection = Some((click_pos, click_pos));
+                                        g.transcript_drag_anchor = Some((gl, gcol));
+                                    }
+                                    g.transcript_dragging = true;
+                                }
+                            }
+                            MouseEventKind::Drag(MouseButton::Left) if g.transcript_dragging => {
+                                let Some(gl) = gline else { continue };
+                                if let Some((anchor_line, anchor_col)) = g.transcript_drag_anchor {
+                                    if g.transcript_selection.is_some() {
+                                        // Drag already active — update selection normally.
+                                        let start = (
+                                            anchor_line.min(gl),
+                                            if anchor_line <= gl { anchor_col } else { gcol },
+                                        );
+                                        let end = (
+                                            anchor_line.max(gl),
+                                            if anchor_line <= gl { gcol } else { anchor_col },
+                                        );
+                                        g.transcript_selection = Some((start, end));
+                                    } else {
+                                        // First drag attempt after Down.
+                                        // Only activate selection if the mouse is close to the
+                                        // anchor — filters out spurious large jumps that many
+                                        // terminals send on plain click.
+                                        let line_dist = gl.abs_diff(anchor_line);
+                                        let col_dist = gcol.abs_diff(anchor_col);
+                                        if line_dist <= 1 && col_dist <= 3 {
+                                            let start = (
+                                                anchor_line.min(gl),
+                                                if anchor_line <= gl { anchor_col } else { gcol },
+                                            );
+                                            let end = (
+                                                anchor_line.max(gl),
+                                                if anchor_line <= gl { gcol } else { anchor_col },
+                                            );
+                                            g.transcript_selection = Some((start, end));
+                                        }
+                                    }
+                                } else if let Some(((anchor_line, _), _)) = g.transcript_selection {
+                                    let start = (anchor_line.min(gl), 0);
+                                    let end = (anchor_line.max(gl), gcol);
+                                    g.transcript_selection = Some((start.min(end), start.max(end)));
+                                }
+                            }
+                            MouseEventKind::Up(MouseButton::Left) => {
+                                g.transcript_dragging = false;
+                                g.transcript_drag_anchor = None;
+                                // OpenCode-style: auto-copy selected text to clipboard on mouse-up.
+                                if let Some((sel_start, sel_end)) = g.transcript_selection {
+                                    let (sl, sc) = sel_start;
+                                    let (el, ec) = sel_end;
+                                    if sl < el || (sl == el && sc != ec) {
+                                        let text =
+                                            plain_text_from_lines(&lines, sel_start, sel_end);
+                                        let n = text.trim_end_matches('\n').chars().count();
+                                        match crate::image_attach::copy_text_to_clipboard(&text) {
+                                            Ok(()) => {
+                                                g.blocks.push(DisplayBlock::System(format!(
+                                                    "Copied {n} chars to clipboard"
+                                                )));
                                             }
-                                            continue;
+                                            Err(e) => {
+                                                g.blocks.push(DisplayBlock::System(format!(
+                                                    "Clipboard failed: {e}"
+                                                )));
+                                            }
                                         }
                                     }
                                 }
@@ -3483,11 +3844,70 @@ pub fn run_blocking(
                             let _ = cmd_tx.send(TuiCmd::Exit);
                             break;
                         }
-                        (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                        (KeyCode::Insert, KeyModifiers::CONTROL | KeyModifiers::SHIFT) => {
+                            // Ctrl+Shift+Insert: copy selected transcript text to clipboard.
+                            if let Some((sel_start, sel_end)) = g.transcript_selection {
+                                let sz = terminal.size().ok();
+                                if let Some(sz) = sz {
+                                    let area = Rect::new(0, 0, sz.width, sz.height);
+                                    let (main_area, _) = layout_with_sidebar(area);
+                                    let inner_w = main_area.width.saturating_sub(2);
+                                    let lines = transcript_lines(&g, inner_w);
+                                    let text = plain_text_from_lines(&lines, sel_start, sel_end);
+                                    let n = text.trim_end_matches('\n').chars().count();
+                                    match crate::image_attach::copy_text_to_clipboard(&text) {
+                                        Ok(()) => {
+                                            g.blocks.push(DisplayBlock::System(format!(
+                                                "Copied {n} chars to clipboard"
+                                            )));
+                                        }
+                                        Err(e) => {
+                                            g.push_error(format!("clipboard copy failed: {e}"));
+                                        }
+                                    }
+                                }
+                            } else {
+                                g.blocks.push(DisplayBlock::System(
+                                    "No text selected — drag in transcript to select, then Ctrl+Shift+C to copy".into(),
+                                ));
+                            }
+                        }
+                        (KeyCode::Char('c'), KeyModifiers::CONTROL)
+                            if !key.modifiers.contains(KeyModifiers::SHIFT) =>
+                        {
+                            // Ctrl+C: cancel current turn.
                             if let Some(ref flag) = cancel_flag {
                                 flag.store(true, std::sync::atomic::Ordering::SeqCst);
                             }
                             let _ = cmd_tx.send(TuiCmd::CancelTurn);
+                        }
+                        (KeyCode::Char('c'), KeyModifiers::CONTROL | KeyModifiers::SHIFT) => {
+                            // Ctrl+Shift+C: copy selected transcript text to clipboard.
+                            if let Some((sel_start, sel_end)) = g.transcript_selection {
+                                let sz = terminal.size().ok();
+                                if let Some(sz) = sz {
+                                    let area = Rect::new(0, 0, sz.width, sz.height);
+                                    let (main_area, _) = layout_with_sidebar(area);
+                                    let inner_w = main_area.width.saturating_sub(2);
+                                    let lines = transcript_lines(&g, inner_w);
+                                    let text = plain_text_from_lines(&lines, sel_start, sel_end);
+                                    let n = text.trim_end_matches('\n').chars().count();
+                                    match crate::image_attach::copy_text_to_clipboard(&text) {
+                                        Ok(()) => {
+                                            g.blocks.push(DisplayBlock::System(format!(
+                                                "Copied {n} chars to clipboard"
+                                            )));
+                                        }
+                                        Err(e) => {
+                                            g.push_error(format!("clipboard copy failed: {e}"));
+                                        }
+                                    }
+                                }
+                            } else {
+                                g.blocks.push(DisplayBlock::System(
+                                    "No text selected — drag in transcript to select, then Ctrl+Shift+C to copy".into(),
+                                ));
+                            }
                         }
                         (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
                             g.blocks.clear();
