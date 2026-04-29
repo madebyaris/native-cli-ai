@@ -292,8 +292,61 @@ fn push_styled_run(
     text.push(ch);
 }
 
-fn composer_line(buffer: &str, cursor_char_idx: usize) -> Line<'static> {
-    let prompt = Span::styled("❯ ", Style::default().fg(theme::USER).bold());
+/// Display width of a character (CJK = 2, ASCII = 1, zero-width = 0).
+fn char_width(ch: char) -> usize {
+    unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0)
+}
+
+/// Compute the visible character window so the cursor stays within `max_cols`.
+/// Returns `(start_char_idx, end_char_idx)` – half-open range of chars to render.
+fn input_visible_window(buffer: &str, cursor_char_idx: usize, max_cols: usize) -> (usize, usize) {
+    let chars: Vec<char> = buffer.chars().collect();
+    let n = chars.len();
+    if n == 0 || max_cols == 0 {
+        return (0, 0);
+    }
+    // Try fitting from the beginning first.
+    let mut width = 0usize;
+    let mut end = 0usize;
+    for (i, &ch) in chars.iter().enumerate() {
+        let w = char_width(ch);
+        if width + w > max_cols {
+            break;
+        }
+        width += w;
+        end = i + 1;
+    }
+    if end == n || cursor_char_idx < end {
+        // Everything fits or cursor is within the visible window.
+        return (0, end);
+    }
+    // Cursor is beyond the window – slide the window so cursor is visible.
+    // Walk backwards from cursor to find the longest prefix that fits.
+    let mut width = char_width(chars.get(cursor_char_idx).copied().unwrap_or(' '));
+    let mut start = cursor_char_idx;
+    while start > 0 && width + char_width(chars[start - 1]) <= max_cols {
+        start -= 1;
+        width += char_width(chars[start]);
+    }
+    // end: walk forward from cursor to fill remaining space.
+    let mut end = cursor_char_idx + 1;
+    while end < n && width + char_width(chars[end]) <= max_cols {
+        width += char_width(chars[end]);
+        end += 1;
+    }
+    (start, end)
+}
+
+fn composer_line(buffer: &str, cursor_char_idx: usize, max_cols: usize) -> Line<'static> {
+    // Prompt "❯ " or "… " occupies 2 display columns (1 symbol + 1 space).
+    const PROMPT_COLS: usize = 2;
+    let buf_cols = max_cols.saturating_sub(PROMPT_COLS);
+    let (win_start, win_end) = input_visible_window(buffer, cursor_char_idx, buf_cols);
+    let prompt = if win_start > 0 {
+        Span::styled("… ", Style::default().fg(theme::MUTED))
+    } else {
+        Span::styled("❯ ", Style::default().fg(theme::USER).bold())
+    };
     let chars: Vec<char> = buffer.chars().collect();
     let mention_ranges = at_mention_char_ranges(buffer);
     let cursor_char_idx = cursor_char_idx.min(chars.len());
@@ -301,7 +354,7 @@ fn composer_line(buffer: &str, cursor_char_idx: usize) -> Line<'static> {
     let mut run = String::new();
     let mut run_style: Option<Style> = None;
 
-    for idx in 0..=chars.len() {
+    for idx in win_start..=win_end {
         if idx == cursor_char_idx {
             let cursor_char = chars.get(idx).copied().unwrap_or(' ');
             let in_mention = idx < chars.len()
@@ -1844,7 +1897,11 @@ pub fn run_blocking(
                     }
                 }
 
-                let input_line = composer_line(&g.input_buffer, g.cursor_char_idx);
+                let input_line = composer_line(
+                    &g.input_buffer,
+                    g.cursor_char_idx,
+                    inp_r.width.saturating_sub(2) as usize, // border
+                );
 
                 let hint = if g.active_approval.is_some() {
                     Line::from(Span::styled(
@@ -1883,6 +1940,7 @@ pub fn run_blocking(
                     )));
                 }
                 input_lines.push(hint);
+
                 let input_block = Paragraph::new(Text::from(input_lines))
                     .block(
                         Block::default()
@@ -2879,10 +2937,8 @@ pub fn run_blocking(
                                 g.command_palette_query.clear();
                                 g.palette_index = 0;
                             }
-                            (KeyCode::Up, _) => {
-                                if g.palette_index > 0 {
-                                    g.palette_index -= 1;
-                                }
+                            (KeyCode::Up, _) if g.palette_index > 0 => {
+                                g.palette_index -= 1;
                             }
                             (KeyCode::Down, _) => {
                                 let filtered = filter_palette_rows(&g.command_palette_query);
@@ -2970,19 +3026,15 @@ pub fn run_blocking(
                             (KeyCode::Esc, _) => {
                                 g.close_model_picker();
                             }
-                            (KeyCode::Up, _) => {
-                                if selectable_count > 0 {
-                                    g.model_picker_index = g
-                                        .model_picker_index
-                                        .saturating_sub(1)
-                                        .min(selectable_count - 1);
-                                }
+                            (KeyCode::Up, _) if selectable_count > 0 => {
+                                g.model_picker_index = g
+                                    .model_picker_index
+                                    .saturating_sub(1)
+                                    .min(selectable_count - 1);
                             }
-                            (KeyCode::Down, _) => {
-                                if selectable_count > 0 {
-                                    g.model_picker_index =
-                                        (g.model_picker_index + 1).min(selectable_count - 1);
-                                }
+                            (KeyCode::Down, _) if selectable_count > 0 => {
+                                g.model_picker_index =
+                                    (g.model_picker_index + 1).min(selectable_count - 1);
                             }
                             (KeyCode::Enter, _) => {
                                 let selectable: Vec<&ModelPickerEntry> = g
@@ -3031,22 +3083,15 @@ pub fn run_blocking(
                         let rows = build_connect_rows(&g.connect_search);
                         let n_sel = selectable_row_indices(&rows).len();
                         match (key.code, key.modifiers) {
-                            (KeyCode::Esc, _) => {
-                                if !g.onboarding_mode {
-                                    g.close_connect_modal();
-                                }
+                            (KeyCode::Esc, _) if !g.onboarding_mode => {
+                                g.close_connect_modal();
                             }
-                            (KeyCode::Up, _) => {
-                                if n_sel > 0 {
-                                    g.connect_menu_index =
-                                        g.connect_menu_index.saturating_sub(1).min(n_sel - 1);
-                                }
+                            (KeyCode::Up, _) if n_sel > 0 => {
+                                g.connect_menu_index =
+                                    g.connect_menu_index.saturating_sub(1).min(n_sel - 1);
                             }
-                            (KeyCode::Down, _) => {
-                                if n_sel > 0 {
-                                    g.connect_menu_index =
-                                        (g.connect_menu_index + 1).min(n_sel - 1);
-                                }
+                            (KeyCode::Down, _) if n_sel > 0 => {
+                                g.connect_menu_index = (g.connect_menu_index + 1).min(n_sel - 1);
                             }
                             (KeyCode::Enter, _) => {
                                 if let Some(p) = provider_at_selection(&rows, g.connect_menu_index)
@@ -3139,10 +3184,8 @@ pub fn run_blocking(
                             (KeyCode::Up, _) => {
                                 g.provider_picker_index = g.provider_picker_index.saturating_sub(1);
                             }
-                            (KeyCode::Down, _) => {
-                                if n > 0 {
-                                    g.provider_picker_index = (g.provider_picker_index + 1) % n;
-                                }
+                            (KeyCode::Down, _) if n > 0 => {
+                                g.provider_picker_index = (g.provider_picker_index + 1) % n;
                             }
                             (KeyCode::Enter, _) => {
                                 if n == 0 {
@@ -3171,15 +3214,14 @@ pub fn run_blocking(
                             (KeyCode::Esc, _) => {
                                 g.close_branch_picker();
                             }
-                            (KeyCode::Up, _) => {
+                            (KeyCode::Up, _)
                                 if !filtered_branch_indices(
                                     &g.branch_picker_branches,
                                     &g.branch_picker_query,
                                 )
-                                .is_empty()
-                                {
-                                    g.branch_picker_index = g.branch_picker_index.saturating_sub(1);
-                                }
+                                .is_empty() =>
+                            {
+                                g.branch_picker_index = g.branch_picker_index.saturating_sub(1);
                             }
                             (KeyCode::Down, _) => {
                                 let n = filtered_branch_indices(
@@ -3227,13 +3269,11 @@ pub fn run_blocking(
                             // Total items: 1 (suggested) + options.len() + (1 if allow_custom for "Chat about this")
                             let total = 1 + q.options.len() + if q.allow_custom { 1 } else { 0 };
                             match (key.code, key.modifiers) {
-                                (KeyCode::Esc, _) => {
-                                    if q.allow_custom {
-                                        // Fall back to inline text input
-                                        g.close_question_modal();
-                                    }
-                                    // If !allow_custom, Esc is a no-op
+                                (KeyCode::Esc, _) if q.allow_custom => {
+                                    // Fall back to inline text input
+                                    g.close_question_modal();
                                 }
+                                // If !allow_custom, Esc is a no-op
                                 (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
                                     g.question_modal_index =
                                         g.question_modal_index.saturating_sub(1);
@@ -3346,11 +3386,9 @@ pub fn run_blocking(
                             (KeyCode::Up, _) => {
                                 g.session_picker_index = g.session_picker_index.saturating_sub(1);
                             }
-                            (KeyCode::Down, _) => {
-                                if count > 0 {
-                                    g.session_picker_index =
-                                        (g.session_picker_index + 1).min(count.saturating_sub(1));
-                                }
+                            (KeyCode::Down, _) if count > 0 => {
+                                g.session_picker_index =
+                                    (g.session_picker_index + 1).min(count.saturating_sub(1));
                             }
                             (KeyCode::Enter, _) => {
                                 let filtered: Vec<&String> = g
@@ -3775,28 +3813,26 @@ pub fn run_blocking(
                                 }
                             }
                         }
-                        (KeyCode::Backspace, _) => {
-                            if g.cursor_char_idx > 0 {
-                                if let Some((buf, cidx)) =
-                                    delete_completed_at_mention(&g.input_buffer, g.cursor_char_idx)
-                                {
-                                    g.input_buffer = buf;
-                                    g.cursor_char_idx = cidx;
+                        (KeyCode::Backspace, _) if g.cursor_char_idx > 0 => {
+                            if let Some((buf, cidx)) =
+                                delete_completed_at_mention(&g.input_buffer, g.cursor_char_idx)
+                            {
+                                g.input_buffer = buf;
+                                g.cursor_char_idx = cidx;
+                            } else {
+                                let idx = g.cursor_char_idx;
+                                let mut cs: Vec<char> = g.input_buffer.chars().collect();
+                                cs.remove(idx - 1);
+                                g.input_buffer = cs.into_iter().collect();
+                                g.cursor_char_idx -= 1;
+                            }
+                            if slash_panel_visible(&g.input_buffer) {
+                                let f = filter_slash_entries(&slash_entries, &g.input_buffer);
+                                if !f.is_empty() {
+                                    g.slash_menu_index =
+                                        g.slash_menu_index.min(f.len().saturating_sub(1));
                                 } else {
-                                    let idx = g.cursor_char_idx;
-                                    let mut cs: Vec<char> = g.input_buffer.chars().collect();
-                                    cs.remove(idx - 1);
-                                    g.input_buffer = cs.into_iter().collect();
-                                    g.cursor_char_idx -= 1;
-                                }
-                                if slash_panel_visible(&g.input_buffer) {
-                                    let f = filter_slash_entries(&slash_entries, &g.input_buffer);
-                                    if !f.is_empty() {
-                                        g.slash_menu_index =
-                                            g.slash_menu_index.min(f.len().saturating_sub(1));
-                                    } else {
-                                        g.slash_menu_index = 0;
-                                    }
+                                    g.slash_menu_index = 0;
                                 }
                             }
                         }
@@ -3938,7 +3974,7 @@ mod approval_parse_tests {
 
     #[test]
     fn composer_line_styles_completed_mentions() {
-        let line = composer_line("see @README.md ", 15);
+        let line = composer_line("see @README.md ", 15, 80);
         let mention_span = line
             .spans
             .iter()

@@ -35,6 +35,7 @@ chrono = { version = "0.4", features = ["clock"] }
 similar = "2"
 arboard = "3"
 image = { version = "0.25", default-features = false, features = ["png"] }
+unicode-width = "0.2.2"
 
 [dev-dependencies]
 nca-runtime = { workspace = true }

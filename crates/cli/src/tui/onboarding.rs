@@ -188,15 +188,11 @@ async fn run_onboarding_inner(
                 let n_sel = sel_indices.len();
 
                 match (key.code, key.modifiers) {
-                    (KeyCode::Up, _) => {
-                        if n_sel > 0 {
-                            connect_index = connect_index.saturating_sub(1);
-                        }
+                    (KeyCode::Up, _) if n_sel > 0 => {
+                        connect_index = connect_index.saturating_sub(1);
                     }
-                    (KeyCode::Down, _) => {
-                        if n_sel > 0 {
-                            connect_index = (connect_index + 1).min(n_sel - 1);
-                        }
+                    (KeyCode::Down, _) if n_sel > 0 => {
+                        connect_index = (connect_index + 1).min(n_sel - 1);
                     }
                     (KeyCode::Enter, _) => {
                         if let Some(&row_idx) = sel_indices.get(connect_index)
