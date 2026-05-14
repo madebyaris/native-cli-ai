@@ -1,6 +1,8 @@
 //! Stage image attachments under `.nca/sessions/<id>/attachments/`.
 
+#[cfg(feature = "clipboard")]
 use arboard::Clipboard;
+#[cfg(feature = "clipboard")]
 use image::{DynamicImage, ImageBuffer, Rgba};
 use nca_common::message::ImageAttachment;
 use std::path::{Path, PathBuf};
@@ -68,6 +70,7 @@ pub fn import_image_file(
 }
 
 /// Read an image from the system clipboard and store as PNG under the session.
+#[cfg(feature = "clipboard")]
 pub fn paste_clipboard_image(
     workspace: &Path,
     session_id: &str,
@@ -101,4 +104,12 @@ pub fn paste_clipboard_image(
         media_type: "image/png".into(),
         path: relative_attachment_path(session_id, &filename),
     })
+}
+
+#[cfg(not(feature = "clipboard"))]
+pub fn paste_clipboard_image(
+    _workspace: &Path,
+    _session_id: &str,
+) -> Result<ImageAttachment, String> {
+    Err("clipboard image paste is not supported in this build (try /image <path>)".into())
 }

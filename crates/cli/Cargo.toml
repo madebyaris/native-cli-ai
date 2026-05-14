@@ -33,8 +33,12 @@ colored = "3"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["clock"] }
 similar = "2"
-arboard = "3"
+arboard = { version = "3", optional = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+[features]
+default = ["clipboard"]
+clipboard = ["dep:arboard"]
 
 [dev-dependencies]
 nca-runtime = { workspace = true }
