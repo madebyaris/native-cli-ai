@@ -146,8 +146,23 @@ impl NcaConfig {
                 .set_model_for_default(self.model.default_model.clone());
         }
 
+        // Sync default_model from the active provider's model whenever
+        // the provider section or model section changed.
+        // This ensures that setting `[provider.openai] model = "..."`
+        // (even without an explicit `[model] default_model`) correctly
+        // propagates to the active default model.
         if provider_changed || explicit_model_override {
             self.sync_default_model_from_provider();
+        }
+
+        // Safety net: if neither provider nor model section was touched,
+        // but the active provider's model differs from default_model
+        // (e.g., after a partial provider update), re-sync.
+        if !provider_changed
+            && !explicit_model_override
+            && self.model.default_model != self.provider.active_model()
+        {
+            self.model.default_model = self.provider.active_model().to_string();
         }
     }
 
@@ -1497,6 +1512,83 @@ mod tests {
         assert_eq!(config.provider.openai.model, "gpt-4o");
         assert_eq!(config.model.default_model, "gpt-4o");
         assert_eq!(config.provider.minimax.model, "MiniMax-M2.5");
+    }
+
+    #[test]
+    fn merge_syncs_default_model_from_provider_model() {
+        // Verify that loading a config with `[provider.openai] model = "..."`
+        // (without an explicit `[model] default_model`) correctly propagates
+        // to the active default_model.
+        let raw = r#"
+            [provider]
+            default = "openai"
+
+            [provider.openai]
+            api_key = "ollama"
+            base_url = "http://localhost:20128/v1"
+            model = "oc/deepseek-v4-flash-free"
+            temperature = 0.7
+
+            [model.aliases]
+            fast = "oc/deepseek-v4-flash-free"
+            m2 = "oc/minimax-m2.5-free"
+        "#;
+
+        let mut config = NcaConfig::default();
+        let partial: PartialNcaConfig = toml::from_str(raw).expect("parse toml");
+
+        // Prior to merge: default_model is the built-in default
+        assert_eq!(config.model.default_model, "MiniMax-M2.5");
+        assert_eq!(config.provider.openai.model, "gpt-4o-mini");
+
+        config.merge(partial);
+
+        // After merge: default_model should be synced from provider.openai.model
+        assert_eq!(
+            config.provider.openai.model,
+            "oc/deepseek-v4-flash-free",
+            "provider model should be set from config"
+        );
+        assert_eq!(
+            config.model.default_model,
+            "oc/deepseek-v4-flash-free",
+            "default_model should be synced from active provider's model"
+        );
+        assert_eq!(
+            config.provider.default,
+            ProviderKind::OpenAi,
+            "default provider should be set from config"
+        );
+
+        // Verify aliases were also loaded
+        assert_eq!(
+            config.model.resolve_alias("fast"),
+            "oc/deepseek-v4-flash-free"
+        );
+        assert_eq!(config.model.resolve_alias("m2"), "oc/minimax-m2.5-free");
+    }
+
+    #[test]
+    fn merge_syncs_default_model_when_no_provider_section() {
+        // When a config only sets `[model] default_model` (no provider section),
+        // the provider's model should be updated to match, and the default_model
+        // should remain as set.
+        let raw = r#"
+            [model]
+            default_model = "my-custom-model"
+        "#;
+
+        let mut config = NcaConfig::default();
+        let partial: PartialNcaConfig = toml::from_str(raw).expect("parse toml");
+        config.merge(partial);
+
+        // The explicit default_model should also update the active provider's model
+        assert_eq!(config.model.default_model, "my-custom-model");
+        assert_eq!(
+            config.provider.openai.model,
+            "my-custom-model",
+            "active provider's model should match default_model"
+        );
     }
 
     #[test]

@@ -11,10 +11,31 @@ pub struct IpcServer {
 }
 
 impl IpcServer {
-    pub fn new(session_id: &str) -> Self {
-        let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
+    /// Determine a writable runtime directory for Unix domain sockets.
+    ///
+    /// Priority:
+    /// 1. `$XDG_RUNTIME_DIR` (XDG Base Directory)
+    /// 2. `$TMPDIR` (macOS / BSD / Termux convention)
+    /// 3. `$TMP` (general fallback)
+    /// 4. `$PREFIX/tmp` (Termux-specific, e.g. `/data/data/com.termux/files/usr/tmp`)
+    /// 5. `/tmp` (POSIX default, may not be writable on Android/Termux)
+    fn resolve_runtime_dir() -> PathBuf {
+        std::env::var("XDG_RUNTIME_DIR")
+            .ok()
+            .or_else(|| std::env::var("TMPDIR").ok())
+            .or_else(|| std::env::var("TMP").ok())
+            .or_else(|| {
+                std::env::var("PREFIX")
+                    .ok()
+                    .map(|p| PathBuf::from(p).join("tmp"))
+                    .and_then(|p| p.to_str().map(String::from))
+            })
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/tmp"));
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+    }
+
+    pub fn new(session_id: &str) -> Self {
+        let runtime_dir = Self::resolve_runtime_dir();
         let socket_path = runtime_dir.join("nca").join(format!("{session_id}.sock"));
         Self { socket_path }
     }
