@@ -16,7 +16,13 @@ detect_platform() {
     arch="$(uname -m)"
 
     case "$os" in
-        Linux)  os="unknown-linux-gnu" ;;
+        Linux)
+            if [ -n "${TERMUX_VERSION:-}" ] || [ -d "/data/data/com.termux/files/usr" ]; then
+                os="linux-android"
+            else
+                os="unknown-linux-gnu"
+            fi
+            ;;
         Darwin) os="apple-darwin" ;;
         *)      error "Unsupported OS: $os" ;;
     esac
@@ -24,6 +30,7 @@ detect_platform() {
     case "$arch" in
         x86_64|amd64)   arch="x86_64" ;;
         aarch64|arm64)  arch="aarch64" ;;
+        armv7l|armv8l)  arch="armv7" ;;
         *)              error "Unsupported architecture: $arch" ;;
     esac
 
