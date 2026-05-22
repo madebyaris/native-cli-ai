@@ -23,6 +23,8 @@
 //! println!("val_bpb: {}", result.metric_value);
 //! ```
 
+#![allow(clippy::pedantic)]
+
 pub mod experiment;
 pub mod git_integration;
 pub mod loop_runner;

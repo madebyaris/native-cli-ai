@@ -66,9 +66,9 @@ pub fn spawn_openai_stream(
                 Ok(chunk) => chunk,
                 Err(err) => {
                     let _ = tx
-                        .send(StreamChunk::TextDelta(format!(
-                            "\n[{provider_name} stream error: {err}]"
-                        )))
+                        .send(StreamChunk::Error(ProviderError::RequestFailed(format!(
+                            "{provider_name} stream error: {err}"
+                        ))))
                         .await;
                     break;
                 }
@@ -183,18 +183,29 @@ async fn flush_openai_tool_calls(
             continue;
         }
 
-        if let Ok(input) = serde_json::from_str(&call.arguments) {
-            let _ = tx
-                .send(StreamChunk::ToolUse(ToolCall {
-                    id: if call.id.is_empty() {
-                        format!("tool-call-{index}")
-                    } else {
-                        call.id
-                    },
-                    name: call.name,
-                    input,
-                }))
-                .await;
+        match serde_json::from_str(&call.arguments) {
+            Ok(input) => {
+                let _ = tx
+                    .send(StreamChunk::ToolUse(ToolCall {
+                        id: if call.id.is_empty() {
+                            format!("tool-call-{index}")
+                        } else {
+                            call.id
+                        },
+                        name: call.name,
+                        input,
+                    }))
+                    .await;
+            }
+            Err(err) if !call.arguments.is_empty() => {
+                let _ = tx
+                    .send(StreamChunk::Error(ProviderError::RequestFailed(format!(
+                        "failed to parse tool input JSON for `{}`: {err}",
+                        call.name
+                    ))))
+                    .await;
+            }
+            Err(_) => {}
         }
     }
 }

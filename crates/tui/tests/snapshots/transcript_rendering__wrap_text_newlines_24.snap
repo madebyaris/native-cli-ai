@@ -1,0 +1,10 @@
+---
+source: crates/tui/tests/transcript_rendering.rs
+expression: wrapped
+---
+[
+    "line one",
+    "line two is a bit longer",
+    "and should wrap",
+    "line three",
+]

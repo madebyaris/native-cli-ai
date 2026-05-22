@@ -6,15 +6,18 @@ use nca_common::config::NcaConfig;
 use nca_common::event::{AgentEvent, EndReason, EventEnvelope};
 use nca_common::session::OrchestrationContext;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::mpsc as std_mpsc;
 
+/// Whether to create a new service session or resume an existing one.
 #[derive(Debug, Clone)]
 pub enum ServiceSessionKind {
+    /// Start a fresh session, optionally with a predetermined id.
     New { session_id: Option<String> },
+    /// Resume a persisted session by id.
     Resume { session_id: String },
 }
 
+/// Parameters for spawning a detached service session on a background thread.
 #[derive(Debug, Clone)]
 pub struct ServiceSessionRequest {
     pub config: NcaConfig,
@@ -25,6 +28,7 @@ pub struct ServiceSessionRequest {
     pub kind: ServiceSessionKind,
 }
 
+/// Startup metadata returned once the service session is listening on IPC.
 #[derive(Debug, Clone)]
 pub struct ServiceSessionInfo {
     pub session_id: String,
@@ -34,6 +38,7 @@ pub struct ServiceSessionInfo {
     pub event_log_path: PathBuf,
 }
 
+/// Handle to a detached service session running on a dedicated thread.
 pub struct ServiceSessionHandle {
     info: ServiceSessionInfo,
     #[allow(dead_code)]
@@ -41,11 +46,13 @@ pub struct ServiceSessionHandle {
 }
 
 impl ServiceSessionHandle {
+    /// Session metadata (id, socket path, event log path).
     pub fn info(&self) -> &ServiceSessionInfo {
         &self.info
     }
 }
 
+/// Spawn a detached service session on a background thread and block until IPC is ready.
 pub fn spawn_service_session(
     request: ServiceSessionRequest,
 ) -> Result<ServiceSessionHandle, String> {
@@ -97,7 +104,9 @@ async fn run_service_session_with_startup(
                 interactive_approvals: true,
                 session_id: session_id.clone(),
                 approval_handler: None,
+                approval_pending: None,
                 orchestration_context: request.orchestration_context.clone(),
+                preloaded_state: None,
             })
             .await
         }
@@ -108,6 +117,7 @@ async fn run_service_session_with_startup(
                 request.safe_mode,
                 true,
                 session_id,
+                None,
                 None,
             )
             .await
@@ -158,9 +168,10 @@ async fn run_service_session_with_startup(
         None
     };
 
-    let (prompt_tx, mut prompt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let (control_tx, mut control_rx) =
-        tokio::sync::mpsc::unbounded_channel::<SessionControlCommand>();
+    // Bounded interactive control channels. Prompts and session-control messages
+    // arrive at human keyboard rate, so small caps are ample.
+    let (prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(32);
+    let (control_tx, mut control_rx) = tokio::sync::mpsc::channel::<SessionControlCommand>(16);
 
     let command_task = command_rx.map(|crx| {
         spawn_command_consumer_with_store(
@@ -175,10 +186,9 @@ async fn run_service_session_with_startup(
     });
 
     if let Some(prompt) = request.initial_prompt.clone() {
-        let _ = prompt_tx.send(prompt);
+        let _ = prompt_tx.send(prompt).await;
     }
 
-    let cancel_handle = supervisor.cancel_handle();
     let mut reason = EndReason::UserExit;
 
     loop {
@@ -186,12 +196,10 @@ async fn run_service_session_with_startup(
             control = control_rx.recv() => {
                 match control {
                     Some(SessionControlCommand::Cancel) => {
-                        cancel_handle.store(true, Ordering::SeqCst);
                         reason = EndReason::Cancelled;
                         break;
                     }
                     Some(SessionControlCommand::Shutdown) => {
-                        cancel_handle.store(true, Ordering::SeqCst);
                         reason = EndReason::UserExit;
                         break;
                     }
@@ -204,6 +212,7 @@ async fn run_service_session_with_startup(
             }
         };
 
+        let cancel_token = supervisor.agent().cancel_token();
         let run_fut = supervisor.run_turn(&prompt);
         tokio::pin!(run_fut);
 
@@ -212,11 +221,11 @@ async fn run_service_session_with_startup(
             control = control_rx.recv() => {
                 match control {
                     Some(SessionControlCommand::Cancel) => {
-                        cancel_handle.store(true, Ordering::SeqCst);
+                        cancel_token.cancel();
                         reason = EndReason::Cancelled;
                     }
                     Some(SessionControlCommand::Shutdown) => {
-                        cancel_handle.store(true, Ordering::SeqCst);
+                        cancel_token.cancel();
                         reason = EndReason::UserExit;
                     }
                     None => {}

@@ -1,0 +1,15 @@
+---
+source: crates/common/tests/event_envelopes.rs
+expression: env
+---
+{
+  "schema_version": 1,
+  "id": 42,
+  "ts": "2026-01-01T00:00:00Z",
+  "event": {
+    "type": "Checkpoint",
+    "phase": "turn-complete",
+    "detail": "persisted session state",
+    "turn": 3
+  }
+}

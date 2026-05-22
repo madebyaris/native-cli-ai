@@ -17,8 +17,10 @@ pub mod rename_path;
 pub mod replace_match;
 pub mod run_validation;
 pub mod search;
+pub mod search_semantic;
 pub mod skill_hints;
 pub mod spawn_subagent;
+pub mod todo_write;
 pub mod types;
 pub mod web_search;
 pub mod write_file;
@@ -26,6 +28,7 @@ pub mod write_file;
 pub use ask_question::AskQuestionTool;
 pub use invoke_skill::InvokeSkillTool;
 pub use skill_hints::RecentSkillHints;
+pub use todo_write::{TodoListHandle, TodoWriteTool};
 
 use nca_common::config::WebConfig;
 use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
@@ -53,6 +56,9 @@ impl ToolRegistry {
             workspace_root.clone(),
         )));
         registry.register(Box::new(search::SearchCodeTool::new(
+            workspace_root.clone(),
+        )));
+        registry.register(Box::new(search_semantic::SearchSemanticTool::new(
             workspace_root.clone(),
         )));
         registry.register(Box::new(list_directory::ListDirectoryTool::new(

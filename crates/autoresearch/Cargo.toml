@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Autonomous research loop for nca — AI agents running experiments iteratively"
 
+[lints]
+workspace = true
+
 [dependencies]
 nca-common = { workspace = true }
 

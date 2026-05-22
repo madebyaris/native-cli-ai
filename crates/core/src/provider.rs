@@ -26,6 +26,8 @@ pub enum StreamChunk {
         input_tokens: u64,
         output_tokens: u64,
     },
+    /// Terminal stream failure from the provider transport or parser.
+    Error(ProviderError),
     Done,
 }
 
@@ -54,18 +56,24 @@ pub trait Provider: Send + Sync {
     ) -> Result<tokio::sync::mpsc::Receiver<StreamChunk>, ProviderError>;
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ProviderError {
+    /// Missing or invalid provider configuration.
     #[error("provider configuration error: {0}")]
     Configuration(String),
+    /// HTTP transport or non-2xx response.
     #[error("API request failed: {0}")]
     RequestFailed(String),
+    /// Invalid or missing API credentials.
     #[error("Authentication error: {0}")]
     AuthError(String),
+    /// Provider returned HTTP 429.
     #[error("Rate limited, retry after {retry_after_ms}ms")]
     RateLimited { retry_after_ms: u64 },
+    /// Requested model is not available for this provider.
     #[error("Model not found: {0}")]
     ModelNotFound(String),
+    /// Catch-all for provider/runtime failures.
     #[error("{0}")]
     Other(String),
 }

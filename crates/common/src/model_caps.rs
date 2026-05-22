@@ -4,6 +4,7 @@ use crate::config::ProviderKind;
 
 /// Whether the active provider+model is treated as supporting **native** image inputs
 /// in chat (not MCP OCR fallback).
+#[must_use]
 pub fn model_accepts_native_images(kind: ProviderKind, model: &str) -> bool {
     let m = model.trim().to_ascii_lowercase();
     match kind {

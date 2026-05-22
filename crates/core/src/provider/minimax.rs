@@ -125,9 +125,10 @@ impl Provider for MiniMaxProvider {
         )?;
 
         if std::env::var("NCA_DEBUG_REQUEST").is_ok() {
-            eprintln!(
-                "[minimax:request] {}",
-                serde_json::to_string_pretty(&body).unwrap_or_default()
+            tracing::debug!(
+                provider = "minimax",
+                body = %serde_json::to_string_pretty(&body).unwrap_or_default(),
+                "outgoing request"
             );
         }
 

@@ -332,7 +332,7 @@ pub fn install_skills(
         let dest = target_dir.join(&safe_name);
 
         if dest.exists() {
-            eprintln!("Warning: overwriting existing skill '{safe_name}'");
+            tracing::warn!(skill = %safe_name, "overwriting existing skill");
         }
 
         copy_skill_dir(src_dir, &dest)?;

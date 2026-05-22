@@ -16,6 +16,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   BINARY_NAME: nca
+  INSTA_UPDATE: never
 
 jobs:
   # Determine if this is a release-worthy push
@@ -63,10 +64,27 @@ jobs:
         run: cargo fmt --check --all
 
       - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Test
-        run: cargo test --workspace
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Unit + lib tests (nextest, ci profile, excl. integration)
+        run: cargo nextest run --profile ci --workspace -E 'not (binary(cli_commands) or test(integration_))'
+
+      - name: Integration tests (nextest, ci profile, serial)
+        run: cargo nextest run --profile ci --workspace -E 'binary(cli_commands) or test(integration_)'
+
+      - name: Doctests
+        run: cargo test --workspace --doc
+
+      - name: Install cargo-insta
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-insta
+
+      - name: Snapshot tests (insta)
+        run: cargo insta test --check
 
   # Multi-platform build
   build:

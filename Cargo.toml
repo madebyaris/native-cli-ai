@@ -4,21 +4,41 @@ members = [
     "crates/common",
     "crates/core",
     "crates/runtime",
+    "crates/tui",
     "crates/cli",
     "crates/autoresearch",
+    "crates/index",
 ]
 
 [workspace.package]
 version = "0.3.0"
 edition = "2024"
+rust-version = "1.85"
 license = "MIT"
 repository = "https://github.com/madebyaris/native-cli-ai"
 homepage = "https://nca-cli.com"
 
-# Release profile optimized for size and speed
+[workspace.lints.clippy]
+correctness = "deny"
+pedantic = "warn"
+
+# Release profile optimized for performance. Switched to `lto = "fat"` per
+# docs/research/rust-ratatui-optimization.md + the Phase 1.4 plan — noticeably
+# smaller binary and faster cold-start at the cost of slightly longer link time.
 [profile.release]
 opt-level = 3
-lto = "thin"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# Alternate release profile focused on minimum binary size. Build with
+# `cargo build --profile release-small -p nca-cli` to produce a trimmed
+# single-binary distribution (see docs/research/rust-ratatui-optimization.md).
+[profile.release-small]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
 codegen-units = 1
 strip = true
 panic = "abort"
@@ -32,6 +52,9 @@ opt-level = 0
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"
+# Scope `tokio` per-crate when possible; the workspace default keeps "full" for
+# backward compatibility, but new code should pull in only the features it
+# actually uses (rt-multi-thread, macros, time, sync, net, process, fs, io-util).
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -46,4 +69,6 @@ cli-prompts = "0.1"
 nca-common = { path = "crates/common" }
 nca-core = { path = "crates/core" }
 nca-runtime = { path = "crates/runtime" }
+nca-tui = { path = "crates/tui" }
 nca-autoresearch = { path = "crates/autoresearch" }
+nca-index = { path = "crates/index" }

@@ -65,9 +65,9 @@ pub fn spawn_anthropic_stream(
                 Ok(chunk) => chunk,
                 Err(err) => {
                     let _ = tx
-                        .send(StreamChunk::TextDelta(format!(
-                            "\n[{provider_name} stream error: {err}]"
-                        )))
+                        .send(StreamChunk::Error(ProviderError::RequestFailed(format!(
+                            "{provider_name} stream error: {err}"
+                        ))))
                         .await;
                     break;
                 }
@@ -189,14 +189,24 @@ async fn flush_anthropic_tool_call(
         return;
     }
 
-    if let Ok(input) = serde_json::from_str(tool_input) {
-        let _ = tx
-            .send(StreamChunk::ToolUse(ToolCall {
-                id: tool_id.clone(),
-                name: tool_name.clone(),
-                input,
-            }))
-            .await;
+    match serde_json::from_str(tool_input) {
+        Ok(input) => {
+            let _ = tx
+                .send(StreamChunk::ToolUse(ToolCall {
+                    id: tool_id.clone(),
+                    name: tool_name.clone(),
+                    input,
+                }))
+                .await;
+        }
+        Err(err) if !tool_input.is_empty() => {
+            let _ = tx
+                .send(StreamChunk::Error(ProviderError::RequestFailed(format!(
+                    "failed to parse tool input JSON for `{tool_name}`: {err}"
+                ))))
+                .await;
+        }
+        Err(_) => {}
     }
 
     tool_id.clear();

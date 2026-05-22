@@ -1,0 +1,46 @@
+---
+description: TDD methodology and quality gate for every behavior change in nca.
+globs: "**/*.rs,**/*.snap"
+alwaysApply: false
+---
+
+# Test Discipline (TDD)
+
+Apply this workflow to every bug fix, refactor, and new behavior in tracks A–C.
+
+## Red → Green → Refactor
+
+1. **Write a failing test first** — unit, integration, or snapshot — that proves the bug or specifies the new behavior.
+2. **Land the smallest change** that makes the test pass.
+3. **Run the full quality gate** before moving on:
+   - `cargo nextest run --workspace --features semantic-index`
+   - `cargo test --workspace --doc`
+   - `cargo clippy --workspace --all-targets -- -D warnings`
+   - `cargo fmt --check --all`
+   - `INSTA_UPDATE=never cargo insta test --check` (when snapshots are involved)
+4. **Update supply-chain baselines** if dependencies change (`cargo deny check`, `cargo audit`).
+5. **Refactor under green** — re-run the full gate before the next item.
+
+## Test pyramid targets (per crate)
+
+| Crate | Focus |
+|-------|-------|
+| `nca-common` | Unit + serde snapshot for every `AgentEvent` variant; round-trip session JSON; schema version forward-compat |
+| `nca-core` | Unit per provider stream parser; agent-loop integration with mock `Provider`; per-tool unit tests |
+| `nca-runtime` | IPC handshake, multi-client broadcast, approve/deny round-trip, cancel-during-stream, worktree lifecycle |
+| `nca-tui` | `TuiCmd → SessionRuntime → bridge → state` integration; UiOverlay FSM transitions; composer/onboarding scenarios |
+| `nca-cli` | Extend `cli_commands.rs` for `--stream human/ndjson/off`, `--json` parity, live IPC attach |
+| `nca-index` | Feature-gated tempdir rebuild/search; `FeatureDisabled` stub round-trip |
+
+## Rules
+
+- **Bug fixes require a regression test** that would have caught the bug.
+- **Never depend on network access** in unit tests — mock the `Provider` trait.
+- **Use `insta` for rendered output** (TUI transcripts, provider request bodies, event envelopes). Snapshots are locked in CI (`INSTA_UPDATE=never`).
+- **Use `tempfile`** for any test that touches the filesystem.
+- **Empty provider completions must fail loudly** — assert `AgentEvent::Error`, never silent success.
+- **Stream/parse failures must not masquerade as model text** — assert typed errors propagate to the user.
+
+## Integration test isolation
+
+Integration tests (`binary(cli_commands)` or `test(integration_)`) run serially (see `.config/nextest.toml`) because they spawn `nca`, touch the filesystem, and use Unix sockets.

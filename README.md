@@ -170,7 +170,7 @@ Useful interactive behaviors:
 - `@ <query>` searches files (fuzzy file mention completions).
 - `/...` runs slash commands.
 - `Tab` cycles agent profiles such as `build`, `plan`, `review`, `fix`, and `test`.
-- `Ctrl+C` or `/stop` cancels the current running turn.
+- `Ctrl+C` or `/stop` sends a cooperative cancel through the agent loop (via `CancellationToken`) and stops the in-flight provider stream without losing session state.
 - `/auto-answer` accepts the suggested answer for a pending `ask_question`.
 
 Small touches in the TUI matter too: branch switching, structured options, session sidebars, model picker, provider configuration, and direct control over long-running turns.
@@ -306,7 +306,10 @@ Recent search/edit improvements are aimed at making agent file work less brittle
 ## Session Model
 
 - Sessions are persisted as JSON snapshots plus JSONL event logs.
+- Both session state (`.json`) and event envelopes (`.events.jsonl`) carry a `schema_version` field (currently `1`) so older snapshots load with serde defaults.
 - The runtime uses a `Supervisor` to own lifecycle, IPC, approvals, questions, event fanout, and persistence.
+- Bash execution uses a real PTY via `portable-pty` (not piped `std::process::Command`), with optional live stdout/stderr streaming to the TUI.
+- The full-screen TUI renders assistant markdown via `pulldown-cmark` with syntax highlighting; the line REPL uses a lighter text path.
 - Child sessions can inherit parent context, record lineage in session metadata, and run inside separate git worktrees.
 - IPC uses newline-delimited JSON over Unix sockets so `attach`, approvals, status, and other controls share one runtime transport.
 - `ContextManager` tracks token usage and auto-summarizes long conversations.

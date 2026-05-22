@@ -27,6 +27,7 @@ Machine event streams use the same envelope shape on stdout, in IPC, and in `.nc
 
 ```json
 {
+  "schema_version": 1,
   "id": 12,
   "ts": "2026-03-14T08:00:00Z",
   "event": {
@@ -39,6 +40,8 @@ Machine event streams use the same envelope shape on stdout, in IPC, and in `.nc
   }
 }
 ```
+
+Each envelope carries a `schema_version` field (default `1` when omitted for forward compatibility). Persisted session state files (`.nca/sessions/<id>.json`) use the same versioning pattern via `SessionState.schema_version`.
 
 The `event` payload is the tagged `AgentEvent` enum from `crates/common/src/event.rs`.
 

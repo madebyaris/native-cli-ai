@@ -1,6 +1,6 @@
 //! Lightweight API key validation per provider.
 
-use nca_common::config::{ProviderCompatibility, ProviderKind};
+use nca_common::config::{NcaConfig, ProviderCompatibility, ProviderKind};
 
 /// Result of an API key validation attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10,9 +10,29 @@ pub enum ValidationResult {
     NetworkError(String),
 }
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::StatusCode;
+
+/// Round-trip timing + validation (for `nca doctor` preflight).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreflightReport {
+    pub validation: ValidationResult,
+    /// Time from sending the request until the response headers/body were received.
+    pub round_trip_ms: u64,
+}
+
+/// Best-effort: open a TLS connection and hit the provider with the same probe as
+/// [`validate_api_key`], using the **default** provider from `config`. Ignores errors.
+pub async fn prewarm_default_provider(config: &NcaConfig) {
+    let provider = config.provider.default;
+    let Some(key) = config.provider.resolve_api_key_for(provider) else {
+        return;
+    };
+    let base_url = config.provider.base_url_for(provider).to_string();
+    let compat = config.provider.compatibility_for(provider);
+    let _ = preflight_provider(provider, &key, &base_url, compat).await;
+}
 
 /// Validate an API key by making a lightweight request to the provider.
 ///
@@ -24,12 +44,30 @@ pub async fn validate_api_key(
     base_url: &str,
     compatibility: Option<ProviderCompatibility>,
 ) -> ValidationResult {
+    preflight_provider(provider, api_key, base_url, compatibility)
+        .await
+        .validation
+}
+
+/// Same probes as [`validate_api_key`], plus round-trip latency in milliseconds.
+pub async fn preflight_provider(
+    provider: ProviderKind,
+    api_key: &str,
+    base_url: &str,
+    compatibility: Option<ProviderCompatibility>,
+) -> PreflightReport {
+    let start = Instant::now();
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
     {
         Ok(c) => c,
-        Err(e) => return ValidationResult::NetworkError(format!("failed to build client: {e}")),
+        Err(e) => {
+            return PreflightReport {
+                validation: ValidationResult::NetworkError(format!("failed to build client: {e}")),
+                round_trip_ms: start.elapsed().as_millis() as u64,
+            };
+        }
     };
 
     let result = match provider {
@@ -42,9 +80,6 @@ pub async fn validate_api_key(
                 .await
         }
         ProviderKind::Anthropic | ProviderKind::MiniMax => {
-            // Send a minimal POST with an intentionally empty body.
-            // A valid key returns 400 (bad request); an invalid key returns 401/403.
-            // This avoids coupling validation to any specific model ID.
             let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
             client
                 .post(&url)
@@ -79,21 +114,19 @@ pub async fn validate_api_key(
         },
     };
 
-    match result {
+    let round_trip_ms = start.elapsed().as_millis() as u64;
+
+    let validation = match result {
         Ok(resp) => {
             let status = resp.status();
             if status.is_success() {
                 ValidationResult::Valid
             } else if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
                 ValidationResult::InvalidKey("Invalid API key — please check and try again".into())
+            } else if status == StatusCode::BAD_REQUEST {
+                ValidationResult::Valid
             } else {
-                // Some providers return 400 for minimal requests but the key is valid.
-                // A 400 with auth headers accepted means the key works.
-                if status == StatusCode::BAD_REQUEST {
-                    ValidationResult::Valid
-                } else {
-                    ValidationResult::NetworkError(format!("unexpected status: {status}"))
-                }
+                ValidationResult::NetworkError(format!("unexpected status: {status}"))
             }
         }
         Err(e) => {
@@ -107,6 +140,11 @@ pub async fn validate_api_key(
                 ))
             }
         }
+    };
+
+    PreflightReport {
+        validation,
+        round_trip_ms,
     }
 }
 

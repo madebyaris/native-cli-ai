@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::todo::TodoItem;
 use crate::tool::ToolResult;
 
 /// Real-time busy state indicator for CLI rendering.
@@ -23,8 +24,27 @@ pub enum BusyState {
     Error,
 }
 
+/// Output stream identifier for [`AgentEvent::ToolOutputChunk`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOutputStream {
+    Stdout,
+    Stderr,
+}
+
+impl ToolOutputStream {
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            ToolOutputStream::Stdout => "stdout",
+            ToolOutputStream::Stderr => "stderr",
+        }
+    }
+}
+
 impl BusyState {
     /// Human-readable label for this state.
+    #[must_use]
     pub fn label(&self) -> &'static str {
         match self {
             BusyState::Idle => "idle",
@@ -37,9 +57,18 @@ impl BusyState {
     }
 }
 
+/// Current on-disk / wire schema version for [`EventEnvelope`].
+pub const EVENT_ENVELOPE_SCHEMA_VERSION: u32 = 1;
+
+fn default_event_envelope_schema_version() -> u32 {
+    EVENT_ENVELOPE_SCHEMA_VERSION
+}
+
 /// Envelope for events written to disk, with stable id and timestamp for ordering.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventEnvelope {
+    #[serde(default = "default_event_envelope_schema_version")]
+    pub schema_version: u32,
     #[serde(default)]
     pub id: u64,
     #[serde(default)]
@@ -48,8 +77,10 @@ pub struct EventEnvelope {
 }
 
 impl EventEnvelope {
+    #[must_use]
     pub fn new(id: u64, event: AgentEvent) -> Self {
         Self {
+            schema_version: EVENT_ENVELOPE_SCHEMA_VERSION,
             id,
             ts: Some(Utc::now()),
             event,
@@ -77,6 +108,18 @@ pub enum AgentEvent {
         call_id: String,
         tool: String,
         input: serde_json::Value,
+    },
+    /// Incremental chunk of stdout/stderr from a long-running tool (currently
+    /// only `execute_bash` with streaming enabled). Receivers SHOULD treat
+    /// chunks as opaque bytes concatenated in order; UTF-8 boundaries are
+    /// preserved within a chunk but not across chunks.
+    ToolOutputChunk {
+        call_id: String,
+        stream: ToolOutputStream,
+        /// Already-UTF-8-lossy data. Implementations that need raw bytes
+        /// should upgrade this field to `Vec<u8>` later; keeping it as a
+        /// `String` keeps the IPC payload JSON-friendly.
+        data: String,
     },
     ToolCallCompleted {
         call_id: String,
@@ -153,6 +196,13 @@ pub enum AgentEvent {
     BusyStateChanged {
         state: BusyState,
     },
+    /// Session todo list was replaced via the `todo_write` tool.
+    /// Carries the full list so consumers (TUI sidebar, REPL delta, event log)
+    /// always see a consistent snapshot.
+    TodosUpdated {
+        session_id: String,
+        todos: Vec<TodoItem>,
+    },
 }
 
 /// One selectable row shown for an interactive question.
@@ -188,9 +238,11 @@ pub enum QuestionSelection {
     Suggested,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EndReason {
     UserExit,
+    #[serde(alias = "Completed")]
     Completed,
     Error,
     Cancelled,
@@ -232,6 +284,38 @@ pub enum AgentResponse {
         message: String,
     },
     Ok,
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    #[test]
+    fn event_envelope_v0_fixture_without_schema_version_defaults_to_one() {
+        let raw = r#"{
+            "id": 3,
+            "ts": "2026-01-01T00:00:00Z",
+            "event": {"type":"TokensStreamed","delta":"hi"}
+        }"#;
+        let envelope: EventEnvelope = serde_json::from_str(raw).expect("deserialize v0 envelope");
+        assert_eq!(envelope.schema_version, 1);
+        assert_eq!(envelope.id, 3);
+        assert!(matches!(envelope.event, AgentEvent::TokensStreamed { .. }));
+    }
+
+    #[test]
+    fn end_reason_serializes_snake_case_and_accepts_legacy_completed_alias() {
+        let json = serde_json::to_string(&EndReason::Completed).expect("serialize");
+        assert_eq!(json, "\"completed\"");
+
+        let legacy: EndReason =
+            serde_json::from_str("\"Completed\"").expect("deserialize legacy alias");
+        assert_eq!(legacy, EndReason::Completed);
+
+        let modern: EndReason =
+            serde_json::from_str("\"completed\"").expect("deserialize snake_case");
+        assert_eq!(modern, EndReason::Completed);
+    }
 }
 
 #[cfg(test)]

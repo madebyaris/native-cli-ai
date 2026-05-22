@@ -1,8 +1,8 @@
-use crate::ipc_pending::{ApprovalPendingMap, QuestionPendingMap};
 use nca_common::config::{NcaConfig, PermissionMode};
 use nca_common::event::{AgentEvent, EndReason, QuestionSelection};
 use nca_common::session::{OrchestrationContext, SessionSnapshot};
 use nca_core::approval::{ApprovalHandler, ApprovalVerdict};
+use nca_core::ipc_pending::{ApprovalPendingMap, QuestionPendingMap};
 use nca_core::provider::ProviderError;
 use nca_core::tools::spawn_subagent::SpawnRequest;
 use nca_runtime::ipc::IpcHandle;
@@ -234,6 +234,7 @@ pub async fn build_session_runtime(
     interactive_approvals: bool,
     session_id: Option<String>,
     ipc_approval_handler: Option<Arc<dyn ApprovalHandler>>,
+    approval_pending: Option<ApprovalPendingMap>,
     orchestration_context: Option<OrchestrationContext>,
 ) -> Result<SessionRuntime, ProviderError> {
     let approval_handler = ipc_approval_handler;
@@ -245,7 +246,9 @@ pub async fn build_session_runtime(
         interactive_approvals,
         session_id,
         approval_handler,
+        approval_pending,
         orchestration_context,
+        preloaded_state: None,
     })
     .await?;
 
@@ -266,6 +269,7 @@ pub async fn build_resumed_session_runtime(
     interactive_approvals: bool,
     session_id: &str,
     approval_handler: Option<Arc<dyn ApprovalHandler>>,
+    approval_pending: Option<ApprovalPendingMap>,
 ) -> Result<SessionRuntime, ProviderError> {
     let mut supervisor = Supervisor::resume(
         config.clone(),
@@ -274,6 +278,7 @@ pub async fn build_resumed_session_runtime(
         interactive_approvals,
         session_id,
         approval_handler,
+        approval_pending,
     )
     .await?;
     let mut handle = supervisor.take_handle();

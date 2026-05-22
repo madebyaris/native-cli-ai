@@ -11,9 +11,13 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+  INSTA_UPDATE: never
 
 jobs:
   check:
+    name: Lint, build, unit + integration tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,10 +37,210 @@ jobs:
         run: cargo fmt --check --all
 
       - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Build
-        run: cargo build --workspace
+        run: cargo build --workspace --all-targets
 
-      - name: Test
-        run: cargo test --workspace
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Unit + lib tests (nextest, ci profile, excl. integration)
+        run: cargo nextest run --profile ci --workspace -E 'not (binary(cli_commands) or test(integration_))'
+
+      - name: Integration tests (nextest, ci profile, serial)
+        run: cargo nextest run --profile ci --workspace -E 'binary(cli_commands) or test(integration_)'
+
+      - name: Doctests
+        run: cargo test --workspace --doc
+
+      - name: Install cargo-insta
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-insta
+
+      - name: Snapshot tests (insta)
+        run: cargo insta test --check
+
+      - name: Upload junit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+
+  semantic-index:
+    name: Tests (semantic-index feature)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config ripgrep
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Build (semantic-index)
+        run: cargo build --workspace --all-targets --features semantic-index
+
+      - name: Unit + lib tests (semantic-index, excl. integration)
+        run: cargo nextest run --profile ci --workspace --features semantic-index -E 'not (binary(cli_commands) or test(integration_))'
+
+      - name: Integration tests (semantic-index, serial)
+        run: cargo nextest run --profile ci --workspace --features semantic-index -E 'binary(cli_commands) or test(integration_)'
+
+  msrv:
+    name: MSRV check (Rust 1.85)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.85"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config ripgrep
+
+      - name: Check formatting
+        run: cargo fmt --check --all
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Unit + lib tests (MSRV, excl. integration)
+        run: cargo nextest run --profile ci --workspace -E 'not (binary(cli_commands) or test(integration_))'
+
+      - name: Integration tests (MSRV, serial)
+        run: cargo nextest run --profile ci --workspace -E 'binary(cli_commands) or test(integration_)'
+
+  check-macos:
+    name: Tests (macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install ripgrep
+        run: brew install ripgrep
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Unit + lib tests (macOS, excl. integration)
+        run: cargo nextest run --profile ci --workspace -E 'not (binary(cli_commands) or test(integration_))'
+
+      - name: Integration tests (macOS, serial)
+        run: cargo nextest run --profile ci --workspace -E 'binary(cli_commands) or test(integration_)'
+
+  bench-smoke:
+    name: Bench compile smoke
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Compile Criterion benches (no run)
+        run: |
+          cargo bench -p nca-runtime --bench session_store_load --no-run
+          cargo bench -p nca-tui --bench tui_text --no-run
+
+      - name: Bench regression note
+        run: |
+          echo "Criterion baselines are recorded manually in docs/research/baselines.md."
+          echo "Compare locally with: cargo bench -- --baseline main"
+
+  bloat:
+    name: Binary size (cargo-bloat)
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Install cargo-bloat
+        run: cargo install cargo-bloat --locked
+
+      - name: Build release nca
+        run: cargo build --release -p nca-cli
+
+      - name: Report top crates by size
+        run: cargo bloat --release -p nca-cli --crates -n 30 || true
+
+      - name: Report top functions by size
+        run: cargo bloat --release -p nca-cli -n 30 || true
+
+      - name: Report release-small binary size
+        run: |
+          cargo build --profile release-small -p nca-cli
+          ls -la target/release-small/nca
+          size target/release-small/nca || true
+
+  audit:
+    name: Security audit (cargo audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: cargo audit
+        run: cargo audit --deny warnings
+
+  deny:
+    name: Supply chain (cargo deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: cargo deny check
+        run: cargo deny --all-features check

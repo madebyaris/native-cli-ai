@@ -1,11 +1,33 @@
 //! Transcript + status driven by `AgentEvent`.
 
+use super::overlay::{UiOverlay, UiOverlayKind};
 use nca_common::config::ProviderKind;
-use nca_common::event::{AgentEvent, BusyState, InteractiveQuestionPayload};
+use nca_common::event::{AgentEvent, BusyState, InteractiveQuestionPayload, QuestionSelection};
 use nca_common::message::ImageAttachment;
+use nca_common::todo::{TodoItem, TodoList};
+use ratatui::text::Line;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::time::Instant;
+
+/// Cached wrapped + styled transcript lines used by the draw path.
+///
+/// Invalidation is driven by `transcript_version` (bumped on any mutation that
+/// affects `transcript_lines_and_hits` output) and by viewport `width`. Rebuilding
+/// styled `ratatui::text::Line` values for every frame over a long transcript is
+/// the hottest CPU path in the TUI (see docs/research/rust-ratatui-optimization.md).
+pub struct TranscriptCache {
+    pub built_for_version: u64,
+    pub built_for_width: u16,
+    pub lines: Vec<Line<'static>>,
+    pub hits: Vec<Option<QuestionSelection>>,
+}
+
+impl TranscriptCache {
+    pub fn is_valid(&self, version: u64, width: u16) -> bool {
+        self.built_for_version == version && self.built_for_width == width
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum DisplayBlock {
@@ -15,6 +37,10 @@ pub enum DisplayBlock {
         name: String,
         call_id: String,
         input: String,
+        /// Rolling tail of live stdout/stderr captured via `ToolOutputChunk`.
+        /// Kept small (last N lines) so long-running commands don't bloat the
+        /// transcript cache; the final output lands in the `ToolDone` detail.
+        live_output: Vec<String>,
     },
     ApprovalPending(ApprovalRequest),
     ApprovalResolved {
@@ -30,6 +56,13 @@ pub enum DisplayBlock {
     Question(InteractiveQuestionPayload),
     System(String),
     ErrorLine(String),
+    /// Nested activity from a spawned child session, rendered tree-indented
+    /// with a color accent distinct from normal system log lines.
+    ChildActivity {
+        session_prefix: String,
+        phase: String,
+        detail: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +91,10 @@ pub struct SubagentRow {
     pub detail: String,
     pub running: bool,
     pub skill: Option<String>,
+    /// Cumulative input tokens reported by the child's latest `CostUpdated`.
+    pub tokens_in: u64,
+    /// Cumulative output tokens reported by the child's latest `CostUpdated`.
+    pub tokens_out: u64,
 }
 
 /// Status of an API key validation during onboarding.
@@ -87,6 +124,8 @@ pub struct TuiSessionState {
     pub staged_image_attachments: Vec<ImageAttachment>,
     /// Live view of spawned sub-agents (updated from child activity events).
     pub subagents: Vec<SubagentRow>,
+    /// Latest todo-list snapshot for this session (rendered in sidebar).
+    pub todos: TodoList,
     pub model: String,
     pub agent_profile: String,
     pub permission_mode: String,
@@ -102,110 +141,52 @@ pub struct TuiSessionState {
     pub should_exit: bool,
     /// Selected row in slash-command popup (↑↓ or click).
     pub slash_menu_index: usize,
-    /// Centered command palette opened via Ctrl+P.
-    pub command_palette_open: bool,
-    /// Filter text for the command palette.
-    pub command_palette_query: String,
+    /// Active modal overlay (at most one).
+    pub overlay: UiOverlay,
     /// Approval request currently waiting for a local TUI answer.
     pub active_approval: Option<ApprovalRequest>,
     /// When set, the composer answers this question (see status hint).
     pub active_question: Option<InteractiveQuestionPayload>,
     /// Current git branch name (updated on branch switch).
     pub current_branch: String,
-    /// Branch picker popup state.
-    pub branch_picker_open: bool,
-    /// Filter text in the branch picker.
-    pub branch_picker_query: String,
-    /// Selected index in the branch picker list.
-    pub branch_picker_index: usize,
-    /// List of branches for the picker (refreshed on open).
-    pub branch_picker_branches: Vec<String>,
     /// Bounding rect of the branch chip in the status bar (for click hit-testing).
     pub branch_chip_bounds: Option<ratatui::layout::Rect>,
-    /// Pick default LLM provider (or provider for API key) — TUI overlay.
-    pub provider_picker_open: bool,
-    pub provider_picker_index: usize,
-    /// When true, picking a row sets `pending_api_key_provider` instead of applying provider.
-    pub provider_picker_for_api_key: bool,
-    /// When true, the provider list includes a trailing “Add custom provider…” row (default provider only).
-    pub provider_picker_include_add_row: bool,
-    /// First visible row index into [`ProviderKind::ALL`] when the picker is taller than the terminal.
-    pub provider_picker_scroll: usize,
-    /// Multi-step wizard: OpenAI- vs Anthropic-compatible URL, key, model.
-    pub custom_provider_setup_open: bool,
-    pub custom_provider_setup_step: CustomProviderSetupStep,
-    /// 0 = OpenAI-compatible, 1 = Anthropic-compatible.
-    pub custom_setup_compat_index: usize,
-    /// Current line being edited (base URL, API key, or model id).
-    pub custom_setup_input: String,
-    pub custom_setup_base_url: String,
-    pub custom_setup_api_key: String,
-    /// Default model name when opening the wizard (usually the session model).
-    pub custom_setup_model_hint: String,
     /// After choosing a provider for API key, next non-command line is the secret.
     pub pending_api_key_provider: Option<ProviderKind>,
     /// Selected row when `@` file completion panel is visible.
     pub at_menu_index: usize,
-    /// OpenCode-style "Connect a provider" modal (`/connect`).
-    pub connect_modal_open: bool,
-    pub connect_search: String,
-    /// Index among selectable provider rows (not section headers).
-    pub connect_menu_index: usize,
-    /// Scroll offset for the connect modal viewport.
-    pub connect_modal_scroll: usize,
-    /// API key entry modal (used by `/connect` and `/apikey` TUI flows).
-    pub api_key_modal_open: bool,
-    pub api_key_target_provider: Option<ProviderKind>,
-    pub api_key_input: String,
-    pub api_key_target_has_existing: bool,
-    /// When true, Enter should connect to this provider after saving/confirming the key.
-    pub api_key_connect_after_save: bool,
-    /// Generic info popup (read-only scrollable lines).
-    pub info_modal_open: bool,
-    pub info_modal_title: String,
-    pub info_modal_lines: Vec<String>,
-    pub info_modal_scroll: usize,
-    /// Model picker popup (searchable model/provider list).
-    pub model_picker_open: bool,
-    pub model_picker_search: String,
-    pub model_picker_index: usize,
-    pub model_picker_entries: Vec<ModelPickerEntry>,
-    /// Scroll offset (first visible row) in the model picker viewport.
-    pub model_picker_scroll: usize,
     /// Ctrl+X leader key pending (next keypress is dispatched as shortcut).
     pub leader_pending: bool,
-    /// Permission mode picker popup.
-    pub permission_picker_open: bool,
-    pub permission_picker_index: usize,
-    /// Agent profile picker popup.
-    pub agent_picker_open: bool,
-    pub agent_picker_index: usize,
-    /// Question modal popup (arrow-key option picker).
-    pub question_modal_open: bool,
-    pub question_modal_index: usize,
-    pub question_modal_scroll: usize,
-    /// Command palette selection index (separate from slash_menu_index).
-    pub palette_index: usize,
-    /// Session picker popup (interactive list with resume).
-    pub session_picker_open: bool,
-    pub session_picker_search: String,
-    pub session_picker_index: usize,
-    pub session_picker_entries: Vec<String>,
-    /// Scroll offset for the session picker viewport.
-    pub session_picker_scroll: usize,
     /// When true, the onboarding gate is active — connect modal is locked open.
     pub onboarding_mode: bool,
     /// Result of the most recent API key validation attempt (None = no attempt yet).
     pub validation_status: Option<OnboardingValidation>,
+    /// Monotonically increasing version bumped on any state change. Used by the
+    /// render loop to decide whether a redraw is needed (dirty-flag pattern).
+    pub state_version: u64,
+    /// Bumped specifically when `blocks` / `streaming_assistant` / interactive
+    /// state that the transcript depends on changes. Used by the transcript cache.
+    pub transcript_version: u64,
+    /// Cached wrapped transcript lines for the current width + version.
+    pub transcript_cache: Option<TranscriptCache>,
+    /// Chars appended since the last transcript-cache invalidation during streaming.
+    pub stream_chars_since_dirty: usize,
+    /// When we last invalidated the transcript cache for streaming output.
+    pub last_stream_transcript_dirty: Option<Instant>,
 }
 
-#[derive(Debug, Clone)]
+/// Minimum streamed chars before invalidating the transcript cache again.
+pub const STREAM_TRANSCRIPT_DIRTY_CHARS: usize = 64;
+/// Minimum interval between streaming transcript-cache invalidations.
+pub const STREAM_TRANSCRIPT_DIRTY_MS: u128 = 50;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelPickerAction {
     SwitchProvider(ProviderKind),
     ApplyModel(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelPickerEntry {
     pub label: String,
     pub detail: String,
@@ -221,6 +202,7 @@ impl TuiSessionState {
         permission_mode: String,
         workspace_root: PathBuf,
     ) -> Self {
+        let todos = TodoList::new(session_id.clone());
         Self {
             blocks: Vec::new(),
             streaming_assistant: None,
@@ -233,6 +215,7 @@ impl TuiSessionState {
             workspace_display: String::new(),
             staged_image_attachments: Vec::new(),
             subagents: Vec::new(),
+            todos,
             model,
             agent_profile,
             permission_mode,
@@ -245,79 +228,616 @@ impl TuiSessionState {
             busy_state_since: Instant::now(),
             should_exit: false,
             slash_menu_index: 0,
-            command_palette_open: false,
-            command_palette_query: String::new(),
+            overlay: UiOverlay::None,
             active_approval: None,
             active_question: None,
             current_branch: String::new(),
-            branch_picker_open: false,
-            branch_picker_query: String::new(),
-            branch_picker_index: 0,
-            branch_picker_branches: Vec::new(),
             branch_chip_bounds: None,
-            provider_picker_open: false,
-            provider_picker_index: 0,
-            provider_picker_for_api_key: false,
-            provider_picker_include_add_row: false,
-            provider_picker_scroll: 0,
-            custom_provider_setup_open: false,
-            custom_provider_setup_step: CustomProviderSetupStep::Compatibility,
-            custom_setup_compat_index: 0,
-            custom_setup_input: String::new(),
-            custom_setup_base_url: String::new(),
-            custom_setup_api_key: String::new(),
-            custom_setup_model_hint: String::new(),
             pending_api_key_provider: None,
             at_menu_index: 0,
-            connect_modal_open: false,
-            connect_search: String::new(),
-            connect_menu_index: 0,
-            connect_modal_scroll: 0,
-            api_key_modal_open: false,
-            api_key_target_provider: None,
-            api_key_input: String::new(),
-            api_key_target_has_existing: false,
-            api_key_connect_after_save: false,
-            info_modal_open: false,
-            info_modal_title: String::new(),
-            info_modal_lines: Vec::new(),
-            info_modal_scroll: 0,
-            model_picker_open: false,
-            model_picker_search: String::new(),
-            model_picker_index: 0,
-            model_picker_entries: Vec::new(),
-            model_picker_scroll: 0,
             leader_pending: false,
-            permission_picker_open: false,
-            permission_picker_index: 0,
-            agent_picker_open: false,
-            agent_picker_index: 0,
-            question_modal_open: false,
-            question_modal_index: 0,
-            question_modal_scroll: 0,
-            palette_index: 0,
-            session_picker_open: false,
-            session_picker_search: String::new(),
-            session_picker_index: 0,
-            session_picker_entries: Vec::new(),
-            session_picker_scroll: 0,
             onboarding_mode: false,
             validation_status: None,
+            state_version: 1,
+            transcript_version: 1,
+            transcript_cache: None,
+            stream_chars_since_dirty: 0,
+            last_stream_transcript_dirty: None,
+        }
+    }
+
+    /// Replace the overlay after validating the FSM transition table.
+    pub fn set_overlay(&mut self, next: UiOverlay) {
+        let current = std::mem::replace(&mut self.overlay, UiOverlay::None);
+        self.overlay = UiOverlay::transition(current, next);
+        self.mark_dirty();
+    }
+
+    pub fn close_overlay(&mut self) {
+        if self.overlay.is_open() {
+            self.overlay = UiOverlay::None;
+            self.mark_dirty();
+        }
+    }
+
+    pub fn overlay_kind(&self) -> UiOverlayKind {
+        self.overlay.kind()
+    }
+
+    pub fn command_palette_open(&self) -> bool {
+        matches!(self.overlay, UiOverlay::CommandPalette { .. })
+    }
+
+    pub fn branch_picker_open(&self) -> bool {
+        matches!(self.overlay, UiOverlay::BranchPicker { .. })
+    }
+
+    pub fn connect_modal_open(&self) -> bool {
+        matches!(self.overlay, UiOverlay::ConnectModal { .. })
+    }
+
+    pub fn api_key_modal_open(&self) -> bool {
+        matches!(self.overlay, UiOverlay::ApiKeyModal { .. })
+    }
+
+    pub fn info_modal_open(&self) -> bool {
+        matches!(self.overlay, UiOverlay::InfoModal { .. })
+    }
+
+    pub fn model_picker_open(&self) -> bool {
+        matches!(self.overlay, UiOverlay::ModelPicker { .. })
+    }
+
+    pub fn permission_picker_open(&self) -> bool {
+        matches!(self.overlay, UiOverlay::PermissionPicker { .. })
+    }
+
+    pub fn agent_picker_open(&self) -> bool {
+        matches!(self.overlay, UiOverlay::AgentPicker { .. })
+    }
+
+    pub fn question_modal_open(&self) -> bool {
+        matches!(self.overlay, UiOverlay::QuestionModal { .. })
+    }
+
+    pub fn session_picker_open(&self) -> bool {
+        matches!(self.overlay, UiOverlay::SessionPicker { .. })
+    }
+
+    pub fn provider_picker_open(&self) -> bool {
+        matches!(self.overlay, UiOverlay::ProviderPicker { .. })
+    }
+
+    pub fn custom_provider_setup_open(&self) -> bool {
+        matches!(self.overlay, UiOverlay::CustomProviderSetup { .. })
+    }
+
+    pub fn command_palette_query(&self) -> &str {
+        match &self.overlay {
+            UiOverlay::CommandPalette { query, .. } => query.as_str(),
+            _ => "",
+        }
+    }
+
+    pub fn palette_index(&self) -> usize {
+        match &self.overlay {
+            UiOverlay::CommandPalette { palette_index, .. } => *palette_index,
+            _ => 0,
+        }
+    }
+
+    pub fn branch_picker_query(&self) -> &str {
+        match &self.overlay {
+            UiOverlay::BranchPicker { query, .. } => query.as_str(),
+            _ => "",
+        }
+    }
+
+    pub fn branch_picker_index(&self) -> usize {
+        match &self.overlay {
+            UiOverlay::BranchPicker { index, .. } => *index,
+            _ => 0,
+        }
+    }
+
+    pub fn branch_picker_branches(&self) -> &[String] {
+        match &self.overlay {
+            UiOverlay::BranchPicker { branches, .. } => branches.as_slice(),
+            _ => &[],
+        }
+    }
+
+    pub fn connect_search(&self) -> &str {
+        match &self.overlay {
+            UiOverlay::ConnectModal { search, .. } => search.as_str(),
+            _ => "",
+        }
+    }
+
+    pub fn connect_menu_index(&self) -> usize {
+        match &self.overlay {
+            UiOverlay::ConnectModal { menu_index, .. } => *menu_index,
+            _ => 0,
+        }
+    }
+
+    pub fn connect_modal_scroll(&self) -> usize {
+        match &self.overlay {
+            UiOverlay::ConnectModal { scroll, .. } => *scroll,
+            _ => 0,
+        }
+    }
+
+    pub fn api_key_target_provider(&self) -> Option<ProviderKind> {
+        match &self.overlay {
+            UiOverlay::ApiKeyModal { provider, .. } => Some(*provider),
+            _ => None,
+        }
+    }
+
+    pub fn api_key_input(&self) -> &str {
+        match &self.overlay {
+            UiOverlay::ApiKeyModal { input, .. } => input.as_str(),
+            _ => "",
+        }
+    }
+
+    pub fn api_key_target_has_existing(&self) -> bool {
+        matches!(
+            self.overlay,
+            UiOverlay::ApiKeyModal {
+                has_existing: true,
+                ..
+            }
+        )
+    }
+
+    pub fn api_key_connect_after_save(&self) -> bool {
+        matches!(
+            self.overlay,
+            UiOverlay::ApiKeyModal {
+                connect_after_save: true,
+                ..
+            }
+        )
+    }
+
+    pub fn info_modal_title(&self) -> &str {
+        match &self.overlay {
+            UiOverlay::InfoModal { title, .. } => title.as_str(),
+            _ => "",
+        }
+    }
+
+    pub fn info_modal_lines(&self) -> &[String] {
+        match &self.overlay {
+            UiOverlay::InfoModal { lines, .. } => lines.as_slice(),
+            _ => &[],
+        }
+    }
+
+    pub fn info_modal_scroll(&self) -> usize {
+        match &self.overlay {
+            UiOverlay::InfoModal { scroll, .. } => *scroll,
+            _ => 0,
+        }
+    }
+
+    pub fn model_picker_search(&self) -> &str {
+        match &self.overlay {
+            UiOverlay::ModelPicker { search, .. } => search.as_str(),
+            _ => "",
+        }
+    }
+
+    pub fn model_picker_index(&self) -> usize {
+        match &self.overlay {
+            UiOverlay::ModelPicker { index, .. } => *index,
+            _ => 0,
+        }
+    }
+
+    pub fn model_picker_entries(&self) -> &[ModelPickerEntry] {
+        match &self.overlay {
+            UiOverlay::ModelPicker { entries, .. } => entries.as_slice(),
+            _ => &[],
+        }
+    }
+
+    pub fn model_picker_scroll(&self) -> usize {
+        match &self.overlay {
+            UiOverlay::ModelPicker { scroll, .. } => *scroll,
+            _ => 0,
+        }
+    }
+
+    pub fn permission_picker_index(&self) -> usize {
+        match &self.overlay {
+            UiOverlay::PermissionPicker { index } => *index,
+            _ => 0,
+        }
+    }
+
+    pub fn agent_picker_index(&self) -> usize {
+        match &self.overlay {
+            UiOverlay::AgentPicker { index } => *index,
+            _ => 0,
+        }
+    }
+
+    pub fn question_modal_index(&self) -> usize {
+        match &self.overlay {
+            UiOverlay::QuestionModal { index, .. } => *index,
+            _ => 0,
+        }
+    }
+
+    pub fn question_modal_scroll(&self) -> usize {
+        match &self.overlay {
+            UiOverlay::QuestionModal { scroll, .. } => *scroll,
+            _ => 0,
+        }
+    }
+
+    pub fn session_picker_search(&self) -> &str {
+        match &self.overlay {
+            UiOverlay::SessionPicker { search, .. } => search.as_str(),
+            _ => "",
+        }
+    }
+
+    pub fn session_picker_index(&self) -> usize {
+        match &self.overlay {
+            UiOverlay::SessionPicker { index, .. } => *index,
+            _ => 0,
+        }
+    }
+
+    pub fn session_picker_entries(&self) -> &[String] {
+        match &self.overlay {
+            UiOverlay::SessionPicker { entries, .. } => entries.as_slice(),
+            _ => &[],
+        }
+    }
+
+    pub fn session_picker_scroll(&self) -> usize {
+        match &self.overlay {
+            UiOverlay::SessionPicker { scroll, .. } => *scroll,
+            _ => 0,
+        }
+    }
+
+    pub fn provider_picker_index(&self) -> usize {
+        match &self.overlay {
+            UiOverlay::ProviderPicker { index, .. } => *index,
+            _ => 0,
+        }
+    }
+
+    pub fn provider_picker_scroll(&self) -> usize {
+        match &self.overlay {
+            UiOverlay::ProviderPicker { scroll, .. } => *scroll,
+            _ => 0,
+        }
+    }
+
+    pub fn custom_provider_setup_step(&self) -> CustomProviderSetupStep {
+        match &self.overlay {
+            UiOverlay::CustomProviderSetup { step, .. } => *step,
+            _ => CustomProviderSetupStep::Compatibility,
+        }
+    }
+
+    pub fn custom_setup_compat_index(&self) -> usize {
+        match &self.overlay {
+            UiOverlay::CustomProviderSetup { compat_index, .. } => *compat_index,
+            _ => 0,
+        }
+    }
+
+    pub fn custom_setup_input(&self) -> &str {
+        match &self.overlay {
+            UiOverlay::CustomProviderSetup { input, .. } => input.as_str(),
+            _ => "",
+        }
+    }
+
+    pub fn custom_setup_base_url(&self) -> &str {
+        match &self.overlay {
+            UiOverlay::CustomProviderSetup { base_url, .. } => base_url.as_str(),
+            _ => "",
+        }
+    }
+
+    pub fn custom_setup_api_key(&self) -> &str {
+        match &self.overlay {
+            UiOverlay::CustomProviderSetup { api_key, .. } => api_key.as_str(),
+            _ => "",
+        }
+    }
+
+    pub fn custom_setup_model_hint(&self) -> &str {
+        match &self.overlay {
+            UiOverlay::CustomProviderSetup { model_hint, .. } => model_hint.as_str(),
+            _ => "",
+        }
+    }
+
+    pub fn command_palette_query_mut(&mut self) -> Option<&mut String> {
+        match &mut self.overlay {
+            UiOverlay::CommandPalette { query, .. } => Some(query),
+            _ => None,
+        }
+    }
+
+    pub fn palette_index_mut(&mut self) -> Option<&mut usize> {
+        match &mut self.overlay {
+            UiOverlay::CommandPalette { palette_index, .. } => Some(palette_index),
+            _ => None,
+        }
+    }
+
+    pub fn branch_picker_query_mut(&mut self) -> Option<&mut String> {
+        match &mut self.overlay {
+            UiOverlay::BranchPicker { query, .. } => Some(query),
+            _ => None,
+        }
+    }
+
+    pub fn branch_picker_index_mut(&mut self) -> Option<&mut usize> {
+        match &mut self.overlay {
+            UiOverlay::BranchPicker { index, .. } => Some(index),
+            _ => None,
+        }
+    }
+
+    pub fn branch_picker_branches_mut(&mut self) -> Option<&mut Vec<String>> {
+        match &mut self.overlay {
+            UiOverlay::BranchPicker { branches, .. } => Some(branches),
+            _ => None,
+        }
+    }
+
+    pub fn connect_search_mut(&mut self) -> Option<&mut String> {
+        match &mut self.overlay {
+            UiOverlay::ConnectModal { search, .. } => Some(search),
+            _ => None,
+        }
+    }
+
+    pub fn connect_menu_index_mut(&mut self) -> Option<&mut usize> {
+        match &mut self.overlay {
+            UiOverlay::ConnectModal { menu_index, .. } => Some(menu_index),
+            _ => None,
+        }
+    }
+
+    pub fn connect_modal_scroll_mut(&mut self) -> Option<&mut usize> {
+        match &mut self.overlay {
+            UiOverlay::ConnectModal { scroll, .. } => Some(scroll),
+            _ => None,
+        }
+    }
+
+    pub fn api_key_input_mut(&mut self) -> Option<&mut String> {
+        match &mut self.overlay {
+            UiOverlay::ApiKeyModal { input, .. } => Some(input),
+            _ => None,
+        }
+    }
+
+    pub fn info_modal_scroll_mut(&mut self) -> Option<&mut usize> {
+        match &mut self.overlay {
+            UiOverlay::InfoModal { scroll, .. } => Some(scroll),
+            _ => None,
+        }
+    }
+
+    pub fn model_picker_search_mut(&mut self) -> Option<&mut String> {
+        match &mut self.overlay {
+            UiOverlay::ModelPicker { search, .. } => Some(search),
+            _ => None,
+        }
+    }
+
+    pub fn model_picker_index_mut(&mut self) -> Option<&mut usize> {
+        match &mut self.overlay {
+            UiOverlay::ModelPicker { index, .. } => Some(index),
+            _ => None,
+        }
+    }
+
+    pub fn model_picker_scroll_mut(&mut self) -> Option<&mut usize> {
+        match &mut self.overlay {
+            UiOverlay::ModelPicker { scroll, .. } => Some(scroll),
+            _ => None,
+        }
+    }
+
+    pub fn model_picker_entries_mut(&mut self) -> Option<&mut Vec<ModelPickerEntry>> {
+        match &mut self.overlay {
+            UiOverlay::ModelPicker { entries, .. } => Some(entries),
+            _ => None,
+        }
+    }
+
+    pub fn permission_picker_index_mut(&mut self) -> Option<&mut usize> {
+        match &mut self.overlay {
+            UiOverlay::PermissionPicker { index } => Some(index),
+            _ => None,
+        }
+    }
+
+    pub fn agent_picker_index_mut(&mut self) -> Option<&mut usize> {
+        match &mut self.overlay {
+            UiOverlay::AgentPicker { index } => Some(index),
+            _ => None,
+        }
+    }
+
+    pub fn question_modal_index_mut(&mut self) -> Option<&mut usize> {
+        match &mut self.overlay {
+            UiOverlay::QuestionModal { index, .. } => Some(index),
+            _ => None,
+        }
+    }
+
+    pub fn question_modal_scroll_mut(&mut self) -> Option<&mut usize> {
+        match &mut self.overlay {
+            UiOverlay::QuestionModal { scroll, .. } => Some(scroll),
+            _ => None,
+        }
+    }
+
+    pub fn session_picker_search_mut(&mut self) -> Option<&mut String> {
+        match &mut self.overlay {
+            UiOverlay::SessionPicker { search, .. } => Some(search),
+            _ => None,
+        }
+    }
+
+    pub fn session_picker_index_mut(&mut self) -> Option<&mut usize> {
+        match &mut self.overlay {
+            UiOverlay::SessionPicker { index, .. } => Some(index),
+            _ => None,
+        }
+    }
+
+    pub fn session_picker_scroll_mut(&mut self) -> Option<&mut usize> {
+        match &mut self.overlay {
+            UiOverlay::SessionPicker { scroll, .. } => Some(scroll),
+            _ => None,
+        }
+    }
+
+    pub fn provider_picker_index_mut(&mut self) -> Option<&mut usize> {
+        match &mut self.overlay {
+            UiOverlay::ProviderPicker { index, .. } => Some(index),
+            _ => None,
+        }
+    }
+
+    pub fn provider_picker_scroll_mut(&mut self) -> Option<&mut usize> {
+        match &mut self.overlay {
+            UiOverlay::ProviderPicker { scroll, .. } => Some(scroll),
+            _ => None,
+        }
+    }
+
+    pub fn custom_setup_compat_index_mut(&mut self) -> Option<&mut usize> {
+        match &mut self.overlay {
+            UiOverlay::CustomProviderSetup { compat_index, .. } => Some(compat_index),
+            _ => None,
+        }
+    }
+
+    pub fn custom_setup_input_mut(&mut self) -> Option<&mut String> {
+        match &mut self.overlay {
+            UiOverlay::CustomProviderSetup { input, .. } => Some(input),
+            _ => None,
+        }
+    }
+
+    pub fn custom_provider_setup_step_mut(&mut self) -> Option<&mut CustomProviderSetupStep> {
+        match &mut self.overlay {
+            UiOverlay::CustomProviderSetup { step, .. } => Some(step),
+            _ => None,
+        }
+    }
+
+    pub fn custom_setup_base_url_mut(&mut self) -> Option<&mut String> {
+        match &mut self.overlay {
+            UiOverlay::CustomProviderSetup { base_url, .. } => Some(base_url),
+            _ => None,
+        }
+    }
+
+    pub fn custom_setup_api_key_mut(&mut self) -> Option<&mut String> {
+        match &mut self.overlay {
+            UiOverlay::CustomProviderSetup { api_key, .. } => Some(api_key),
+            _ => None,
+        }
+    }
+
+    pub fn custom_setup_model_hint_mut(&mut self) -> Option<&mut String> {
+        match &mut self.overlay {
+            UiOverlay::CustomProviderSetup { model_hint, .. } => Some(model_hint),
+            _ => None,
+        }
+    }
+
+    pub fn provider_picker_for_api_key(&self) -> bool {
+        matches!(
+            self.overlay,
+            UiOverlay::ProviderPicker {
+                for_api_key: true,
+                ..
+            }
+        )
+    }
+
+    pub fn provider_picker_include_add_row(&self) -> bool {
+        matches!(
+            self.overlay,
+            UiOverlay::ProviderPicker {
+                include_add_row: true,
+                ..
+            }
+        )
+    }
+
+    /// Bump the UI state version (forces a redraw on the next render tick).
+    #[inline]
+    pub fn mark_dirty(&mut self) {
+        self.state_version = self.state_version.wrapping_add(1);
+    }
+
+    /// Bump both the state version and the transcript version (invalidates
+    /// cached wrapped lines).
+    #[inline]
+    pub fn mark_transcript_dirty(&mut self) {
+        self.state_version = self.state_version.wrapping_add(1);
+        self.transcript_version = self.transcript_version.wrapping_add(1);
+    }
+
+    /// Throttled transcript invalidation while tokens stream in.
+    pub fn mark_streaming_update(&mut self, delta_len: usize) {
+        self.stream_chars_since_dirty += delta_len;
+        let now = Instant::now();
+        let elapsed = self
+            .last_stream_transcript_dirty
+            .map(|t| now.duration_since(t).as_millis())
+            .unwrap_or(u128::MAX);
+        if self.stream_chars_since_dirty >= STREAM_TRANSCRIPT_DIRTY_CHARS
+            || elapsed >= STREAM_TRANSCRIPT_DIRTY_MS
+        {
+            self.stream_chars_since_dirty = 0;
+            self.last_stream_transcript_dirty = Some(now);
+            self.mark_transcript_dirty();
+        } else {
+            self.mark_dirty();
+        }
+    }
+
+    pub fn flush_streaming_dirty(&mut self) {
+        if self.stream_chars_since_dirty > 0 {
+            self.stream_chars_since_dirty = 0;
+            self.mark_transcript_dirty();
         }
     }
 
     pub fn open_connect_modal(&mut self) {
-        self.connect_modal_open = true;
-        self.connect_search.clear();
-        self.connect_menu_index = 0;
-        self.connect_modal_scroll = 0;
+        self.set_overlay(UiOverlay::ConnectModal {
+            search: String::new(),
+            menu_index: 0,
+            scroll: 0,
+        });
     }
 
     pub fn close_connect_modal(&mut self) {
-        self.connect_modal_open = false;
-        self.connect_search.clear();
-        self.connect_menu_index = 0;
-        self.connect_modal_scroll = 0;
+        if self.connect_modal_open() {
+            self.close_overlay();
+        }
     }
 
     pub fn open_api_key_modal(
@@ -326,177 +846,186 @@ impl TuiSessionState {
         has_existing: bool,
         connect_after_save: bool,
     ) {
-        self.api_key_modal_open = true;
-        self.api_key_target_provider = Some(provider);
-        self.api_key_input.clear();
-        self.api_key_target_has_existing = has_existing;
-        self.api_key_connect_after_save = connect_after_save;
         self.validation_status = None;
+        self.set_overlay(UiOverlay::ApiKeyModal {
+            provider,
+            input: String::new(),
+            has_existing,
+            connect_after_save,
+        });
     }
 
     pub fn close_api_key_modal(&mut self) {
-        self.api_key_modal_open = false;
-        self.api_key_target_provider = None;
-        self.api_key_input.clear();
-        self.api_key_target_has_existing = false;
-        self.api_key_connect_after_save = false;
-        self.validation_status = None;
+        if self.api_key_modal_open() {
+            self.validation_status = None;
+            self.close_overlay();
+        }
     }
 
     pub fn open_info_modal(&mut self, title: impl Into<String>, lines: Vec<String>) {
-        self.info_modal_open = true;
-        self.info_modal_title = title.into();
-        self.info_modal_lines = lines;
-        self.info_modal_scroll = 0;
+        self.set_overlay(UiOverlay::InfoModal {
+            title: title.into(),
+            lines,
+            scroll: 0,
+        });
     }
 
     pub fn close_info_modal(&mut self) {
-        self.info_modal_open = false;
-        self.info_modal_title.clear();
-        self.info_modal_lines.clear();
-        self.info_modal_scroll = 0;
+        if self.info_modal_open() {
+            self.close_overlay();
+        }
     }
 
     pub fn open_model_picker(&mut self, entries: Vec<ModelPickerEntry>) {
-        self.model_picker_open = true;
-        self.model_picker_search.clear();
-        self.model_picker_index = 0;
-        self.model_picker_scroll = 0;
-        self.model_picker_entries = entries;
+        self.set_overlay(UiOverlay::ModelPicker {
+            search: String::new(),
+            index: 0,
+            entries,
+            scroll: 0,
+        });
     }
 
     pub fn close_model_picker(&mut self) {
-        self.model_picker_open = false;
-        self.model_picker_search.clear();
-        self.model_picker_index = 0;
-        self.model_picker_scroll = 0;
-        self.model_picker_entries.clear();
+        if self.model_picker_open() {
+            self.close_overlay();
+        }
     }
 
     pub fn open_permission_picker(&mut self, current_index: usize) {
-        self.permission_picker_open = true;
-        self.permission_picker_index = current_index;
+        self.set_overlay(UiOverlay::PermissionPicker {
+            index: current_index,
+        });
     }
 
     pub fn close_permission_picker(&mut self) {
-        self.permission_picker_open = false;
-        self.permission_picker_index = 0;
+        if self.permission_picker_open() {
+            self.close_overlay();
+        }
     }
 
     pub fn open_agent_picker(&mut self, current_index: usize) {
-        self.agent_picker_open = true;
-        self.agent_picker_index = current_index;
+        self.set_overlay(UiOverlay::AgentPicker {
+            index: current_index,
+        });
     }
 
     pub fn close_agent_picker(&mut self) {
-        self.agent_picker_open = false;
-        self.agent_picker_index = 0;
+        if self.agent_picker_open() {
+            self.close_overlay();
+        }
     }
 
     pub fn open_question_modal(&mut self) {
-        self.question_modal_open = true;
-        self.question_modal_index = 0;
-        self.question_modal_scroll = 0;
+        self.set_overlay(UiOverlay::QuestionModal {
+            index: 0,
+            scroll: 0,
+        });
     }
 
     pub fn close_question_modal(&mut self) {
-        self.question_modal_open = false;
-        self.question_modal_index = 0;
-        self.question_modal_scroll = 0;
+        if self.question_modal_open() {
+            self.close_overlay();
+        }
     }
 
     pub fn open_session_picker(&mut self, entries: Vec<String>, current: &str) {
-        self.session_picker_open = true;
-        self.session_picker_search.clear();
-        self.session_picker_index = entries.iter().position(|e| e == current).unwrap_or(0);
-        self.session_picker_entries = entries;
-        self.session_picker_scroll = 0;
+        let index = entries.iter().position(|e| e == current).unwrap_or(0);
+        self.set_overlay(UiOverlay::SessionPicker {
+            search: String::new(),
+            index,
+            entries,
+            scroll: 0,
+        });
     }
 
     pub fn close_session_picker(&mut self) {
-        self.session_picker_open = false;
-        self.session_picker_search.clear();
-        self.session_picker_index = 0;
-        self.session_picker_entries.clear();
-        self.session_picker_scroll = 0;
+        if self.session_picker_open() {
+            self.close_overlay();
+        }
     }
 
     pub fn open_provider_picker(&mut self, current: ProviderKind, for_api_key: bool) {
-        self.provider_picker_open = true;
-        self.provider_picker_for_api_key = for_api_key;
-        self.provider_picker_include_add_row = !for_api_key;
-        self.provider_picker_scroll = 0;
-        self.provider_picker_index = ProviderKind::ALL
+        let index = ProviderKind::ALL
             .iter()
             .position(|p| *p == current)
             .unwrap_or(0);
+        self.set_overlay(UiOverlay::ProviderPicker {
+            index,
+            scroll: 0,
+            for_api_key,
+            include_add_row: !for_api_key,
+        });
         self.sync_provider_picker_scroll();
     }
 
     pub fn close_provider_picker(&mut self) {
-        self.provider_picker_open = false;
-        self.provider_picker_for_api_key = false;
-        self.provider_picker_include_add_row = false;
-        self.provider_picker_scroll = 0;
+        if self.provider_picker_open() {
+            self.close_overlay();
+        }
     }
 
     /// Row count for the open provider picker (built-ins plus optional “Add custom…” row).
     pub fn provider_picker_visible_row_count(&self) -> usize {
-        ProviderKind::ALL.len() + usize::from(self.provider_picker_include_add_row)
+        ProviderKind::ALL.len() + usize::from(self.provider_picker_include_add_row())
     }
 
     /// Max provider rows shown at once (smaller than [`ProviderKind::ALL`] so short terminals can scroll).
     pub const PROVIDER_PICKER_VISIBLE_ROWS: usize = 4;
 
-    /// Keep [`provider_picker_index`](Self::provider_picker_index) inside the visible window.
+    /// Keep provider picker index inside the visible window.
     pub fn sync_provider_picker_scroll(&mut self) {
         let n = self.provider_picker_visible_row_count();
         let cap = Self::PROVIDER_PICKER_VISIBLE_ROWS.min(n.max(1));
-        if self.provider_picker_index < self.provider_picker_scroll {
-            self.provider_picker_scroll = self.provider_picker_index;
+        let UiOverlay::ProviderPicker { index, scroll, .. } = &mut self.overlay else {
+            return;
+        };
+        if *index < *scroll {
+            *scroll = *index;
         }
-        while self.provider_picker_index >= self.provider_picker_scroll + cap {
-            self.provider_picker_scroll += 1;
+        while *index >= *scroll + cap {
+            *scroll += 1;
         }
         let max_scroll = n.saturating_sub(cap);
-        if self.provider_picker_scroll > max_scroll {
-            self.provider_picker_scroll = max_scroll;
+        if *scroll > max_scroll {
+            *scroll = max_scroll;
         }
     }
 
     pub fn open_custom_provider_setup(&mut self, model_hint: impl Into<String>) {
-        self.custom_provider_setup_open = true;
-        self.custom_provider_setup_step = CustomProviderSetupStep::Compatibility;
-        self.custom_setup_compat_index = 0;
-        self.custom_setup_input.clear();
-        self.custom_setup_base_url.clear();
-        self.custom_setup_api_key.clear();
-        self.custom_setup_model_hint = model_hint.into();
+        self.set_overlay(UiOverlay::CustomProviderSetup {
+            step: CustomProviderSetupStep::Compatibility,
+            compat_index: 0,
+            input: String::new(),
+            base_url: String::new(),
+            api_key: String::new(),
+            model_hint: model_hint.into(),
+        });
     }
 
     pub fn close_custom_provider_setup(&mut self) {
-        self.custom_provider_setup_open = false;
-        self.custom_provider_setup_step = CustomProviderSetupStep::Compatibility;
-        self.custom_setup_compat_index = 0;
-        self.custom_setup_input.clear();
-        self.custom_setup_base_url.clear();
-        self.custom_setup_api_key.clear();
-        self.custom_setup_model_hint.clear();
+        if self.custom_provider_setup_open() {
+            self.close_overlay();
+        }
     }
 
     pub fn set_busy(&mut self, busy: bool) {
-        self.busy = busy;
+        if self.busy != busy {
+            self.busy = busy;
+            self.mark_dirty();
+        }
     }
 
     pub fn set_busy_state(&mut self, state: BusyState) {
         if self.current_busy_state != state {
             self.current_busy_state = state;
             self.busy_state_since = Instant::now();
+            self.mark_dirty();
         }
     }
 
     pub fn push_error(&mut self, msg: String) {
         self.blocks.push(DisplayBlock::ErrorLine(msg));
+        self.mark_transcript_dirty();
     }
 
     /// Approval/question prompts from replayed history are transcript only.
@@ -527,21 +1056,31 @@ impl TuiSessionState {
     }
 
     pub fn open_branch_picker(&mut self, branches: Vec<String>, current: &str) {
-        self.branch_picker_branches = branches;
-        self.branch_picker_query.clear();
-        self.branch_picker_index = self
-            .branch_picker_branches
-            .iter()
-            .position(|b| b == current)
-            .unwrap_or(0);
-        self.branch_picker_open = true;
+        let index = branches.iter().position(|b| b == current).unwrap_or(0);
+        self.set_overlay(UiOverlay::BranchPicker {
+            query: String::new(),
+            index,
+            branches,
+        });
     }
 
     pub fn close_branch_picker(&mut self) {
-        self.branch_picker_open = false;
-        self.branch_picker_query.clear();
-        self.branch_picker_branches.clear();
-        self.branch_picker_index = 0;
+        if self.branch_picker_open() {
+            self.close_overlay();
+        }
+    }
+
+    pub fn open_command_palette(&mut self) {
+        self.set_overlay(UiOverlay::CommandPalette {
+            query: String::new(),
+            palette_index: 0,
+        });
+    }
+
+    pub fn close_command_palette(&mut self) {
+        if self.command_palette_open() {
+            self.close_overlay();
+        }
     }
 
     pub fn set_permission_mode(&mut self, mode: &str) {
@@ -557,6 +1096,13 @@ impl TuiSessionState {
     }
 
     pub fn apply_event(&mut self, e: &AgentEvent) {
+        // Cheap events (cost/checkpoint) only dirty the status surface; everything
+        // else also invalidates the wrapped transcript cache.
+        match e {
+            AgentEvent::CostUpdated { .. } | AgentEvent::Checkpoint { .. } => self.mark_dirty(),
+            AgentEvent::TokensStreamed { .. } => {}
+            _ => self.mark_transcript_dirty(),
+        }
         match e {
             AgentEvent::SessionStarted {
                 session_id,
@@ -567,8 +1113,12 @@ impl TuiSessionState {
                 self.model = model.clone();
                 self.workspace_root = workspace.clone();
                 self.workspace_display = workspace.display().to_string();
+                if self.todos.session_id != *session_id {
+                    self.todos = TodoList::new(session_id.clone());
+                }
             }
             AgentEvent::MessageReceived { role, content } => {
+                self.flush_streaming_dirty();
                 if role == "user" {
                     self.streaming_assistant = None;
                     self.blocks.push(DisplayBlock::User(content.clone()));
@@ -583,6 +1133,7 @@ impl TuiSessionState {
                 self.streaming_assistant
                     .get_or_insert_with(String::new)
                     .push_str(delta);
+                self.mark_streaming_update(delta.len());
                 self.set_busy_state(BusyState::Streaming);
             }
             AgentEvent::ToolCallStarted {
@@ -595,8 +1146,32 @@ impl TuiSessionState {
                     name: tool.clone(),
                     call_id: call_id.clone(),
                     input: format_tool_input_for_display(tool, input),
+                    live_output: Vec::new(),
                 });
                 self.set_busy_state(BusyState::ToolRunning);
+            }
+            AgentEvent::ToolOutputChunk {
+                call_id,
+                stream: _,
+                data,
+            } => {
+                if let Some(DisplayBlock::ToolRunning { live_output, .. }) =
+                    self.blocks.iter_mut().rev().find(|b| {
+                        matches!(b, DisplayBlock::ToolRunning { call_id: id, .. } if id == call_id)
+                    })
+                {
+                    for line in data.split('\n') {
+                        if line.is_empty() {
+                            continue;
+                        }
+                        live_output.push(line.to_string());
+                    }
+                    const MAX_LIVE_LINES: usize = 8;
+                    let len = live_output.len();
+                    if len > MAX_LIVE_LINES {
+                        live_output.drain(0..len - MAX_LIVE_LINES);
+                    }
+                }
             }
             AgentEvent::ToolCallCompleted { call_id, output } => {
                 let ok = output.success;
@@ -743,6 +1318,8 @@ impl TuiSessionState {
                         detail: String::new(),
                         running: true,
                         skill: None,
+                        tokens_in: 0,
+                        tokens_out: 0,
                     });
                 }
                 self.blocks.push(DisplayBlock::System(format!(
@@ -757,33 +1334,68 @@ impl TuiSessionState {
             } => {
                 let short = short_session_prefix(child_session_id);
                 let d = truncate(detail, 120);
+                let (parsed_in, parsed_out) = if phase == "tokens" {
+                    let mut parts = detail.splitn(2, '/');
+                    let i = parts
+                        .next()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    let o = parts
+                        .next()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    (Some(i), Some(o))
+                } else {
+                    (None, None)
+                };
                 if let Some(row) = self
                     .subagents
                     .iter_mut()
                     .find(|r| r.id == *child_session_id)
                 {
-                    row.phase = phase.clone();
-                    row.detail = d.clone();
+                    if phase != "tokens" {
+                        row.phase = phase.clone();
+                        row.detail = d.clone();
+                    }
                     row.running = true;
                     if phase == "skill" || phase == "invoke_skill" {
                         row.skill = Some(detail.clone());
+                    }
+                    if let (Some(i), Some(o)) = (parsed_in, parsed_out) {
+                        row.tokens_in = i;
+                        row.tokens_out = o;
                     }
                 } else {
                     self.subagents.push(SubagentRow {
                         id: child_session_id.clone(),
                         task: "(sub-agent)".into(),
-                        phase: phase.clone(),
-                        detail: d.clone(),
+                        phase: if phase == "tokens" {
+                            String::new()
+                        } else {
+                            phase.clone()
+                        },
+                        detail: if phase == "tokens" {
+                            String::new()
+                        } else {
+                            d.clone()
+                        },
                         running: true,
                         skill: if phase == "skill" || phase == "invoke_skill" {
                             Some(detail.clone())
                         } else {
                             None
                         },
+                        tokens_in: parsed_in.unwrap_or(0),
+                        tokens_out: parsed_out.unwrap_or(0),
                     });
                 }
-                self.blocks
-                    .push(DisplayBlock::System(format!("↳ {short}… · {phase} · {d}")));
+                if phase != "tokens" {
+                    self.blocks.push(DisplayBlock::ChildActivity {
+                        session_prefix: short.to_string(),
+                        phase: phase.clone(),
+                        detail: d.clone(),
+                    });
+                }
             }
             AgentEvent::ChildSessionCompleted {
                 child_session_id,
@@ -807,8 +1419,18 @@ impl TuiSessionState {
             AgentEvent::BusyStateChanged { state } => {
                 self.set_busy_state(*state);
             }
+            AgentEvent::TodosUpdated { todos, .. } => {
+                self.apply_todos(todos.clone());
+            }
             _ => {}
         }
+    }
+
+    /// Replace the in-memory todo snapshot (used by `TodosUpdated` + session
+    /// replay bootstrap). Preserves `created_at` on existing ids so the UI
+    /// can show a stable ordering across edits.
+    pub fn apply_todos(&mut self, todos: Vec<TodoItem>) {
+        self.todos.replace_with(todos);
     }
 }
 
@@ -1003,19 +1625,21 @@ mod tests {
             "default".into(),
             PathBuf::from("/tmp"),
         );
-        assert!(!st.question_modal_open);
-        assert_eq!(st.question_modal_index, 0);
+        assert!(!st.question_modal_open());
+        assert_eq!(st.question_modal_index(), 0);
 
         st.open_question_modal();
-        assert!(st.question_modal_open);
-        assert_eq!(st.question_modal_index, 0);
-        assert_eq!(st.question_modal_scroll, 0);
+        assert!(st.question_modal_open());
+        assert_eq!(st.question_modal_index(), 0);
+        assert_eq!(st.question_modal_scroll(), 0);
 
-        st.question_modal_index = 3;
+        st.set_overlay(UiOverlay::QuestionModal {
+            index: 3,
+            scroll: 0,
+        });
         st.close_question_modal();
-        assert!(!st.question_modal_open);
-        assert_eq!(st.question_modal_index, 0);
-        assert_eq!(st.question_modal_scroll, 0);
+        assert!(!st.question_modal_open());
+        assert_eq!(st.overlay, UiOverlay::None);
     }
 
     #[test]
@@ -1041,8 +1665,8 @@ mod tests {
         st.apply_event(&AgentEvent::QuestionRequested {
             question: q.clone(),
         });
-        assert!(st.question_modal_open);
-        assert_eq!(st.question_modal_index, 0);
+        assert!(st.question_modal_open());
+        assert_eq!(st.question_modal_index(), 0);
         assert!(st.active_question.is_some());
     }
 
@@ -1055,14 +1679,39 @@ mod tests {
             "default".into(),
             PathBuf::from("/tmp"),
         );
-        st.question_modal_open = true;
-        st.question_modal_index = 2;
+        st.set_overlay(UiOverlay::QuestionModal {
+            index: 2,
+            scroll: 0,
+        });
         st.apply_event(&AgentEvent::QuestionResolved {
             question_id: "q-1".into(),
             selection: QuestionSelection::Suggested,
         });
         assert!(st.active_question.is_none());
-        assert!(!st.question_modal_open);
-        assert_eq!(st.question_modal_index, 0);
+        assert!(!st.question_modal_open());
+        assert_eq!(st.question_modal_index(), 0);
+    }
+
+    #[test]
+    fn streaming_stress_many_tokens_throttles_transcript_version() {
+        let mut st = TuiSessionState::new(
+            "s".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+        );
+        let start_tv = st.transcript_version;
+        for i in 0..500 {
+            st.apply_event(&AgentEvent::TokensStreamed {
+                delta: format!("tok{i} "),
+            });
+        }
+        let bumps = st.transcript_version - start_tv;
+        assert!(
+            bumps < 50,
+            "expected throttled transcript invalidation, got {bumps} bumps"
+        );
+        assert!(st.state_version > start_tv + 100);
     }
 }

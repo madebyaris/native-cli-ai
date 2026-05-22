@@ -1,0 +1,11 @@
+---
+source: crates/common/tests/event_envelopes.rs
+expression: log
+---
+{"schema_version":1,"id":1,"ts":"2026-01-01T00:00:00Z","event":{"type":"SessionStarted","session_id":"sess-abc","workspace":"/tmp/workspace","model":"MiniMax-M2.5"}}
+{"schema_version":1,"id":2,"ts":"2026-01-01T00:00:00Z","event":{"type":"BusyStateChanged","state":"streaming"}}
+{"schema_version":1,"id":3,"ts":"2026-01-01T00:00:00Z","event":{"type":"TokensStreamed","delta":"Hello"}}
+{"schema_version":1,"id":4,"ts":"2026-01-01T00:00:00Z","event":{"type":"ToolCallStarted","call_id":"call-1","tool":"list_files","input":{"glob":"src/**/*.rs"}}}
+{"schema_version":1,"id":5,"ts":"2026-01-01T00:00:00Z","event":{"type":"ToolCallCompleted","call_id":"call-1","output":{"call_id":"call-1","success":true,"output":"src/main.rs\nsrc/lib.rs"}}}
+{"schema_version":1,"id":6,"ts":"2026-01-01T00:00:00Z","event":{"type":"CostUpdated","input_tokens":128,"output_tokens":64,"estimated_cost_usd":0.000192}}
+{"schema_version":1,"id":7,"ts":"2026-01-01T00:00:00Z","event":{"type":"SessionEnded","reason":"completed"}}

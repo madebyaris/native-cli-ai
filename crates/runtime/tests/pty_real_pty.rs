@@ -1,5 +1,7 @@
 //! Integration test that shell commands run inside a real PTY (not a pipe).
 
+#![allow(clippy::pedantic, dead_code, unused_imports, unused_mut)]
+
 use nca_runtime::pty::PtyManager;
 
 #[tokio::test]

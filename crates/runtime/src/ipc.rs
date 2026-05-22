@@ -38,7 +38,10 @@ impl IpcServer {
             .map_err(|err| IpcError::ConnectionFailed(err.to_string()))?;
         let (event_tx, _) = broadcast::channel::<String>(256);
         let accept_event_tx = event_tx.clone();
-        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        // Bounded command queue: clients should never be able to fill memory
+        // with unacknowledged commands. 64 pending is plenty for interactive
+        // approval/answer/shutdown traffic.
+        let (command_tx, command_rx) = mpsc::channel::<AgentCommand>(64);
         let socket_path = self.socket_path.clone();
 
         tokio::spawn(async move {
@@ -64,7 +67,7 @@ impl IpcServer {
 pub struct IpcHandle {
     socket_path: PathBuf,
     event_tx: broadcast::Sender<String>,
-    command_rx: mpsc::UnboundedReceiver<AgentCommand>,
+    command_rx: mpsc::Receiver<AgentCommand>,
 }
 
 impl IpcHandle {
@@ -84,12 +87,7 @@ impl IpcHandle {
     }
 
     /// Split into parts for separate tasks: event broadcast and command receiver.
-    pub fn into_parts(
-        self,
-    ) -> (
-        broadcast::Sender<String>,
-        mpsc::UnboundedReceiver<AgentCommand>,
-    ) {
+    pub fn into_parts(self) -> (broadcast::Sender<String>, mpsc::Receiver<AgentCommand>) {
         (self.event_tx, self.command_rx)
     }
 }
@@ -150,14 +148,18 @@ pub enum IpcError {
 async fn handle_connection(
     stream: UnixStream,
     mut event_rx: broadcast::Receiver<String>,
-    command_tx: mpsc::UnboundedSender<AgentCommand>,
+    command_tx: mpsc::Sender<AgentCommand>,
 ) {
     let (reader, mut writer) = stream.into_split();
     let read_task = tokio::spawn(async move {
         let mut lines = BufReader::new(reader).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             if let Ok(command) = serde_json::from_str::<AgentCommand>(&line) {
-                let _ = command_tx.send(command);
+                // Async send applies natural backpressure when the supervisor
+                // is slow; drop the connection if the receiver is gone.
+                if command_tx.send(command).await.is_err() {
+                    break;
+                }
             }
         }
     });

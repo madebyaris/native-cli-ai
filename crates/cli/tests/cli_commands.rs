@@ -1,6 +1,14 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    dead_code,
+    unused_imports,
+    unused_variables
+)]
+
 use assert_cmd::Command;
 use chrono::{Duration, Utc};
-use nca_common::message::Message;
+use nca_common::message::{ContentPart, Message};
 use nca_common::session::{SessionMeta, SessionState, SessionStatus};
 use serde_json::Value;
 use std::fs;
@@ -28,6 +36,7 @@ fn write_session(
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
 
     let session = SessionState {
+        schema_version: 1,
         meta: SessionMeta {
             id: id.to_string(),
             created_at: updated_at - Duration::minutes(1),
@@ -405,6 +414,7 @@ model = "claude-3-7-sonnet-latest"
         .expect("binary")
         .current_dir(temp.path())
         .env("HOME", temp.path())
+        .env("NCA_DOCTOR_SKIP_NETWORK", "1")
         .arg("doctor")
         .arg("--json")
         .assert()
@@ -433,6 +443,33 @@ model = "claude-3-7-sonnet-latest"
             && entry["selected"] == false
             && entry["api_key_present"] == false
     }));
+    assert!(
+        providers
+            .iter()
+            .all(|entry| entry["preflight"] == "skipped")
+    );
+}
+
+#[test]
+fn models_verbose_json_includes_retry_table() {
+    let temp = tempdir().expect("tempdir");
+    write_local_config(temp.path());
+
+    let output = Command::cargo_bin("nca")
+        .expect("binary")
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .args(["models", "--json", "--verbose"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let payload: Value = serde_json::from_slice(&output).expect("json");
+    let retry = payload["retry"].as_object().expect("retry object");
+    assert_eq!(retry["max_empty_response_retries"], 2);
+    assert!(retry["empty_response_backoff_initial_ms"].as_u64().unwrap() > 0);
 }
 
 #[test]
@@ -514,4 +551,197 @@ fn index_show_and_build_json_status() {
     let status: Value = serde_json::from_slice(&out).expect("status json");
     assert!(status["path"].as_str().unwrap().contains("cli-index.json"));
     assert!(status["workspace_id"].as_str().unwrap().len() > 10);
+}
+
+/// 1×1 RGBA PNG (valid, tiny).
+const ONE_BY_ONE_PNG: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+    0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+    0x42, 0x60, 0x82,
+];
+
+fn write_session_state(workspace: &Path, state: SessionState) {
+    let sessions_dir = workspace.join(".nca").join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("sessions dir");
+    let id = state.meta.id.clone();
+    let json = serde_json::to_string_pretty(&state).expect("serialize session");
+    fs::write(sessions_dir.join(format!("{id}.json")), json).expect("write session");
+}
+
+#[test]
+fn export_json_resolves_unique_prefix() {
+    let temp = tempdir().expect("tempdir");
+    let now = Utc::now();
+    write_local_config(temp.path());
+    write_session(
+        temp.path(),
+        "abc-export-full-id",
+        now,
+        "MiniMax-M2.5",
+        SessionStatus::Completed,
+    );
+
+    Command::cargo_bin("nca")
+        .expect("binary")
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .args(["export", "abc-exp", "--format", "json"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("abc-export-full-id"))
+        .stdout(predicates::str::contains("hello"));
+}
+
+#[test]
+fn export_fails_on_ambiguous_prefix() {
+    let temp = tempdir().expect("tempdir");
+    let now = Utc::now();
+    write_local_config(temp.path());
+    write_session(
+        temp.path(),
+        "dup111",
+        now,
+        "MiniMax-M2.5",
+        SessionStatus::Completed,
+    );
+    write_session(
+        temp.path(),
+        "dup222",
+        now,
+        "MiniMax-M2.5",
+        SessionStatus::Completed,
+    );
+
+    Command::cargo_bin("nca")
+        .expect("binary")
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .args(["export", "dup", "--format", "json"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("ambiguous"));
+}
+
+#[test]
+fn export_html_inlines_image_when_requested() {
+    let temp = tempdir().expect("tempdir");
+    let now = Utc::now();
+    write_local_config(temp.path());
+
+    let img_rel = ".nca/sessions/vision-test/tiny.png";
+    let img_path = temp.path().join(img_rel);
+    fs::create_dir_all(img_path.parent().expect("parent")).expect("dirs");
+    fs::write(&img_path, ONE_BY_ONE_PNG).expect("png");
+
+    let state = SessionState {
+        schema_version: 1,
+        meta: SessionMeta {
+            id: "vision-test".to_string(),
+            created_at: now - Duration::minutes(1),
+            updated_at: now,
+            workspace: temp.path().to_path_buf(),
+            model: "MiniMax-M2.5".to_string(),
+            status: SessionStatus::Completed,
+            pid: None,
+            socket_path: None,
+            worktree_path: None,
+            branch: None,
+            base_branch: None,
+            parent_session_id: None,
+            child_session_ids: Vec::new(),
+            inherited_summary: None,
+            spawn_reason: None,
+            session_summary: None,
+            orchestration: None,
+        },
+        messages: vec![Message::user_with_parts(vec![
+            ContentPart::Text {
+                text: "describe this".into(),
+            },
+            ContentPart::Image {
+                media_type: "image/png".into(),
+                path: img_rel.replace('\\', "/"),
+            },
+        ])],
+        total_input_tokens: 1,
+        total_output_tokens: 2,
+        estimated_cost_usd: 0.0,
+    };
+    write_session_state(temp.path(), state);
+
+    Command::cargo_bin("nca")
+        .expect("binary")
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .args([
+            "export",
+            "vision-test",
+            "--format",
+            "html",
+            "--inline-images",
+            "on",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("data:image/png;base64,"));
+}
+
+#[test]
+fn cancel_json_marks_session_cancelled_without_live_socket() {
+    let temp = tempdir().expect("tempdir");
+    write_local_config(temp.path());
+    write_session(
+        temp.path(),
+        "cancel-me",
+        Utc::now(),
+        "MiniMax-M2.5",
+        SessionStatus::Running,
+    );
+
+    let output = Command::cargo_bin("nca")
+        .expect("binary")
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .args(["cancel", "cancel-me", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).expect("parse cancel json");
+    assert_eq!(json["cancelled"], true);
+    assert_eq!(json["session"]["status"], "cancelled");
+}
+
+#[test]
+fn run_subcommand_accepts_stream_ndjson_flag() {
+    Command::cargo_bin("nca")
+        .expect("binary")
+        .args(["run", "--help"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("--stream"));
+}
+
+#[test]
+fn attach_subcommand_accepts_json_flag() {
+    Command::cargo_bin("nca")
+        .expect("binary")
+        .args(["attach", "--help"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("--json"));
+}
+
+#[test]
+fn logs_subcommand_accepts_follow_flag() {
+    Command::cargo_bin("nca")
+        .expect("binary")
+        .args(["logs", "--help"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("--follow"));
 }

@@ -1,0 +1,17 @@
+pub mod attach;
+pub mod autoresearch;
+pub mod completion;
+pub mod doctor;
+pub mod export;
+pub mod index;
+pub mod init;
+pub mod interactive;
+pub mod mcp;
+pub mod memory;
+pub mod models;
+pub mod run;
+pub mod sessions;
+pub mod skills;
+pub mod spawn;
+pub mod upgrade;
+pub mod util;

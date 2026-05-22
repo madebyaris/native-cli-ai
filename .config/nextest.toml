@@ -1,0 +1,41 @@
+# cargo-nextest configuration
+# Docs: https://nexte.st/book/configuration.html
+
+[profile.default]
+# Fail fast locally, but still surface a useful summary.
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 3 }
+failure-output = "immediate-final"
+success-output = "never"
+status-level = "pass"
+final-status-level = "fail"
+
+# CI profile with retries for flaky network/IPC tests + JUnit output.
+[profile.ci]
+fail-fast = false
+slow-timeout = { period = "120s", terminate-after = 2 }
+retries = { backoff = "exponential", count = 2, delay = "2s", max-delay = "20s" }
+failure-output = "immediate-final"
+success-output = "never"
+status-level = "pass"
+final-status-level = "slow"
+
+[profile.ci.junit]
+path = "junit.xml"
+report-name = "nca-nextest"
+store-success-output = false
+store-failure-output = true
+
+# Integration-test binaries (they spawn the `nca` process, touch the
+# filesystem, and hit Unix sockets) run serially so they don't trample each
+# other's temp workspaces.
+[[profile.default.overrides]]
+filter = "binary(cli_commands) or test(integration_)"
+test-group = "integration"
+
+[[profile.ci.overrides]]
+filter = "binary(cli_commands) or test(integration_)"
+test-group = "integration"
+
+[test-groups]
+integration = { max-threads = 1 }

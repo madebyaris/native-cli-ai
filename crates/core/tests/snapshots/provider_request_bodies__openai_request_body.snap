@@ -1,0 +1,43 @@
+---
+source: crates/core/tests/provider_request_bodies.rs
+expression: body
+---
+{
+  "max_tokens": 4096,
+  "messages": [
+    {
+      "content": "You are nca, a Rust-native coding agent.",
+      "role": "system"
+    },
+    {
+      "content": "list the files in src/",
+      "role": "user"
+    }
+  ],
+  "model": "gpt-4o-mini",
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  },
+  "temperature": 0.699999988079071,
+  "tools": [
+    {
+      "function": {
+        "description": "List workspace files matching a glob.",
+        "name": "list_files",
+        "parameters": {
+          "properties": {
+            "glob": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "glob"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    }
+  ]
+}

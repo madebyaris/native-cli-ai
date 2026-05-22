@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
+use std::fmt::Write as _;
 
 /// Role in a conversation turn.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -43,10 +44,12 @@ pub enum MessageContent {
 }
 
 impl MessageContent {
+    #[must_use]
     pub fn text(s: impl Into<String>) -> Self {
         MessageContent::Text(s.into())
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         match self {
             MessageContent::Text(t) => t.is_empty(),
@@ -55,6 +58,7 @@ impl MessageContent {
     }
 
     /// Approximate character weight for context heuristics (images count as fixed overhead).
+    #[must_use]
     pub fn approx_chars(&self) -> usize {
         match self {
             MessageContent::Text(t) => t.len(),
@@ -73,6 +77,7 @@ impl MessageContent {
         }
     }
 
+    #[must_use]
     pub fn has_image_parts(&self) -> bool {
         matches!(self, MessageContent::Parts(parts) if parts.iter().any(|p| matches!(p, ContentPart::Image { .. })))
     }
@@ -119,6 +124,7 @@ impl MessageContent {
     }
 
     /// Short string for events / TUI (no base64).
+    #[must_use]
     pub fn event_preview(&self) -> String {
         match self {
             MessageContent::Text(t) => t.clone(),
@@ -140,7 +146,7 @@ impl MessageContent {
                     if !text.is_empty() && !text.chars().last().is_some_and(char::is_whitespace) {
                         text.push(' ');
                     }
-                    text.push_str(&format!("[{images} image(s)]"));
+                    let _ = write!(text, "[{images} image(s)]");
                 }
                 text
             }
@@ -149,6 +155,7 @@ impl MessageContent {
 
     /// Preview for user-authored content. Expanded ` ```file:path ` blocks are compacted back to
     /// `@path` so the transcript stays readable while the model still receives full file contents.
+    #[must_use]
     pub fn user_event_preview(&self) -> String {
         collapse_expanded_file_blocks(&self.event_preview())
             .trim()
@@ -156,6 +163,7 @@ impl MessageContent {
     }
 
     /// Plain text only; images become placeholders (for summary prompts).
+    #[must_use]
     pub fn to_summary_text(&self) -> String {
         match self {
             MessageContent::Text(t) => t.clone(),
@@ -173,7 +181,7 @@ impl MessageContent {
                             if !out.is_empty() {
                                 out.push('\n');
                             }
-                            out.push_str(&format!("[image attachment: {path}]"));
+                            let _ = write!(out, "[image attachment: {path}]");
                         }
                     }
                 }
@@ -293,6 +301,7 @@ pub struct Message {
 }
 
 impl Message {
+    #[must_use]
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: Role::User,
@@ -302,6 +311,7 @@ impl Message {
         }
     }
 
+    #[must_use]
     pub fn user_with_parts(parts: Vec<ContentPart>) -> Self {
         Self {
             role: Role::User,
@@ -311,6 +321,7 @@ impl Message {
         }
     }
 
+    #[must_use]
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
             role: Role::Assistant,
@@ -320,6 +331,7 @@ impl Message {
         }
     }
 
+    #[must_use]
     pub fn assistant_with_tool_calls(
         content: impl Into<String>,
         tool_calls: Vec<MessageToolCall>,
@@ -332,6 +344,7 @@ impl Message {
         }
     }
 
+    #[must_use]
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: Role::System,
@@ -341,6 +354,7 @@ impl Message {
         }
     }
 
+    #[must_use]
     pub fn tool(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             role: Role::Tool,
@@ -350,6 +364,7 @@ impl Message {
         }
     }
 
+    #[must_use]
     pub fn event_preview(&self) -> String {
         if self.role == Role::User {
             self.content.user_event_preview()

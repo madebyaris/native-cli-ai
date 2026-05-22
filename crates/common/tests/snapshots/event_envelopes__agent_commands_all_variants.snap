@@ -1,0 +1,31 @@
+---
+source: crates/common/tests/event_envelopes.rs
+expression: commands
+---
+[
+  {
+    "type": "SendMessage",
+    "content": "hello"
+  },
+  {
+    "type": "ApproveToolCall",
+    "call_id": "call-1"
+  },
+  {
+    "type": "DenyToolCall",
+    "call_id": "call-2"
+  },
+  {
+    "type": "AnswerQuestion",
+    "question_id": "q-1",
+    "selection": {
+      "kind": "suggested"
+    }
+  },
+  {
+    "type": "Cancel"
+  },
+  {
+    "type": "Shutdown"
+  }
+]

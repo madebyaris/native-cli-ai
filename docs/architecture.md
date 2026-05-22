@@ -57,17 +57,20 @@ native-cli-ai/
 │   ├── cli/                # TUI shell, run/spawn control plane, streaming
 │   │   ├── Cargo.toml
 │   │   └── src/
-│   │       ├── main.rs         # Entrypoint, clap args, launch
-│   │       ├── app.rs          # App state machine
-│   │       ├── repl.rs         # REPL loop: input -> agent -> render
-│   │       ├── runner.rs       # Session runtime builder / persistence glue
+│   │       ├── main.rs         # Entrypoint, clap args, dispatch
+│   │       ├── cli.rs          # Top-level Cli / Commands definitions
+│   │       ├── cmd/            # One module per subcommand (run, spawn, attach, …)
 │   │       ├── stream.rs       # Human and NDJSON event rendering
-│   │       ├── render/
-│   │       │   ├── mod.rs
-│   │       │   ├── markdown.rs # Markdown-to-terminal rendering
-│   │       │   ├── diff.rs     # Colored diff display
-│   │       │   └── status.rs   # Cost bar, model info, mode indicator
-│   │       └── prompt.rs       # reedline-based input with completions
+│   │       └── cli_index.rs    # Cached workspace CLI index
+│   │
+│   ├── tui/                # Full-screen ratatui REPL (optional, linked by cli)
+│   │   └── src/
+│   │       ├── runner.rs       # SessionRuntime wiring
+│   │       ├── repl/           # Line REPL (reedline)
+│   │       └── tui/
+│   │           ├── overlay.rs  # UiOverlay modal FSM
+│   │           ├── state.rs    # TuiSessionState + transcript cache
+│   │           └── transcript.rs # Markdown rendering
 │
 ├── docs/
 │   ├── prd.md
@@ -87,17 +90,28 @@ flowchart TD
   Common[common]
   Core[core]
   Runtime[runtime]
+  Tui[tui]
   Cli[cli]
 
   Core --> Common
   Runtime --> Common
   Runtime --> Core
+  Tui --> Common
+  Tui --> Core
+  Tui --> Runtime
   Cli --> Common
   Cli --> Core
   Cli --> Runtime
+  Cli --> Tui
 ```
 
-The CLI delegates session lifecycle to the runtime `Supervisor`.
+The CLI delegates session lifecycle to the runtime `Supervisor`. The TUI crate owns full-screen rendering; the CLI crate owns command parsing and stream output.
+
+## CLI command modules
+
+Subcommands live under `crates/cli/src/cmd/` — one file per surface (`run`, `spawn`, `attach`, `sessions`, `doctor`, …). `main.rs` parses [`cli::Cli`](../../crates/cli/src/cli.rs) and dispatches to the matching `cmd::*` handler. Shared helpers (config load, JSON output, runtime connect) sit in `cmd/util.rs`.
+
+This keeps the product surface (`nca`) thin: parsing and I/O in `cli`, session engine in `runtime`, terminal UX in `tui`.
 
 ## CLI-first architecture
 
@@ -170,10 +184,10 @@ sequenceDiagram
 
 ### Streaming
 
-Provider responses are streamed token-by-token via `tokio::sync::mpsc` using MiniMax SSE. The CLI can render:
+Provider responses are streamed token-by-token via `tokio::sync::mpsc` using MiniMax SSE. Parse/transport failures surface as `StreamChunk::Error` and propagate to `AgentEvent::Error` — they never masquerade as model text. The CLI can render:
 
-- human-readable live progress
-- NDJSON `EventEnvelope` stream mode
+- human-readable live progress (TUI markdown via `pulldown-cmark`, REPL plain text)
+- NDJSON `EventEnvelope` stream mode (`schema_version` + monotonic `id`)
 - no stream, with only final output
 
 Tool-use blocks are collected, executed by the registry, and replayed to MiniMax as `tool` messages until a final assistant response is produced.
@@ -236,16 +250,18 @@ pub enum AgentEvent {
 
 ### Command Schema
 
-```rust
-pub enum AgentCommand {
-    SendMessage { content: String },
-    ApproveToolCall { call_id: String },
-    DenyToolCall { call_id: String },
-    AnswerQuestion { question_id: String, selection: QuestionSelection },
-    Cancel,
-    Shutdown,
-}
-```
+Clients send [`AgentCommand`](../../crates/common/src/event.rs) values over the same Unix socket. The runtime's command consumer (`runtime::supervisor::commands`) resolves approvals, forwards prompts, and triggers cooperative cancel:
+
+| Command | Effect |
+|---------|--------|
+| `SendMessage { content }` | Enqueue a user turn (attach / headless control) |
+| `ApproveToolCall { call_id }` | Approve a pending tool via IPC |
+| `DenyToolCall { call_id }` | Deny a pending tool via IPC |
+| `AnswerQuestion { question_id, selection }` | Resolve an interactive `ask_question` prompt |
+| `Cancel` | Signal cooperative cancel (`CancellationToken` + session end reason `Cancelled`) |
+| `Shutdown` | Stop the supervisor and close the socket |
+
+`SessionControlCommand::Cancel` is also emitted internally when no event fanout is wired, so detached sessions always persist terminal state.
 
 ---
 
@@ -253,12 +269,18 @@ pub enum AgentCommand {
 
 ### Sandboxed Bash
 
-`runtime::pty::PtyManager` wraps command execution to:
+`runtime::pty::PtyManager` uses `portable-pty` to spawn a real pseudo-terminal:
 
-1. Spawn a shell in a PTY confined to the workspace root (via `chdir`).
-2. Capture stdout/stderr as structured output.
+1. Open a PTY and spawn `sh -lc <command>` with `cwd` set to the workspace root.
+2. Stream stdout/stderr line-by-line (optional live fanout to `AgentEvent::ToolOutputChunk`).
 3. Enforce a timeout (default 30s, configurable).
-4. Kill the process on cancellation or timeout.
+4. Kill the process on cooperative cancel or timeout.
+
+Cooperative cancel propagates from IPC `AgentCommand::Cancel` → command consumer → `SessionControlCommand::Cancel` → agent loop `CancellationToken`, so in-flight provider streams and tool execution stop without corrupting the persisted session snapshot.
+
+### TUI overlay FSM
+
+Full-screen mode uses `tui::tui::overlay::UiOverlay` as a modal finite-state machine: at most one overlay is active (`CommandPalette`, `BranchPicker`, `ConnectModal`, `ModelPicker`, `QuestionModal`, …). `TuiSessionState::overlay` holds the active variant; input routing in `tui::tui::input` checks `UiOverlay::blocks_input()` before passing keys to the composer. Inline panels (`@` file mentions, slash menu) are separate from the overlay FSM.
 
 ### Permission Check Flow
 
@@ -328,17 +350,18 @@ Sessions are stored as JSON files in `.nca/sessions/<session-id>.json`:
 
 ```json
 {
-  "id": "a1b2c3",
-  "created_at": "2026-03-11T10:00:00Z",
-  "updated_at": "2026-03-11T10:15:00Z",
-  "workspace": "/home/user/project",
-  "model": "claude-sonnet-4-5",
-  "messages": [ ... ],
+  "schema_version": 1,
+  "meta": { "id": "a1b2c3", "...": "..." },
+  "messages": [ "..." ],
   "total_input_tokens": 12500,
   "total_output_tokens": 8300,
   "estimated_cost_usd": 0.042
 }
 ```
+
+`schema_version` defaults to `1` when omitted so older on-disk snapshots remain loadable. Event logs use the same pattern on [`EventEnvelope`](../../crates/common/src/event.rs).
+
+Resume loads this snapshot **before** the supervisor's initial persist: `Supervisor::resume` reads disk first, then starts IPC with restored messages so create-side effects cannot wipe conversation history.
 
 Persistence is workspace-local:
 

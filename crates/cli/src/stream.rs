@@ -2,9 +2,9 @@
 //!
 //! This module provides streaming event rendering with Claude Code-inspired styling.
 
-use crate::ipc_pending::{ApprovalPendingMap, QuestionPendingMap};
 use colored::Colorize;
 use nca_common::event::{AgentEvent, EventEnvelope, InteractiveQuestionPayload, QuestionSelection};
+use nca_core::ipc_pending::{ApprovalPendingMap, QuestionPendingMap};
 use nca_runtime::ipc::IpcHandle;
 use nca_runtime::supervisor;
 use std::io::{self, IsTerminal, Write};
@@ -75,6 +75,44 @@ pub enum StreamMode {
     Ndjson,
 }
 
+/// Owned version of [`nca_common::todo::TodoDelta`], used so we can drop the
+/// borrow on the previous snapshot before replacing it in-place.
+enum OwnedTodoDelta {
+    Added {
+        item: nca_common::todo::TodoItem,
+    },
+    Removed {
+        item: nca_common::todo::TodoItem,
+    },
+    StatusChanged {
+        prev_status: nca_common::todo::TodoStatus,
+        next_status: nca_common::todo::TodoStatus,
+        item: nca_common::todo::TodoItem,
+    },
+    ContentChanged {
+        item: nca_common::todo::TodoItem,
+    },
+}
+
+impl From<nca_common::todo::TodoDelta<'_>> for OwnedTodoDelta {
+    fn from(delta: nca_common::todo::TodoDelta<'_>) -> Self {
+        match delta {
+            nca_common::todo::TodoDelta::Added(item) => Self::Added { item: item.clone() },
+            nca_common::todo::TodoDelta::Removed(item) => Self::Removed { item: item.clone() },
+            nca_common::todo::TodoDelta::StatusChanged { prev, next, item } => {
+                Self::StatusChanged {
+                    prev_status: prev,
+                    next_status: next,
+                    item: item.clone(),
+                }
+            }
+            nca_common::todo::TodoDelta::ContentChanged { next, .. } => {
+                Self::ContentChanged { item: next.clone() }
+            }
+        }
+    }
+}
+
 /// Real-time streaming stats
 #[derive(Clone)]
 struct StreamStats {
@@ -83,6 +121,8 @@ struct StreamStats {
     estimated_cost: Arc<AtomicU64>,
     #[allow(dead_code)]
     start_time: Instant,
+    /// Latest todos snapshot, used to compute REPL delta renders.
+    todos: Arc<std::sync::Mutex<nca_common::todo::TodoList>>,
 }
 
 impl StreamStats {
@@ -92,6 +132,7 @@ impl StreamStats {
             output_tokens: Arc::new(AtomicU64::new(0)),
             estimated_cost: Arc::new(AtomicU64::new(0)),
             start_time: Instant::now(),
+            todos: Arc::new(std::sync::Mutex::new(nca_common::todo::TodoList::new(""))),
         }
     }
 
@@ -324,6 +365,23 @@ fn render_event(event: &AgentEvent, stats: &StreamStats) {
                 tool.to_uppercase().color(theme::TOOL_BG)
             );
         }
+        AgentEvent::ToolOutputChunk {
+            call_id: _,
+            stream,
+            data,
+        } => {
+            use nca_common::event::ToolOutputStream;
+            let color = match stream {
+                ToolOutputStream::Stdout => theme::TEXT_DIM,
+                ToolOutputStream::Stderr => theme::WARNING,
+            };
+            for line in data.split('\n') {
+                if line.is_empty() {
+                    continue;
+                }
+                println!("  {} {}", "│".color(theme::TEXT_DIM), line.color(color));
+            }
+        }
         AgentEvent::ToolCallCompleted { call_id: _, output } => {
             print!("{}", theme::CLEAR_LINE);
             println!();
@@ -504,6 +562,84 @@ fn render_event(event: &AgentEvent, stats: &StreamStats) {
                 short,
                 status.color(theme::TEXT_DIM)
             );
+        }
+        AgentEvent::TodosUpdated {
+            session_id,
+            todos: new_todos,
+        } => {
+            print!("{}", theme::CLEAR_LINE);
+            let mut prev = match stats.todos.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if prev.session_id != *session_id {
+                *prev = nca_common::todo::TodoList::new(session_id.clone());
+            }
+            // Snapshot owned deltas first so we can release the borrow of `prev`
+            // before mutating it with `replace_with`.
+            let deltas: Vec<OwnedTodoDelta> = prev
+                .diff(new_todos)
+                .into_iter()
+                .map(OwnedTodoDelta::from)
+                .collect();
+            prev.replace_with(new_todos.clone());
+            let total = prev.len();
+            let done = prev.completed_count();
+            let in_prog = prev.in_progress_count();
+            println!(
+                "  {} todos {}/{} ({} in progress)",
+                "☐".color(theme::TOOL_BG),
+                done,
+                total,
+                in_prog
+            );
+            for delta in deltas.iter().take(6) {
+                match delta {
+                    OwnedTodoDelta::Added { item } => {
+                        println!(
+                            "    {} {} {}",
+                            "+".color(theme::SUCCESS),
+                            item.status.glyph(),
+                            item.content.as_str().color(theme::TEXT)
+                        );
+                    }
+                    OwnedTodoDelta::Removed { item } => {
+                        println!(
+                            "    {} {} {}",
+                            "-".color(theme::WARNING),
+                            item.status.glyph(),
+                            item.content.as_str().color(theme::TEXT_DIM)
+                        );
+                    }
+                    OwnedTodoDelta::StatusChanged {
+                        prev_status,
+                        next_status,
+                        item,
+                    } => {
+                        println!(
+                            "    {} {} → {} {}",
+                            "~".color(theme::TOOL_BG),
+                            prev_status.label().color(theme::TEXT_DIM),
+                            next_status.label().color(theme::TEXT),
+                            item.content.as_str().color(theme::TEXT)
+                        );
+                    }
+                    OwnedTodoDelta::ContentChanged { item } => {
+                        println!(
+                            "    {} {} {}",
+                            "~".color(theme::TOOL_BG),
+                            item.status.glyph(),
+                            item.content.as_str().color(theme::TEXT)
+                        );
+                    }
+                }
+            }
+            if deltas.len() > 6 {
+                println!(
+                    "    {}",
+                    format!("(+{} more changes)", deltas.len() - 6).color(theme::TEXT_DIM)
+                );
+            }
         }
         AgentEvent::MessageReceived { role, content } => {
             println!();

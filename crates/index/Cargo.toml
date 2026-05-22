@@ -1,0 +1,31 @@
+[package]
+name = "nca-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Heavy dependency — gated so the stock `nca` binary stays lean. Enable with
+# `--features semantic-index` (or via the workspace-level `semantic-index`
+# feature on the CLI crate).
+semantic-index = ["dep:tantivy"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+async-trait = "0.1"
+walkdir = "2"
+
+tantivy = { version = "0.22", optional = true }
+
+nca-common = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,48 @@
+---
+source: crates/common/tests/event_envelopes.rs
+expression: responses
+---
+[
+  {
+    "type": "SessionState",
+    "session": {
+      "schema_version": 1,
+      "meta": {
+        "id": "sess-sample",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "workspace": "/tmp/workspace",
+        "model": "MiniMax-M2.5",
+        "status": "running",
+        "pid": 4242,
+        "socket_path": "/tmp/nca/sess-sample.sock"
+      },
+      "messages": [],
+      "total_input_tokens": 10,
+      "total_output_tokens": 5,
+      "estimated_cost_usd": 0.0001
+    }
+  },
+  {
+    "type": "SessionList",
+    "sessions": [
+      {
+        "id": "sess-sample",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "workspace": "/tmp/workspace",
+        "model": "MiniMax-M2.5",
+        "status": "running",
+        "pid": 4242,
+        "socket_path": "/tmp/nca/sess-sample.sock"
+      }
+    ]
+  },
+  {
+    "type": "Error",
+    "message": "not found"
+  },
+  {
+    "type": "Ok"
+  }
+]

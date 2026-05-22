@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 use crate::approval::{ApprovalPolicy, ApprovalVerdict};
 use crate::cost::CostTracker;
@@ -28,7 +29,11 @@ pub struct AgentLoop {
     max_tool_calls_per_turn: u32,
     checkpoint_interval: u32,
     cancel_flag: Arc<AtomicBool>,
+    /// Kept in sync with `cancel_flag` but allows async waiters to be notified
+    /// the instant cancellation happens, instead of polling a 25ms interval.
+    cancel_token: CancellationToken,
     hooks: Option<HookRunner>,
+    retry: nca_common::config::ModelRetryConfig,
 }
 
 impl AgentLoop {
@@ -43,6 +48,8 @@ impl AgentLoop {
         max_tool_calls_per_turn: u32,
         checkpoint_interval: u32,
         hooks: Option<HookRunner>,
+        pricing: nca_common::config::ModelPricing,
+        retry: nca_common::config::ModelRetryConfig,
     ) -> Self {
         Self {
             provider,
@@ -50,14 +57,26 @@ impl AgentLoop {
             approval,
             messages: Vec::new(),
             model,
-            cost_tracker: CostTracker::default(),
+            cost_tracker: CostTracker::new(pricing),
             event_tx,
             max_turns,
             max_tool_calls_per_turn,
             checkpoint_interval,
             cancel_flag: Arc::new(AtomicBool::new(false)),
+            cancel_token: CancellationToken::new(),
             hooks,
+            retry,
         }
+    }
+
+    /// Update the active pricing table (e.g. after the user switches model
+    /// via `/model`). Keeps existing accumulated totals.
+    pub fn set_pricing(&mut self, pricing: nca_common::config::ModelPricing) {
+        self.cost_tracker.set_pricing(pricing);
+    }
+
+    pub fn set_retry(&mut self, retry: nca_common::config::ModelRetryConfig) {
+        self.retry = retry;
     }
 
     /// Add a system prompt once at startup.
@@ -79,6 +98,11 @@ impl AgentLoop {
         attachments: &[ImageAttachment],
     ) -> Result<String, ProviderError> {
         self.cancel_flag.store(false, Ordering::SeqCst);
+        // Replace the cancel token with a fresh one so previous `request_cancel`
+        // calls don't carry over into this turn.
+        if self.cancel_token.is_cancelled() {
+            self.cancel_token = CancellationToken::new();
+        }
         let user_msg = if attachments.is_empty() {
             Message::user(user_input)
         } else {
@@ -112,7 +136,6 @@ impl AgentLoop {
         let mut turn = 0_u32;
         let mut empty_retries = 0_u32;
         let mut attachments_cleaned = attachments.is_empty();
-        const MAX_EMPTY_RETRIES: u32 = 2;
         // Consecutive failures of the same tool — stops infinite retry loops.
         let mut consecutive_tool_failures: u32 = 0;
         let mut last_failed_tool: String = String::new();
@@ -159,21 +182,17 @@ impl AgentLoop {
 
             let mut assistant_text = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
-            let mut got_usage = false;
 
-            let mut cancel_poll = tokio::time::interval(Duration::from_millis(25));
-            cancel_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let cancel_token = self.cancel_token.clone();
             loop {
                 let chunk = tokio::select! {
-                    _ = cancel_poll.tick() => {
-                        if self.is_cancelled() {
-                            self.emit(AgentEvent::Error {
-                                message: "Run cancelled while streaming model output".into(),
-                            })
-                            .await;
-                            return Err(ProviderError::Other("run cancelled".into()));
-                        }
-                        continue;
+                    biased;
+                    _ = cancel_token.cancelled() => {
+                        self.emit(AgentEvent::Error {
+                            message: "Run cancelled while streaming model output".into(),
+                        })
+                        .await;
+                        return Err(ProviderError::Other("run cancelled".into()));
                     }
                     chunk = stream.recv() => chunk,
                 };
@@ -204,7 +223,6 @@ impl AgentLoop {
                         input_tokens,
                         output_tokens,
                     } => {
-                        got_usage = true;
                         self.cost_tracker.add(input_tokens, output_tokens);
                         self.emit(AgentEvent::CostUpdated {
                             input_tokens: self.cost_tracker.input_tokens,
@@ -212,6 +230,14 @@ impl AgentLoop {
                             estimated_cost_usd: self.cost_tracker.estimated_cost_usd(),
                         })
                         .await;
+                    }
+                    StreamChunk::Error(err) => {
+                        let message = err.to_string();
+                        self.emit(AgentEvent::Error {
+                            message: message.clone(),
+                        })
+                        .await;
+                        return Err(err);
                     }
                     StreamChunk::Done => break,
                 }
@@ -225,13 +251,18 @@ impl AgentLoop {
             if tool_calls.is_empty() {
                 if assistant_text.trim().is_empty() {
                     empty_retries += 1;
-                    if empty_retries <= MAX_EMPTY_RETRIES && got_usage {
+                    if empty_retries <= self.retry.max_empty_response_retries {
                         self.emit(AgentEvent::Error {
                             message: format!(
-                                "Provider returned empty response (retry {empty_retries}/{MAX_EMPTY_RETRIES})"
+                                "Provider returned empty response (retry {empty_retries}/{})",
+                                self.retry.max_empty_response_retries
                             ),
                         })
                         .await;
+                        let exp = empty_retries.saturating_sub(1).min(24);
+                        let ms = (self.retry.empty_response_backoff_initial_ms * 2u64.pow(exp))
+                            .min(self.retry.empty_response_backoff_max_ms);
+                        tokio::time::sleep(Duration::from_millis(ms)).await;
                         continue;
                     }
                     self.emit(AgentEvent::Error {
@@ -529,7 +560,7 @@ impl AgentLoop {
                     message: msg.clone(),
                 })
                 .await;
-                break msg;
+                return Err(ProviderError::Other(msg));
             }
         };
 
@@ -571,14 +602,21 @@ impl AgentLoop {
 
     pub fn request_cancel(&self) {
         self.cancel_flag.store(true, Ordering::SeqCst);
+        self.cancel_token.cancel();
     }
 
     pub fn cancel_handle(&self) -> Arc<AtomicBool> {
         self.cancel_flag.clone()
     }
 
+    /// Clone of the internal cancellation token so callers (Supervisor etc.)
+    /// can `await` on cancellation without polling.
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.cancel_token.clone()
+    }
+
     fn is_cancelled(&self) -> bool {
-        self.cancel_flag.load(Ordering::SeqCst)
+        self.cancel_flag.load(Ordering::SeqCst) || self.cancel_token.is_cancelled()
     }
 }
 
