@@ -80,13 +80,19 @@ Pre-built binaries for every release are available on the [Releases](https://git
 
 ### Build from source
 
-Requires Rust edition 2024 (use a recent toolchain).
+Requires Rust **1.85+** (edition 2024). The repo pins the toolchain in `rust-toolchain.toml`.
 
 ```bash
 git clone https://github.com/madebyaris/native-cli-ai.git
 cd native-cli-ai
-cargo build --release
+cargo build --release -p nca-cli
 cp target/release/nca /usr/local/bin/
+```
+
+Optional BM25 workspace index (powers `search_semantic` and `nca index build`):
+
+```bash
+cargo build --release -p nca-cli --features semantic-index
 ```
 
 ## Quick Start
@@ -143,7 +149,9 @@ The main interface is designed to feel like a serious terminal tool, not a toy o
 | `nca attach <session_id>` | Attach to a running session over IPC. |
 | `nca logs <session_id>` | Read or follow the event log. |
 | `nca status <session_id>` | Show session status and metadata. |
-| `nca cancel <session_id>` | Mark a detached session as cancelled. |
+| `nca cancel <session_id>` | Cooperatively cancel an in-flight turn (`AgentCommand::Cancel`), then persist session state as cancelled. |
+| `nca cost` | Show cumulative token usage and estimated cost across recent sessions. |
+| `nca init` | Scaffold workspace-local `.nca/` config and instructions. |
 | `nca sessions` | List saved sessions, with filters like `--status`, `--since-hours`, and `--search`. |
 | `nca models` | Show configured models and provider-facing defaults. |
 | `nca doctor` | Check provider readiness, skills, and memory/config paths. |
@@ -172,6 +180,8 @@ Useful interactive behaviors:
 - `Tab` cycles agent profiles such as `build`, `plan`, `review`, `fix`, and `test`.
 - `Ctrl+C` or `/stop` sends a cooperative cancel through the agent loop (via `CancellationToken`) and stops the in-flight provider stream without losing session state.
 - `/auto-answer` accepts the suggested answer for a pending `ask_question`.
+- `/apikey <provider> <key>` stores a provider API key in `<workspace>/.nca/config.local.toml`.
+- `/provider` and `/connect` switch providers and open the API key modal when needed.
 
 Small touches in the TUI matter too: branch switching, structured options, session sidebars, model picker, provider configuration, and direct control over long-running turns.
 
@@ -254,6 +264,12 @@ Typical environment variables:
 - `OPENROUTER_API_KEY`
 - `CUSTOM_PROVIDER_API_KEY` (for custom endpoints)
 
+Set keys in three ways (later layers override earlier on startup):
+
+1. **Environment** — e.g. `export OPENROUTER_API_KEY="sk-or-v1-..."` (overrides config files).
+2. **Config** — inline `api_key = "..."` or `api_key_env = "OPENROUTER_API_KEY"` under `[provider.openrouter]` in `~/.nca/config.toml` or `<workspace>/.nca/config.local.toml`.
+3. **Interactive** — `/apikey openrouter <key>` in the TUI or REPL (saves to workspace-local config).
+
 ### Custom Endpoints
 
 Use `/provider` in the TUI and select **"Add custom provider…"** to configure any OpenAI-compatible or Anthropic-compatible endpoint. Or use the `/custom` slash command:
@@ -300,8 +316,12 @@ Recent search/edit improvements are aimed at making agent file work less brittle
 | `crates/common` | Shared config, events, sessions, messages, tool schemas, and orchestration metadata. |
 | `crates/core` | Agent loop, provider abstraction, harness builder, skills, approvals, and tool registry. |
 | `crates/runtime` | Session supervision, IPC, persistence, worktrees, memory store, context management, and subagent execution. |
-| `crates/cli` | `nca` entrypoint, command parsing, stream rendering, REPL, and TUI. |
+| `crates/tui` | Full-screen ratatui UI, line REPL, transcript rendering, overlays, and session bridge. |
+| `crates/cli` | `nca` binary entrypoint, clap command dispatch, stream rendering, and CLI index. |
+| `crates/index` | Optional BM25 workspace index (`semantic-index` feature). |
 | `crates/autoresearch` | Metric-driven autonomous research helpers and experiment runner. |
+
+The shipped product is still a **single binary** (`nca`); `nca-tui` and `nca-index` are library crates linked by `nca-cli`.
 
 ## Session Model
 
@@ -313,8 +333,22 @@ Recent search/edit improvements are aimed at making agent file work less brittle
 - Child sessions can inherit parent context, record lineage in session metadata, and run inside separate git worktrees.
 - IPC uses newline-delimited JSON over Unix sockets so `attach`, approvals, status, and other controls share one runtime transport.
 - `ContextManager` tracks token usage and auto-summarizes long conversations.
+- Provider stream/parse failures and empty completions surface as typed errors — they are never silently treated as model text.
 
 In practice, that means you can start small, branch out when a task gets bigger, and still keep a clean trail of what happened.
+
+## Development
+
+Quality gate (matches CI):
+
+```bash
+cargo nextest run --workspace --features semantic-index
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --check --all
+INSTA_UPDATE=never cargo insta test --check
+```
+
+Bug fixes should include a regression test. Unit tests mock the `Provider` trait — no network access in the test suite.
 
 ## Documentation
 
@@ -341,6 +375,7 @@ Internal design docs:
 - [Orchestration Contract](docs/orchestration.md)
 - [Context Management](docs/context-management.md)
 - [Performance Optimization Research](docs/research/rust-ratatui-optimization.md)
+- [Test Discipline](.cursor/rules/test-discipline.mdc)
 
 ## Funding
 
