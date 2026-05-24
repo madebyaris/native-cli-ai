@@ -253,6 +253,7 @@ impl ContextManager {
                 )),
                 tool_call_id: None,
                 tool_calls: None,
+                reasoning_content: None,
             });
         }
 
@@ -305,6 +306,7 @@ impl ContextManager {
                         content: MessageContent::Text(format!("{}...[truncated]", truncated)),
                         tool_call_id: m.tool_call_id.clone(),
                         tool_calls: m.tool_calls.clone(),
+                        reasoning_content: m.reasoning_content.clone(),
                     }
                 } else {
                     m.clone()
@@ -381,6 +383,7 @@ mod tests {
             content: MessageContent::Text(content.to_string()),
             tool_call_id: None,
             tool_calls: None,
+            reasoning_content: None,
         }
     }
 

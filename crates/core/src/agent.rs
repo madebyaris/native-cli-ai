@@ -158,6 +158,7 @@ impl AgentLoop {
                 .await?;
 
             let mut assistant_text = String::new();
+            let mut reasoning_text = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut got_usage = false;
 
@@ -190,6 +191,9 @@ impl AgentLoop {
                         }
                         assistant_text.push_str(&delta);
                         self.emit(AgentEvent::TokensStreamed { delta }).await;
+                    }
+                    StreamChunk::ReasoningDelta(delta) => {
+                        reasoning_text.push_str(&delta);
                     }
                     StreamChunk::ToolUse(call) => {
                         self.emit(AgentEvent::ToolCallStarted {
@@ -242,8 +246,11 @@ impl AgentLoop {
                         "Provider returned empty response with no tool calls after retries".into(),
                     ));
                 }
-                self.messages
-                    .push(Message::assistant(assistant_text.clone()));
+                let mut msg = Message::assistant(assistant_text.clone());
+                if !reasoning_text.is_empty() {
+                    msg = msg.with_reasoning(std::mem::take(&mut reasoning_text));
+                }
+                self.messages.push(msg);
                 self.emit(AgentEvent::MessageReceived {
                     role: "assistant".into(),
                     content: assistant_text.clone(),
@@ -261,10 +268,11 @@ impl AgentLoop {
                 })
                 .collect();
 
-            self.messages.push(Message::assistant_with_tool_calls(
-                assistant_text,
-                replay_tool_calls,
-            ));
+            let mut msg = Message::assistant_with_tool_calls(assistant_text, replay_tool_calls);
+            if !reasoning_text.is_empty() {
+                msg = msg.with_reasoning(std::mem::take(&mut reasoning_text));
+            }
+            self.messages.push(msg);
 
             if tool_calls.len() as u32 > self.max_tool_calls_per_turn {
                 return Err(ProviderError::Other(format!(

@@ -125,6 +125,14 @@ pub fn spawn_openai_stream(
                         let _ = tx.send(StreamChunk::TextDelta(text.to_string())).await;
                     }
 
+                    if let Some(reasoning) = delta["reasoning_content"].as_str()
+                        && !reasoning.is_empty()
+                    {
+                        let _ = tx
+                            .send(StreamChunk::ReasoningDelta(reasoning.to_string()))
+                            .await;
+                    }
+
                     if let Some(tool_deltas) = delta["tool_calls"].as_array() {
                         for tool_delta in tool_deltas {
                             let index = tool_delta["index"].as_u64().unwrap_or(0);
@@ -272,6 +280,10 @@ fn to_openai_messages(
                         openai_user_content_value(&message.content, workspace_root)?
                     },
                 });
+
+                if let Some(reasoning) = &message.reasoning_content {
+                    value["reasoning_content"] = json!(reasoning);
+                }
 
                 if let Some(calls) = &message.tool_calls {
                     value["tool_calls"] = Value::Array(

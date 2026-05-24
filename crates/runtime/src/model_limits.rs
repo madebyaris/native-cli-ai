@@ -138,6 +138,24 @@ pub const MODEL_CONTEXT_LIMITS: &[ModelContextLimits] = &[
         context_window: 1_000_000,
         max_output_tokens: 8192,
     },
+    // DeepSeek V4 Pro (1M context, 384K max output)
+    ModelContextLimits {
+        pattern: "deepseek-v4-pro",
+        context_window: 1_000_000,
+        max_output_tokens: 393_216,
+    },
+    // DeepSeek V4 Flash (1M context, 384K max output)
+    ModelContextLimits {
+        pattern: "deepseek-v4-flash",
+        context_window: 1_000_000,
+        max_output_tokens: 393_216,
+    },
+    // DeepSeek V4 catch-all
+    ModelContextLimits {
+        pattern: "deepseek-v4",
+        context_window: 1_000_000,
+        max_output_tokens: 393_216,
+    },
     // DeepSeek V3
     ModelContextLimits {
         pattern: "deepseek-v3",
@@ -262,6 +280,19 @@ mod tests {
     fn test_detect_gemini() {
         assert_eq!(detect_context_window("gemini-1.5-pro-latest"), 2_000_000);
         assert_eq!(detect_context_window("gemini-1.5-flash"), 1_000_000);
+    }
+
+    #[test]
+    fn test_detect_deepseek_v4() {
+        assert_eq!(detect_context_window("deepseek-v4-flash"), 1_000_000);
+        assert_eq!(detect_context_window("deepseek-v4-pro"), 1_000_000);
+        assert_eq!(detect_max_output_tokens("deepseek-v4-flash"), 393_216);
+    }
+
+    #[test]
+    fn test_detect_deepseek_legacy() {
+        assert_eq!(detect_context_window("deepseek-v3"), 64_000);
+        assert_eq!(detect_context_window("deepseek-r1"), 64_000);
     }
 
     #[test]

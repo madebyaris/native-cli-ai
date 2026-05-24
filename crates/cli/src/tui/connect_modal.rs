@@ -46,6 +46,12 @@ pub const CONNECT_CATALOG: &[CatalogEntry] = &[
         subtitle: "GLM-5 Turbo (API key)",
     },
     CatalogEntry {
+        section: ConnectSection::Popular,
+        kind: ProviderKind::DeepSeek,
+        title: "DeepSeek",
+        subtitle: "V4 Flash / V4 Pro (API key)",
+    },
+    CatalogEntry {
         section: ConnectSection::Other,
         kind: ProviderKind::OpenRouter,
         title: "OpenRouter",

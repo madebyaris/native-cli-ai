@@ -1112,6 +1112,7 @@ impl Repl {
                     format!("  Anthropic:   {}", config.provider.base_url_for(ProviderKind::Anthropic)),
                     format!("  OpenRouter:  {}", config.provider.base_url_for(ProviderKind::OpenRouter)),
                     format!("  ZhipuAI:     {}", config.provider.base_url_for(ProviderKind::ZhipuAI)),
+                    format!("  DeepSeek:    {}", config.provider.base_url_for(ProviderKind::DeepSeek)),
                 ];
                 if let ReplOutput::Tui(st) = &out {
                     if let Ok(mut g) = st.lock() {
@@ -1133,7 +1134,7 @@ impl Repl {
                     );
                 } else {
                     out.println("Connect an LLM provider (non-TUI):");
-                    out.println("  /provider <minimax|openai|anthropic|openrouter|zhipuai>");
+                    out.println("  /provider <minimax|openai|anthropic|openrouter|zhipuai|deepseek>");
                     out.println("  /apikey <provider> <secret>   — save API key to .nca/config.local.toml");
                     out.println("  /model <name>                 — set model after switching provider");
                     out.println(&format!(
@@ -1185,14 +1186,14 @@ impl Repl {
                             self.runtime.config().provider.default.display_name(),
                             self.runtime.model()
                         ));
-                        out.println("usage: /provider <minimax|openai|anthropic|openrouter|zhipuai>");
+                        out.println("usage: /provider <minimax|openai|anthropic|openrouter|zhipuai|deepseek>");
                     }
                 } else if let Some(p) = ProviderKind::from_cli_name(rest)
                     .or_else(|| ProviderKind::parse_display_name(rest))
                 {
                     self.apply_provider_in_session(p, out).await?;
                 } else {
-                    out.eprintln("unknown provider; try: minimax, openai, anthropic, openrouter, zhipuai");
+                    out.eprintln("unknown provider; try: minimax, openai, anthropic, openrouter, zhipuai, deepseek");
                 }
             }
             "/apikey" => {
@@ -1220,7 +1221,7 @@ impl Repl {
                             self.save_provider_api_key(p, key, out).await?;
                         }
                     } else {
-                        out.eprintln("unknown provider; try: minimax, openai, anthropic, openrouter, zhipuai");
+                        out.eprintln("unknown provider; try: minimax, openai, anthropic, openrouter, zhipuai, deepseek");
                     }
                 } else if let ReplOutput::Tui(st) = out {
                     if let Ok(mut g) = st.lock() {

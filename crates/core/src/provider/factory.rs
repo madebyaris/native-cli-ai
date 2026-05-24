@@ -1,6 +1,7 @@
 use nca_common::config::{NcaConfig, ProviderKind};
 
 use super::anthropic::AnthropicProvider;
+use super::deepseek::DeepSeekProvider;
 use super::minimax::MiniMaxProvider;
 use super::openai::OpenAiProvider;
 use super::openrouter::OpenRouterProvider;
@@ -15,6 +16,7 @@ pub fn build_provider(config: &NcaConfig) -> Result<Box<dyn Provider>, ProviderE
         ProviderKind::Anthropic => Ok(Box::new(AnthropicProvider::from_config(config)?)),
         ProviderKind::OpenAi => Ok(Box::new(OpenAiProvider::from_config(config)?)),
         ProviderKind::ZhipuAI => Ok(Box::new(ZhipuAIProvider::from_config(config)?)),
+        ProviderKind::DeepSeek => Ok(Box::new(DeepSeekProvider::from_config(config)?)),
     }
 }
 
@@ -42,6 +44,9 @@ mod tests {
                 }
                 ProviderKind::ZhipuAI => {
                     config.provider.zhipuai.api_key = Some("zhipuai-key".into());
+                }
+                ProviderKind::DeepSeek => {
+                    config.provider.deepseek.api_key = Some("deepseek-key".into());
                 }
             }
 

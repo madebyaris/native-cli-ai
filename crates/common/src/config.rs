@@ -229,6 +229,18 @@ impl NcaConfig {
             self.provider.zhipuai.model = model;
         }
 
+        if let Ok(api_key) = env::var("DEEPSEEK_API_KEY") {
+            self.provider.deepseek.api_key = Some(api_key);
+        }
+
+        if let Ok(base_url) = env::var("DEEPSEEK_BASE_URL") {
+            self.provider.deepseek.base_url = base_url;
+        }
+
+        if let Ok(model) = env::var("DEEPSEEK_MODEL") {
+            self.provider.deepseek.model = model;
+        }
+
         if let Ok(memory_path) = env::var("NCA_MEMORY_PATH") {
             self.memory.file_path = PathBuf::from(memory_path);
         }
@@ -269,6 +281,7 @@ impl NcaConfig {
             ProviderKind::Anthropic => self.provider.anthropic.api_key = Some(key),
             ProviderKind::OpenRouter => self.provider.openrouter.api_key = Some(key),
             ProviderKind::ZhipuAI => self.provider.zhipuai.api_key = Some(key),
+            ProviderKind::DeepSeek => self.provider.deepseek.api_key = Some(key),
         }
     }
 
@@ -512,6 +525,7 @@ pub struct ProviderConfig {
     pub anthropic: AnthropicConfig,
     pub openrouter: OpenRouterConfig,
     pub zhipuai: ZhipuAIConfig,
+    pub deepseek: DeepSeekConfig,
 }
 
 impl Default for ProviderConfig {
@@ -523,6 +537,7 @@ impl Default for ProviderConfig {
             anthropic: AnthropicConfig::default(),
             openrouter: OpenRouterConfig::default(),
             zhipuai: ZhipuAIConfig::default(),
+            deepseek: DeepSeekConfig::default(),
         }
     }
 }
@@ -548,6 +563,9 @@ impl ProviderConfig {
         if let Some(zhipuai) = partial.zhipuai {
             self.zhipuai.merge(zhipuai);
         }
+        if let Some(deepseek) = partial.deepseek {
+            self.deepseek.merge(deepseek);
+        }
     }
 
     pub fn active_model(&self) -> &str {
@@ -557,6 +575,7 @@ impl ProviderConfig {
             ProviderKind::Anthropic => &self.anthropic.model,
             ProviderKind::OpenAi => &self.openai.model,
             ProviderKind::ZhipuAI => &self.zhipuai.model,
+            ProviderKind::DeepSeek => &self.deepseek.model,
         }
     }
 
@@ -572,6 +591,7 @@ impl ProviderConfig {
             ProviderKind::Anthropic => self.anthropic.model = model,
             ProviderKind::OpenAi => self.openai.model = model,
             ProviderKind::ZhipuAI => self.zhipuai.model = model,
+            ProviderKind::DeepSeek => self.deepseek.model = model,
         }
     }
 
@@ -582,6 +602,7 @@ impl ProviderConfig {
             ProviderKind::Anthropic => &self.anthropic.model,
             ProviderKind::OpenAi => &self.openai.model,
             ProviderKind::ZhipuAI => &self.zhipuai.model,
+            ProviderKind::DeepSeek => &self.deepseek.model,
         }
     }
 
@@ -592,6 +613,7 @@ impl ProviderConfig {
             ProviderKind::Anthropic => &self.anthropic.base_url,
             ProviderKind::OpenAi => &self.openai.base_url,
             ProviderKind::ZhipuAI => &self.zhipuai.base_url,
+            ProviderKind::DeepSeek => &self.deepseek.base_url,
         }
     }
 
@@ -602,6 +624,7 @@ impl ProviderConfig {
             ProviderKind::Anthropic => &self.anthropic.api_key_env,
             ProviderKind::OpenAi => &self.openai.api_key_env,
             ProviderKind::ZhipuAI => &self.zhipuai.api_key_env,
+            ProviderKind::DeepSeek => &self.deepseek.api_key_env,
         }
     }
 
@@ -612,6 +635,7 @@ impl ProviderConfig {
             ProviderKind::Anthropic => self.anthropic.resolve_api_key().is_some(),
             ProviderKind::OpenAi => self.openai.resolve_api_key().is_some(),
             ProviderKind::ZhipuAI => self.zhipuai.resolve_api_key().is_some(),
+            ProviderKind::DeepSeek => self.deepseek.resolve_api_key().is_some(),
         }
     }
 
@@ -632,15 +656,17 @@ pub enum ProviderKind {
     Anthropic,
     OpenAi,
     ZhipuAI,
+    DeepSeek,
 }
 
 impl ProviderKind {
-    pub const ALL: [ProviderKind; 5] = [
+    pub const ALL: [ProviderKind; 6] = [
         ProviderKind::MiniMax,
         ProviderKind::OpenAi,
         ProviderKind::Anthropic,
         ProviderKind::OpenRouter,
         ProviderKind::ZhipuAI,
+        ProviderKind::DeepSeek,
     ];
 
     /// Parse user/CLI input (slash commands, TUI pickers).
@@ -651,6 +677,7 @@ impl ProviderKind {
             "anthropic" | "claude" => Some(Self::Anthropic),
             "openrouter" | "open-router" => Some(Self::OpenRouter),
             "zhipuai" | "zhipu" | "glm" | "glm-5" => Some(Self::ZhipuAI),
+            "deepseek" => Some(Self::DeepSeek),
             _ => None,
         }
     }
@@ -661,6 +688,7 @@ impl ProviderKind {
             "anthropic" => Self::Anthropic,
             "openai" => Self::OpenAi,
             "zhipuai" | "zhipu" | "glm" => Self::ZhipuAI,
+            "deepseek" => Self::DeepSeek,
             _ => Self::MiniMax,
         }
     }
@@ -672,6 +700,7 @@ impl ProviderKind {
             ProviderKind::Anthropic => "Anthropic",
             ProviderKind::OpenAi => "OpenAI",
             ProviderKind::ZhipuAI => "ZhipuAI",
+            ProviderKind::DeepSeek => "DeepSeek",
         }
     }
 
@@ -906,6 +935,51 @@ impl ZhipuAIConfig {
     }
 
     fn merge(&mut self, partial: PartialZhipuAIConfig) {
+        if let Some(api_key_env) = partial.api_key_env {
+            self.api_key_env = api_key_env;
+        }
+        if let Some(api_key) = partial.api_key {
+            self.api_key = Some(api_key);
+        }
+        if let Some(base_url) = partial.base_url {
+            self.base_url = base_url;
+        }
+        if let Some(model) = partial.model {
+            self.model = model;
+        }
+        if let Some(temperature) = partial.temperature {
+            self.temperature = temperature;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeepSeekConfig {
+    pub api_key_env: String,
+    pub api_key: Option<String>,
+    pub base_url: String,
+    pub model: String,
+    pub temperature: f32,
+}
+
+impl Default for DeepSeekConfig {
+    fn default() -> Self {
+        Self {
+            api_key_env: "DEEPSEEK_API_KEY".into(),
+            api_key: None,
+            base_url: "https://api.deepseek.com".into(),
+            model: "deepseek-v4-flash".into(),
+            temperature: 0.7,
+        }
+    }
+}
+
+impl DeepSeekConfig {
+    pub fn resolve_api_key(&self) -> Option<String> {
+        resolve_api_key_value(&self.api_key, &self.api_key_env)
+    }
+
+    fn merge(&mut self, partial: PartialDeepSeekConfig) {
         if let Some(api_key_env) = partial.api_key_env {
             self.api_key_env = api_key_env;
         }
@@ -1385,6 +1459,7 @@ struct PartialProviderConfig {
     anthropic: Option<PartialAnthropicConfig>,
     openrouter: Option<PartialOpenRouterConfig>,
     zhipuai: Option<PartialZhipuAIConfig>,
+    deepseek: Option<PartialDeepSeekConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -1427,6 +1502,15 @@ struct PartialOpenRouterConfig {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct PartialZhipuAIConfig {
+    api_key_env: Option<String>,
+    api_key: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+    temperature: Option<f32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialDeepSeekConfig {
     api_key_env: Option<String>,
     api_key: Option<String>,
     base_url: Option<String>,
@@ -1539,6 +1623,15 @@ fn default_model_aliases() -> BTreeMap<String, String> {
         ("zhipuai".into(), "glm-5-turbo".into()),
         ("glm".into(), "glm-5-turbo".into()),
         ("glm5".into(), "glm-5-turbo".into()),
+        ("deepseek".into(), "deepseek-v4-flash".into()),
+        ("ds".into(), "deepseek-v4-flash".into()),
+        ("deepseek-v4".into(), "deepseek-v4-flash".into()),
+        ("dsv4".into(), "deepseek-v4-flash".into()),
+        ("dsv4p".into(), "deepseek-v4-pro".into()),
+        ("deepseek-v3".into(), "deepseek-chat".into()),
+        ("dsv3".into(), "deepseek-chat".into()),
+        ("deepseek-r1".into(), "deepseek-reasoner".into()),
+        ("dsr1".into(), "deepseek-reasoner".into()),
     ])
 }
 
@@ -1742,6 +1835,7 @@ onboarding_completed = true
         config.provider.openai.api_key_env = "__NCA_TEST_NONE__".into();
         config.provider.anthropic.api_key_env = "__NCA_TEST_NONE__".into();
         config.provider.openrouter.api_key_env = "__NCA_TEST_NONE__".into();
+        config.provider.deepseek.api_key_env = "__NCA_TEST_NONE__".into();
         config
     }
 

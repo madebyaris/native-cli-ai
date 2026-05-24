@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod anthropic_compat;
+pub mod deepseek;
 pub mod factory;
 pub mod minimax;
 pub mod minimax_vlm;
@@ -21,6 +22,8 @@ use nca_common::tool::{ToolCall, ToolDefinition};
 #[derive(Debug, Clone)]
 pub enum StreamChunk {
     TextDelta(String),
+    /// Reasoning/thinking content from providers like DeepSeek R1.
+    ReasoningDelta(String),
     ToolUse(ToolCall),
     Usage {
         input_tokens: u64,

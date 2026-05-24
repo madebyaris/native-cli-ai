@@ -198,6 +198,7 @@ pub async fn materialize_minimax_user_images(
             content: MessageContent::Text(combined),
             tool_call_id: msg.tool_call_id.clone(),
             tool_calls: msg.tool_calls.clone(),
+            reasoning_content: None,
         });
     }
 

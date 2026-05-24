@@ -290,6 +290,10 @@ pub struct Message {
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<MessageToolCall>>,
+    /// Reasoning/thinking content from providers like DeepSeek R1.
+    /// Must be passed back in subsequent requests for DeepSeek reasoning models.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 impl Message {
@@ -299,6 +303,7 @@ impl Message {
             content: MessageContent::Text(content.into()),
             tool_call_id: None,
             tool_calls: None,
+            reasoning_content: None,
         }
     }
 
@@ -308,6 +313,7 @@ impl Message {
             content: MessageContent::Parts(parts),
             tool_call_id: None,
             tool_calls: None,
+            reasoning_content: None,
         }
     }
 
@@ -317,6 +323,7 @@ impl Message {
             content: MessageContent::Text(content.into()),
             tool_call_id: None,
             tool_calls: None,
+            reasoning_content: None,
         }
     }
 
@@ -329,7 +336,13 @@ impl Message {
             content: MessageContent::Text(content.into()),
             tool_call_id: None,
             tool_calls: Some(tool_calls),
+            reasoning_content: None,
         }
+    }
+
+    pub fn with_reasoning(mut self, reasoning: String) -> Self {
+        self.reasoning_content = Some(reasoning);
+        self
     }
 
     pub fn system(content: impl Into<String>) -> Self {
@@ -338,6 +351,7 @@ impl Message {
             content: MessageContent::Text(content.into()),
             tool_call_id: None,
             tool_calls: None,
+            reasoning_content: None,
         }
     }
 
@@ -347,6 +361,7 @@ impl Message {
             content: MessageContent::Text(content.into()),
             tool_call_id: Some(tool_call_id.into()),
             tool_calls: None,
+            reasoning_content: None,
         }
     }
 
