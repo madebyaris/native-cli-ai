@@ -27,7 +27,6 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/set-editor",
     "/settings",
     "/permissions",
-    "/permission-bypass",
     "/sessions",
     "/new",
     "/export",

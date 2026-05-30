@@ -388,7 +388,7 @@ fn build_skill_from_section(
                 }
             } else if directive.starts_with("permission_mode=") {
                 let val = directive.trim_start_matches("permission_mode=").trim();
-                permission_mode = parse_permission_mode_str(val);
+                permission_mode = val.parse::<PermissionMode>().ok();
             } else if directive.starts_with("context=") {
                 let val = directive
                     .trim_start_matches("context=")
@@ -426,16 +426,6 @@ fn section_description(heading: &str, body: &str) -> String {
                 .to_string()
         })
         .unwrap_or_else(|| heading.to_string())
-}
-
-fn parse_permission_mode_str(raw: &str) -> Option<PermissionMode> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "plan" => Some(PermissionMode::Plan),
-        "accept-edits" | "accept_edits" => Some(PermissionMode::AcceptEdits),
-        "dont-ask" | "dont_ask" => Some(PermissionMode::DontAsk),
-        "bypass-permissions" | "bypass_permissions" => Some(PermissionMode::BypassPermissions),
-        _ => None,
-    }
 }
 
 /// Resolve a file reference to an absolute path using three-level strategy:

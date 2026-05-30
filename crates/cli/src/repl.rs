@@ -793,8 +793,35 @@ impl Repl {
                 }
             }
             "/permissions" => {
-                if let Some(mode) = parts.next() {
-                    if let Some(parsed_mode) = parse_permission_mode(mode) {
+                if let Some(sub) = parts.next() {
+                    if sub.eq_ignore_ascii_case("bypass") {
+                        // bypass shortcut: /permissions bypass [on|off|toggle]
+                        let arg = parts.next().unwrap_or("").trim();
+                        let target = match arg.to_ascii_lowercase().as_str() {
+                            "" | "toggle" => {
+                                if self.runtime.permission_mode() == PermissionMode::BypassPermissions {
+                                    PermissionMode::Default
+                                } else {
+                                    PermissionMode::BypassPermissions
+                                }
+                            }
+                            "on" | "enable" | "yes" | "1" => PermissionMode::BypassPermissions,
+                            "off" | "disable" | "no" | "0" => PermissionMode::Default,
+                            _ => {
+                                out.println(
+                                    "usage: /permissions bypass [on|off|toggle] — default toggles bypass ↔ default",
+                                );
+                                return Ok(true);
+                            }
+                        };
+                        self.runtime.set_permission_mode(target);
+                        if let ReplOutput::Tui(st) = out
+                            && let Ok(mut g) = st.lock()
+                        {
+                            g.set_permission_mode(&format!("{target:?}"));
+                        }
+                        out.println(&format!("permission mode set to {target:?}"));
+                    } else if let Ok(parsed_mode) = sub.parse::<PermissionMode>() {
                         self.runtime.set_permission_mode(parsed_mode);
                         if let ReplOutput::Tui(st) = out
                             && let Ok(mut g) = st.lock()
@@ -808,7 +835,7 @@ impl Repl {
                         );
                     }
                 } else if let ReplOutput::Tui(st) = &out {
-                    let current_idx = permission_mode_index(self.runtime.permission_mode());
+                    let current_idx = self.runtime.permission_mode().index();
                     if let Ok(mut g) = st.lock() {
                         g.open_permission_picker(current_idx);
                     }
@@ -817,34 +844,8 @@ impl Repl {
                         "permission_mode: {:?}",
                         self.runtime.permission_mode()
                     ));
+                    out.println("(shortcut: /permissions bypass toggles bypass ↔ default)");
                 }
-            }
-            "/permission-bypass" => {
-                let sub = parts.next().unwrap_or("").trim();
-                let target = match sub.to_ascii_lowercase().as_str() {
-                    "" | "toggle" => {
-                        if self.runtime.permission_mode() == PermissionMode::BypassPermissions {
-                            PermissionMode::Default
-                        } else {
-                            PermissionMode::BypassPermissions
-                        }
-                    }
-                    "on" | "enable" | "yes" | "1" => PermissionMode::BypassPermissions,
-                    "off" | "disable" | "no" | "0" => PermissionMode::Default,
-                    _ => {
-                        out.println(
-                            "usage: /permission-bypass [on|off|toggle] — default toggles bypass ↔ default",
-                        );
-                        return Ok(true);
-                    }
-                };
-                self.runtime.set_permission_mode(target);
-                if let ReplOutput::Tui(st) = out
-                    && let Ok(mut g) = st.lock()
-                {
-                    g.set_permission_mode(&format!("{target:?}"));
-                }
-                out.println(&format!("permission mode set to {target:?}"));
             }
             "/skills" => {
                 let skills = SkillCatalog::discover(
@@ -1772,7 +1773,7 @@ impl Repl {
                         .await?;
                 }
                 TuiCmd::ApplyPermission(idx) => {
-                    let mode = permission_mode_from_index(idx);
+                    let mode = PermissionMode::from_index(idx);
                     self.runtime.set_permission_mode(mode);
                     if let Ok(mut g) = tui_state.lock() {
                         g.set_permission_mode(&format!("{mode:?}"));
@@ -1834,7 +1835,7 @@ impl Repl {
                     }
                 }
                 TuiCmd::OpenPermissionPicker => {
-                    let current_idx = permission_mode_index(self.runtime.permission_mode());
+                    let current_idx = self.runtime.permission_mode().index();
                     if let Ok(mut g) = tui_state.lock() {
                         g.open_permission_picker(current_idx);
                     }
@@ -2353,40 +2354,6 @@ fn build_model_picker_entries(
     entries
 }
 
-fn permission_mode_index(mode: PermissionMode) -> usize {
-    match mode {
-        PermissionMode::Default => 0,
-        PermissionMode::Plan => 1,
-        PermissionMode::AcceptEdits => 2,
-        PermissionMode::DontAsk => 3,
-        PermissionMode::BypassPermissions => 4,
-    }
-}
-
-fn permission_mode_from_index(idx: usize) -> PermissionMode {
-    match idx {
-        0 => PermissionMode::Default,
-        1 => PermissionMode::Plan,
-        2 => PermissionMode::AcceptEdits,
-        3 => PermissionMode::DontAsk,
-        4 => PermissionMode::BypassPermissions,
-        _ => PermissionMode::Default,
-    }
-}
-
-fn parse_permission_mode(raw: &str) -> Option<PermissionMode> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "default" => Some(PermissionMode::Default),
-        "plan" => Some(PermissionMode::Plan),
-        "accept-edits" | "accept_edits" | "acceptedits" => Some(PermissionMode::AcceptEdits),
-        "dont-ask" | "dont_ask" | "dontask" => Some(PermissionMode::DontAsk),
-        "bypass-permissions" | "bypass_permissions" | "bypasspermissions" => {
-            Some(PermissionMode::BypassPermissions)
-        }
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2394,17 +2361,17 @@ mod tests {
     #[test]
     fn parses_permission_aliases() {
         assert_eq!(
-            parse_permission_mode("accept-edits"),
+            "accept-edits".parse::<PermissionMode>().ok(),
             Some(PermissionMode::AcceptEdits)
         );
         assert_eq!(
-            parse_permission_mode("dontask"),
+            "dontask".parse::<PermissionMode>().ok(),
             Some(PermissionMode::DontAsk)
         );
         assert_eq!(
-            parse_permission_mode("bypass_permissions"),
+            "bypass_permissions".parse::<PermissionMode>().ok(),
             Some(PermissionMode::BypassPermissions)
         );
-        assert_eq!(parse_permission_mode("invalid"), None);
+        assert_eq!("invalid".parse::<PermissionMode>().ok(), None);
     }
 }

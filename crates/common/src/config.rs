@@ -1103,6 +1103,46 @@ pub enum PermissionMode {
     BypassPermissions,
 }
 
+impl std::str::FromStr for PermissionMode {
+    type Err = String;
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "default" => Ok(PermissionMode::Default),
+            "plan" => Ok(PermissionMode::Plan),
+            "accept-edits" | "accept_edits" | "acceptedits" => Ok(PermissionMode::AcceptEdits),
+            "dont-ask" | "dont_ask" | "dontask" => Ok(PermissionMode::DontAsk),
+            "bypass-permissions" | "bypass_permissions" | "bypasspermissions" => {
+                Ok(PermissionMode::BypassPermissions)
+            }
+            _ => Err(format!("unknown permission mode: {raw}")),
+        }
+    }
+}
+
+impl PermissionMode {
+    pub const ALL: &[Self] = &[
+        Self::Default,
+        Self::Plan,
+        Self::AcceptEdits,
+        Self::DontAsk,
+        Self::BypassPermissions,
+    ];
+
+    pub fn index(self) -> usize {
+        match self {
+            Self::Default => 0,
+            Self::Plan => 1,
+            Self::AcceptEdits => 2,
+            Self::DontAsk => 3,
+            Self::BypassPermissions => 4,
+        }
+    }
+
+    pub fn from_index(idx: usize) -> Self {
+        Self::ALL.get(idx).copied().unwrap_or(Self::Default)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionConfig {
     pub history_dir: PathBuf,
