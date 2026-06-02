@@ -56,6 +56,8 @@ pub struct SessionRuntime {
     handle: Option<SupervisorHandle>,
     question_pending: Option<QuestionPendingMap>,
     config: NcaConfig,
+    safe_mode: bool,
+    interactive_approvals: bool,
 }
 
 impl SessionRuntime {
@@ -225,6 +227,32 @@ impl SessionRuntime {
         self.supervisor.reset_for_new_session();
         Ok(())
     }
+
+    /// Switch to a different existing session in-place (no process restart).
+    /// Saves the current session, then resumes the target session, rebuilding
+    /// handle and question-pending channels so the caller can rewire its event loop.
+    pub async fn switch_to(&mut self, session_id: &str) -> Result<(), String> {
+        self.supervisor.finish(EndReason::Completed).await;
+        self.supervisor.save().await?;
+
+        let mut supervisor = Supervisor::resume(
+            self.config.clone(),
+            &self.supervisor.workspace_root,
+            self.safe_mode,
+            self.interactive_approvals,
+            session_id,
+            None,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+        let mut handle = supervisor.take_handle();
+        let question_pending = handle.take_question_pending();
+        self.supervisor = supervisor;
+        self.handle = Some(handle);
+        self.question_pending = question_pending;
+        Ok(())
+    }
 }
 
 pub async fn build_session_runtime(
@@ -256,6 +284,8 @@ pub async fn build_session_runtime(
         handle: Some(handle),
         question_pending,
         config,
+        safe_mode,
+        interactive_approvals,
     })
 }
 
@@ -283,5 +313,7 @@ pub async fn build_resumed_session_runtime(
         handle: Some(handle),
         question_pending,
         config,
+        safe_mode,
+        interactive_approvals,
     })
 }

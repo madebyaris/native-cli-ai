@@ -1852,13 +1852,41 @@ impl Repl {
                                 .push(DisplayBlock::System("Already on this session.".into()));
                         }
                     } else {
-                        // Save current, then attempt resume
-                        let _ = self.runtime.save().await;
-                        if let Ok(mut g) = tui_state.lock() {
-                            g.blocks.push(DisplayBlock::System(format!(
-                                "Resuming session {} is not yet fully supported in-process. Please restart nca with: nca resume {session_id}",
-                                session_id
-                            )));
+                        match self.runtime.switch_to(&session_id).await {
+                            Ok(()) => {
+                                // Reset TUI transcript and replay the target session's event log.
+                                if let Ok(mut g) = tui_state.lock() {
+                                    g.blocks.clear();
+                                    g.streaming_assistant = None;
+                                    g.scroll_lines = 0;
+                                    g.transcript_follow_tail = true;
+                                    g.session_id = self.runtime.session_id().to_string();
+                                    g.model = self.runtime.model().to_string();
+                                    g.input_tokens = 0;
+                                    g.output_tokens = 0;
+                                    g.cost_usd = 0.0;
+                                    g.started = std::time::Instant::now();
+                                }
+                                let log_path = self.runtime.event_log_path();
+                                replay_event_log_into_state(&log_path, &tui_state).await;
+                                // After replay, sync token counts from the restored snapshot.
+                                let snap = self.runtime.snapshot();
+                                if let Ok(mut g) = tui_state.lock() {
+                                    g.input_tokens = snap.total_input_tokens;
+                                    g.output_tokens = snap.total_output_tokens;
+                                    g.cost_usd = snap.estimated_cost_usd;
+                                    g.blocks.push(DisplayBlock::System(format!(
+                                        "Switched to session {session_id}"
+                                    )));
+                                }
+                            }
+                            Err(err) => {
+                                if let Ok(mut g) = tui_state.lock() {
+                                    g.blocks.push(DisplayBlock::System(format!(
+                                        "[!] Failed to switch to session {session_id}: {err}"
+                                    )));
+                                }
+                            }
                         }
                     }
                 }
