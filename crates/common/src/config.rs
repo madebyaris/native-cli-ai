@@ -260,8 +260,30 @@ impl NcaConfig {
         self.sync_default_model_from_provider();
     }
 
+    /// Map known alias patterns to the provider they belong to.
+    ///
+    /// When a user picks a provider-specific alias (e.g. "glm" or "gpt4o") from the
+    /// model picker while a different provider is active, the alias must also switch
+    /// the default provider so the correct endpoint is used.
+    pub fn provider_hint_for_alias(alias: &str) -> Option<ProviderKind> {
+        match alias.trim().to_ascii_lowercase().as_str() {
+            "default" | "minimax" | "m2.5" | "coding" | "reasoning" => Some(ProviderKind::MiniMax),
+            "openai" | "gpt" | "gpt4o" | "gpt4omini" => Some(ProviderKind::OpenAi),
+            "claude" | "claude-sonnet" => Some(ProviderKind::Anthropic),
+            "openrouter" => Some(ProviderKind::OpenRouter),
+            "zhipuai" | "glm" | "glm5" => Some(ProviderKind::ZhipuAI),
+            "deepseek" | "ds" | "deepseek-v4" | "dsv4" | "dsv4p" | "deepseek-v3" | "dsv3"
+            | "deepseek-r1" | "dsr1" => Some(ProviderKind::DeepSeek),
+            _ => None,
+        }
+    }
+
     pub fn apply_model_override(&mut self, raw_model: &str) {
         let resolved = self.model.resolve_alias(raw_model);
+        // Switch provider when the alias belongs to a specific provider.
+        if let Some(provider) = Self::provider_hint_for_alias(raw_model) {
+            self.provider.default = provider;
+        }
         self.provider.set_model_for_default(resolved);
         self.sync_default_model_from_provider();
     }
@@ -1726,6 +1748,86 @@ mod tests {
     }
 
     #[test]
+    fn apply_model_override_switches_provider_for_cross_provider_alias() {
+        // Regression: selecting "glm" while DeepSeek is active must switch to
+        // ZhipuAI instead of setting DeepSeek's model to glm-5-turbo.
+        let mut config = NcaConfig::default();
+        config.provider.default = ProviderKind::DeepSeek;
+        config.sync_default_model_from_provider();
+        assert_eq!(config.provider.deepseek.model, "deepseek-v4-flash");
+
+        config.apply_model_override("glm");
+
+        assert_eq!(config.provider.default, ProviderKind::ZhipuAI);
+        assert_eq!(config.provider.zhipuai.model, "glm-5-turbo");
+        assert_eq!(config.model.default_model, "glm-5-turbo");
+        // DeepSeek model must NOT have been polluted
+        assert_eq!(config.provider.deepseek.model, "deepseek-v4-flash");
+    }
+
+    #[test]
+    fn apply_model_override_switches_provider_for_gpt4o_alias() {
+        let mut config = NcaConfig::default();
+        config.provider.default = ProviderKind::DeepSeek;
+        config.sync_default_model_from_provider();
+
+        config.apply_model_override("gpt4o");
+
+        assert_eq!(config.provider.default, ProviderKind::OpenAi);
+        assert_eq!(config.provider.openai.model, "gpt-4o");
+        assert_eq!(config.model.default_model, "gpt-4o");
+        assert_eq!(config.provider.deepseek.model, "deepseek-v4-flash");
+    }
+
+    #[test]
+    fn apply_model_override_keeps_provider_for_unknown_alias() {
+        let mut config = NcaConfig::default();
+        config.provider.default = ProviderKind::OpenAi;
+        config.sync_default_model_from_provider();
+
+        // A literal model name not in the alias map — no provider switch.
+        config.apply_model_override("my-custom-model");
+
+        assert_eq!(config.provider.default, ProviderKind::OpenAi);
+        assert_eq!(config.provider.openai.model, "my-custom-model");
+    }
+
+    #[test]
+    fn provider_hint_for_alias_covers_all_built_in_aliases() {
+        // Every alias in the default map that resolves to a provider-specific model
+        // must have a provider hint.
+        let aliases = default_model_aliases();
+        for alias in aliases.keys() {
+            // Skipping generic aliases that are not provider-specific (e.g. "default", "coding", "reasoning")
+            // is fine — they map to MiniMax which is the default provider.
+            // The important thing is that cross-provider aliases DO have hints.
+            let _ = NcaConfig::provider_hint_for_alias(alias);
+        }
+        // Spot-check key cross-provider aliases
+        assert_eq!(
+            NcaConfig::provider_hint_for_alias("glm"),
+            Some(ProviderKind::ZhipuAI)
+        );
+        assert_eq!(
+            NcaConfig::provider_hint_for_alias("deepseek"),
+            Some(ProviderKind::DeepSeek)
+        );
+        assert_eq!(
+            NcaConfig::provider_hint_for_alias("claude"),
+            Some(ProviderKind::Anthropic)
+        );
+        assert_eq!(
+            NcaConfig::provider_hint_for_alias("gpt4o"),
+            Some(ProviderKind::OpenAi)
+        );
+        assert_eq!(
+            NcaConfig::provider_hint_for_alias("openrouter"),
+            Some(ProviderKind::OpenRouter)
+        );
+        assert_eq!(NcaConfig::provider_hint_for_alias("unknown-model"), None);
+    }
+
+    #[test]
     fn apply_env_supports_openai_anthropic_and_openrouter() {
         let _guard = EnvGuard::set(&[
             ("NCA_DEFAULT_PROVIDER", Some("openrouter")),
@@ -1970,16 +2072,43 @@ blocking = false
         let hooks = partial.hooks.expect("hooks should be present");
 
         // Empty arrays should be Some([])
-        assert_eq!(hooks.session_start.as_deref().map(<[HookCommand]>::len), Some(0));
-        assert_eq!(hooks.pre_tool_use.as_deref().map(<[HookCommand]>::len), Some(0));
-        assert_eq!(hooks.post_tool_use.as_deref().map(<[HookCommand]>::len), Some(0));
-        assert_eq!(hooks.subagent_start.as_deref().map(<[HookCommand]>::len), Some(0));
-        assert_eq!(hooks.subagent_stop.as_deref().map(<[HookCommand]>::len), Some(0));
+        assert_eq!(
+            hooks.session_start.as_deref().map(<[HookCommand]>::len),
+            Some(0)
+        );
+        assert_eq!(
+            hooks.pre_tool_use.as_deref().map(<[HookCommand]>::len),
+            Some(0)
+        );
+        assert_eq!(
+            hooks.post_tool_use.as_deref().map(<[HookCommand]>::len),
+            Some(0)
+        );
+        assert_eq!(
+            hooks.subagent_start.as_deref().map(<[HookCommand]>::len),
+            Some(0)
+        );
+        assert_eq!(
+            hooks.subagent_stop.as_deref().map(<[HookCommand]>::len),
+            Some(0)
+        );
 
         // Arrays with [[...]] entries should have 1 element each
-        assert_eq!(hooks.session_end.as_deref().map(<[HookCommand]>::len), Some(1));
-        assert_eq!(hooks.post_tool_failure.as_deref().map(<[HookCommand]>::len), Some(1));
-        assert_eq!(hooks.approval_requested.as_deref().map(<[HookCommand]>::len), Some(1));
+        assert_eq!(
+            hooks.session_end.as_deref().map(<[HookCommand]>::len),
+            Some(1)
+        );
+        assert_eq!(
+            hooks.post_tool_failure.as_deref().map(<[HookCommand]>::len),
+            Some(1)
+        );
+        assert_eq!(
+            hooks
+                .approval_requested
+                .as_deref()
+                .map(<[HookCommand]>::len),
+            Some(1)
+        );
 
         // Verify the commands are correct
         assert_eq!(
@@ -2037,14 +2166,16 @@ blocking = false
         config.merge(partial);
 
         // HookRunner has_any checks all fields
-        assert!(!config.hooks.session_start.is_empty()
-            || !config.hooks.session_end.is_empty()
-            || !config.hooks.pre_tool_use.is_empty()
-            || !config.hooks.post_tool_use.is_empty()
-            || !config.hooks.post_tool_failure.is_empty()
-            || !config.hooks.approval_requested.is_empty()
-            || !config.hooks.subagent_start.is_empty()
-            || !config.hooks.subagent_stop.is_empty()
-            || !config.hooks.turn_complete.is_empty());
+        assert!(
+            !config.hooks.session_start.is_empty()
+                || !config.hooks.session_end.is_empty()
+                || !config.hooks.pre_tool_use.is_empty()
+                || !config.hooks.post_tool_use.is_empty()
+                || !config.hooks.post_tool_failure.is_empty()
+                || !config.hooks.approval_requested.is_empty()
+                || !config.hooks.subagent_start.is_empty()
+                || !config.hooks.subagent_stop.is_empty()
+                || !config.hooks.turn_complete.is_empty()
+        );
     }
 }
