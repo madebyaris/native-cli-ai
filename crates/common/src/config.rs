@@ -1279,6 +1279,8 @@ pub struct HookConfig {
     pub subagent_start: Vec<HookCommand>,
     #[serde(default)]
     pub subagent_stop: Vec<HookCommand>,
+    #[serde(default)]
+    pub turn_complete: Vec<HookCommand>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1441,6 +1443,9 @@ impl HookConfig {
         }
         if let Some(subagent_stop) = partial.subagent_stop {
             self.subagent_stop = subagent_stop;
+        }
+        if let Some(turn_complete) = partial.turn_complete {
+            self.turn_complete = turn_complete;
         }
     }
 }
@@ -1629,6 +1634,7 @@ struct PartialHookConfig {
     approval_requested: Option<Vec<HookCommand>>,
     subagent_start: Option<Vec<HookCommand>>,
     subagent_stop: Option<Vec<HookCommand>>,
+    turn_complete: Option<Vec<HookCommand>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -1934,5 +1940,111 @@ onboarding_completed = true
         let mut config = config_without_env_keys();
         config.merge(partial);
         assert!(config.needs_onboarding());
+    }
+
+    #[test]
+    fn hooks_with_empty_arrays_and_later_array_of_tables_parses_correctly() {
+        // This mirrors the real config pattern: [hooks] sets some arrays to [],
+        // then [[hooks.session_end]] etc. add entries to other arrays.
+        let toml_str = r#"
+[hooks]
+session_start = []
+pre_tool_use = []
+post_tool_use = []
+subagent_start = []
+subagent_stop = []
+
+[[hooks.session_end]]
+command = "echo session ended"
+blocking = false
+
+[[hooks.post_tool_failure]]
+command = "echo tool failed"
+blocking = false
+
+[[hooks.approval_requested]]
+command = "echo approval needed"
+blocking = false
+"#;
+        let partial: PartialNcaConfig = toml::from_str(toml_str).expect("parse hooks config");
+        let hooks = partial.hooks.expect("hooks should be present");
+
+        // Empty arrays should be Some([])
+        assert_eq!(hooks.session_start.as_deref().map(<[HookCommand]>::len), Some(0));
+        assert_eq!(hooks.pre_tool_use.as_deref().map(<[HookCommand]>::len), Some(0));
+        assert_eq!(hooks.post_tool_use.as_deref().map(<[HookCommand]>::len), Some(0));
+        assert_eq!(hooks.subagent_start.as_deref().map(<[HookCommand]>::len), Some(0));
+        assert_eq!(hooks.subagent_stop.as_deref().map(<[HookCommand]>::len), Some(0));
+
+        // Arrays with [[...]] entries should have 1 element each
+        assert_eq!(hooks.session_end.as_deref().map(<[HookCommand]>::len), Some(1));
+        assert_eq!(hooks.post_tool_failure.as_deref().map(<[HookCommand]>::len), Some(1));
+        assert_eq!(hooks.approval_requested.as_deref().map(<[HookCommand]>::len), Some(1));
+
+        // Verify the commands are correct
+        assert_eq!(
+            hooks.session_end.as_ref().unwrap()[0].command,
+            "echo session ended"
+        );
+        assert_eq!(
+            hooks.post_tool_failure.as_ref().unwrap()[0].command,
+            "echo tool failed"
+        );
+        assert_eq!(
+            hooks.approval_requested.as_ref().unwrap()[0].command,
+            "echo approval needed"
+        );
+    }
+
+    #[test]
+    fn hooks_merge_preserves_array_of_tables_entries() {
+        let toml_str = r#"
+[hooks]
+session_start = []
+
+[[hooks.session_end]]
+command = "echo end"
+blocking = false
+
+[[hooks.post_tool_failure]]
+command = "echo fail"
+blocking = false
+"#;
+        let partial: PartialNcaConfig = toml::from_str(toml_str).expect("parse");
+        let mut config = NcaConfig::default();
+        config.merge(partial);
+
+        assert!(config.hooks.session_start.is_empty());
+        assert_eq!(config.hooks.session_end.len(), 1);
+        assert_eq!(config.hooks.session_end[0].command, "echo end");
+        assert_eq!(config.hooks.post_tool_failure.len(), 1);
+        assert_eq!(config.hooks.post_tool_failure[0].command, "echo fail");
+    }
+
+    #[test]
+    fn hooks_has_any_detects_entries() {
+        let toml_str = r#"
+[[hooks.session_end]]
+command = "echo end"
+blocking = false
+
+[[hooks.post_tool_failure]]
+command = "echo fail"
+blocking = false
+"#;
+        let partial: PartialNcaConfig = toml::from_str(toml_str).expect("parse");
+        let mut config = NcaConfig::default();
+        config.merge(partial);
+
+        // HookRunner has_any checks all fields
+        assert!(!config.hooks.session_start.is_empty()
+            || !config.hooks.session_end.is_empty()
+            || !config.hooks.pre_tool_use.is_empty()
+            || !config.hooks.post_tool_use.is_empty()
+            || !config.hooks.post_tool_failure.is_empty()
+            || !config.hooks.approval_requested.is_empty()
+            || !config.hooks.subagent_start.is_empty()
+            || !config.hooks.subagent_stop.is_empty()
+            || !config.hooks.turn_complete.is_empty());
     }
 }

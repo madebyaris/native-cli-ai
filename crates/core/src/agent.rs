@@ -558,6 +558,19 @@ impl AgentLoop {
             .await;
         }
 
+        if let Some(hooks) = &self.hooks {
+            let response_preview = truncate_str(&final_text, 300);
+            hooks
+                .run_best_effort(
+                    HookEventKind::TurnComplete,
+                    None,
+                    &json!({
+                        "response_preview": response_preview,
+                    }),
+                )
+                .await;
+        }
+
         self.emit(AgentEvent::BusyStateChanged {
             state: BusyState::Idle,
         })
@@ -587,6 +600,17 @@ impl AgentLoop {
 
     fn is_cancelled(&self) -> bool {
         self.cancel_flag.load(Ordering::SeqCst)
+    }
+
+}
+
+/// Truncate a string to `max_chars` characters, appending "…" if truncated.
+fn truncate_str(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+        format!("{truncated}…")
     }
 }
 

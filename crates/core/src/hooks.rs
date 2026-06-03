@@ -17,6 +17,7 @@ pub enum HookEventKind {
     ApprovalRequested,
     SubagentStart,
     SubagentStop,
+    TurnComplete,
 }
 
 impl HookRunner {
@@ -33,6 +34,7 @@ impl HookRunner {
             || !self.config.approval_requested.is_empty()
             || !self.config.subagent_start.is_empty()
             || !self.config.subagent_stop.is_empty()
+            || !self.config.turn_complete.is_empty()
     }
 
     pub async fn run(
@@ -80,6 +82,7 @@ fn hooks_for_event(config: &HookConfig, event: HookEventKind) -> &[HookCommand] 
         HookEventKind::ApprovalRequested => &config.approval_requested,
         HookEventKind::SubagentStart => &config.subagent_start,
         HookEventKind::SubagentStop => &config.subagent_stop,
+        HookEventKind::TurnComplete => &config.turn_complete,
     }
 }
 
@@ -114,18 +117,36 @@ async fn run_hook_command(hook: &HookCommand, payload: &Value) -> Result<(), Str
         .wait_with_output()
         .await
         .map_err(|err| err.to_string())?;
-    if output.status.success() || !hook.blocking {
-        return Ok(());
-    }
 
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    if output.status.success() {
+        return Ok(());
+    }
+
     let reason = if !stderr.is_empty() {
-        stderr
+        stderr.clone()
     } else if !stdout.is_empty() {
-        stdout
+        stdout.clone()
     } else {
-        format!("hook command `{}` failed", hook.command)
+        format!("hook command exited with status {}", output.status)
     };
-    Err(reason)
+
+    if hook.blocking {
+        Err(reason)
+    } else {
+        // Non-blocking hooks still log failures so users can diagnose why
+        // their hooks appear not to fire (e.g. missing jq, mako, etc.).
+        tracing::warn!(
+            "hook (non-blocking) failed: {}{}",
+            reason,
+            if stderr.is_empty() && stdout.is_empty() {
+                String::new()
+            } else {
+                format!(" | stderr: {} | stdout: {}", stderr, stdout)
+            }
+        );
+        Ok(())
+    }
 }
