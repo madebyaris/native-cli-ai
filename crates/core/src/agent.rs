@@ -146,7 +146,13 @@ impl AgentLoop {
             .await;
             self.provider
                 .prepare_messages_for_request(&mut self.messages, workspace_root)
-                .await?;
+                .await
+                .inspect_err(|_| {
+                    // Ensure the UI exits the thinking state on API failure.
+                    let _ = self.event_tx.try_send(AgentEvent::BusyStateChanged {
+                        state: BusyState::Idle,
+                    });
+                })?;
             let mut stream = self
                 .provider
                 .chat(
@@ -155,7 +161,13 @@ impl AgentLoop {
                     &self.model,
                     workspace_root,
                 )
-                .await?;
+                .await
+                .inspect_err(|_| {
+                    // Ensure the UI exits the thinking state on API failure.
+                    let _ = self.event_tx.try_send(AgentEvent::BusyStateChanged {
+                        state: BusyState::Idle,
+                    });
+                })?;
 
             let mut assistant_text = String::new();
             let mut reasoning_text = String::new();
@@ -601,7 +613,6 @@ impl AgentLoop {
     fn is_cancelled(&self) -> bool {
         self.cancel_flag.load(Ordering::SeqCst)
     }
-
 }
 
 /// Truncate a string to `max_chars` characters, appending "…" if truncated.

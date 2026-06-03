@@ -12,7 +12,7 @@ use crate::tui::{
     run_blocking, spawn_tui_bridge,
 };
 use nca_common::config::{PermissionMode, ProviderKind};
-use nca_common::event::{EndReason, QuestionSelection};
+use nca_common::event::{BusyState, EndReason, QuestionSelection};
 use nca_core::skills::SkillCatalog;
 use nca_runtime::memory_store::MemoryStore;
 use reedline::{Completer, Emacs, FileBackedHistory, Reedline, Signal, Suggestion, Vi};
@@ -2174,6 +2174,7 @@ impl Repl {
                     }
                     if let Ok(mut g) = tui_state.lock() {
                         g.set_busy(false);
+                        g.set_busy_state(BusyState::Idle);
                     }
                 }
             }
