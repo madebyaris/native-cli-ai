@@ -1336,10 +1336,11 @@ impl Repl {
                     );
                 }
             }
-            "/sessions" => match self.runtime.list_session_ids().await {
-                Ok(mut ids) => {
-                    ids.sort();
-                    if ids.is_empty() {
+            "/sessions" => match self.runtime.list_session_snapshots().await {
+                Ok(mut snapshots) => {
+                    snapshots.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
+                    let current = self.runtime.session_id().to_string();
+                    if snapshots.is_empty() {
                         let lines = vec!["No saved sessions.".into()];
                         if let ReplOutput::Tui(st) = &out {
                             if let Ok(mut g) = st.lock() {
@@ -1349,13 +1350,22 @@ impl Repl {
                             out.println("no saved sessions");
                         }
                     } else if let ReplOutput::Tui(st) = &out {
-                        let current = self.runtime.session_id().to_string();
                         if let Ok(mut g) = st.lock() {
-                            g.open_session_picker(ids, &current);
+                            g.open_session_picker(snapshots, &current);
                         }
                     } else {
-                        for id in ids {
-                            out.println(&id);
+                        for snap in &snapshots {
+                            let marker = if snap.id == current {
+                                " *"
+                            } else {
+                                ""
+                            };
+                            let display = if let Some(title) = &snap.session_title {
+                                format!("{title}{marker}  [{}]", snap.id)
+                            } else {
+                                format!("{}{marker}", snap.id)
+                            };
+                            out.println(&display);
                         }
                     }
                 }

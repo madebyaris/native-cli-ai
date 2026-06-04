@@ -2622,7 +2622,14 @@ pub fn run_blocking(
                 if g.session_picker_open {
                     let filter = g.session_picker_search.to_ascii_lowercase();
                     let filtered_indices: Vec<usize> = g.session_picker_entries.iter().enumerate()
-                        .filter(|(_, s)| filter.is_empty() || s.to_ascii_lowercase().contains(&filter))
+                        .filter(|(_, s)| {
+                            filter.is_empty()
+                                || s.id.to_ascii_lowercase().contains(&filter)
+                                || s.session_title
+                                    .as_ref()
+                                    .map(|t| t.to_ascii_lowercase().contains(&filter))
+                                    .unwrap_or(false)
+                        })
                         .map(|(i, _)| i)
                         .collect();
                     const SESSION_PICKER_MAX_ROWS: usize = 16;
@@ -2669,15 +2676,20 @@ pub fn run_blocking(
                             .skip(list_start)
                             .take(list_end.saturating_sub(list_start))
                         {
-                            let id = &g.session_picker_entries[filt_idx];
-                            let is_current = id == &current_session_id;
+                            let snap = &g.session_picker_entries[filt_idx];
+                            let is_current = snap.id == current_session_id;
                             let marker = if is_current { " *" } else { "" };
                             let st = if vis_idx == pick {
                                 Style::default().fg(Color::Black).bg(theme::USER).add_modifier(Modifier::BOLD)
                             } else {
                                 Style::default().fg(theme::TEXT)
                             };
-                            lines.push(Line::from(Span::styled(format!(" {id}{marker}"), st)));
+                            let display = if let Some(title) = &snap.session_title {
+                                format!(" {title}{marker}  [{}]", snap.id)
+                            } else {
+                                format!(" {}{marker}", snap.id)
+                            };
+                            lines.push(Line::from(Span::styled(display, st)));
                         }
                         let remaining_below = n_filtered.saturating_sub(list_end);
                         if remaining_below > 0 {
@@ -3737,7 +3749,12 @@ pub fn run_blocking(
                             .session_picker_entries
                             .iter()
                             .filter(|s| {
-                                filter.is_empty() || s.to_ascii_lowercase().contains(&filter)
+                                filter.is_empty()
+                                    || s.id.to_ascii_lowercase().contains(&filter)
+                                    || s.session_title
+                                        .as_ref()
+                                        .map(|t| t.to_ascii_lowercase().contains(&filter))
+                                        .unwrap_or(false)
                             })
                             .count();
                         match (key.code, key.modifiers) {
@@ -3752,18 +3769,22 @@ pub fn run_blocking(
                                     (g.session_picker_index + 1).min(count.saturating_sub(1));
                             }
                             (KeyCode::Enter, _) => {
-                                let filtered: Vec<&String> = g
+                                let filtered: Vec<&nca_common::session::SessionSnapshot> = g
                                     .session_picker_entries
                                     .iter()
                                     .filter(|s| {
                                         filter.is_empty()
-                                            || s.to_ascii_lowercase().contains(&filter)
+                                            || s.id.to_ascii_lowercase().contains(&filter)
+                                            || s.session_title
+                                                .as_ref()
+                                                .map(|t| t.to_ascii_lowercase().contains(&filter))
+                                                .unwrap_or(false)
                                     })
                                     .collect();
                                 let pick =
                                     g.session_picker_index.min(filtered.len().saturating_sub(1));
-                                if let Some(id) = filtered.get(pick) {
-                                    let id = (*id).clone();
+                                if let Some(snap) = filtered.get(pick) {
+                                    let id = snap.id.clone();
                                     g.close_session_picker();
                                     drop(g);
                                     let _ = cmd_tx.send(TuiCmd::ResumeSession(id));

@@ -41,6 +41,9 @@ pub struct SessionMeta {
     /// Persisted compact summary for resume and memory surfaces.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_summary: Option<String>,
+    /// Human-readable title generated from the first user prompt via LLM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_title: Option<String>,
     /// External orchestration metadata for headless worker runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestration: Option<OrchestrationContext>,
@@ -83,6 +86,8 @@ pub struct SessionSnapshot {
     pub spawn_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestration: Option<OrchestrationContext>,
     pub total_input_tokens: u64,
@@ -128,6 +133,7 @@ impl SessionState {
             inherited_summary: self.meta.inherited_summary.clone(),
             spawn_reason: self.meta.spawn_reason.clone(),
             session_summary: self.meta.session_summary.clone(),
+            session_title: self.meta.session_title.clone(),
             orchestration: self.meta.orchestration.clone(),
             total_input_tokens: self.total_input_tokens,
             total_output_tokens: self.total_output_tokens,

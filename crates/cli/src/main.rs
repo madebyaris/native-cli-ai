@@ -1014,6 +1014,10 @@ async fn list_sessions(
         let pattern_lower = pattern.to_lowercase();
         sessions.retain(|s| {
             s.id.to_lowercase().contains(&pattern_lower)
+                || s.session_title
+                    .as_ref()
+                    .map(|t| t.to_lowercase().contains(&pattern_lower))
+                    .unwrap_or(false)
                 || s.session_summary
                     .as_ref()
                     .map(|sum| sum.to_lowercase().contains(&pattern_lower))
@@ -1276,13 +1280,16 @@ async fn print_log_file(
 }
 
 fn print_human_session(session: &SessionSnapshot) {
+    let display = if let Some(title) = &session.session_title {
+        format!("{title}  [{}]", session.id)
+    } else {
+        session.id.clone()
+    };
     println!(
-        "{}  status={:?}  model={}  updated={}  children={}",
-        session.id,
+        "{display}  status={:?}  model={}  updated={}",
         session.status,
         session.model,
         session.updated_at.to_rfc3339(),
-        session.child_session_ids.len()
     );
     if let Some(summary) = &session.session_summary {
         println!("  summary: {}", summary.replace('\n', " "));

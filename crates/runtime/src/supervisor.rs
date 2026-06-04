@@ -60,6 +60,7 @@ pub struct Supervisor {
     inherited_summary: Option<String>,
     spawn_reason: Option<String>,
     session_summary: Option<String>,
+    session_title: Option<String>,
     orchestration: Option<OrchestrationContext>,
     config: NcaConfig,
     hooks: Option<HookRunner>,
@@ -248,6 +249,7 @@ impl Supervisor {
             inherited_summary: None,
             spawn_reason: None,
             session_summary: None,
+            session_title: None,
             orchestration: cfg.orchestration_context,
             config,
             hooks: hook_runner,
@@ -307,6 +309,7 @@ impl Supervisor {
         sup.inherited_summary = loaded.meta.inherited_summary;
         sup.spawn_reason = loaded.meta.spawn_reason;
         sup.session_summary = loaded.meta.session_summary;
+        sup.session_title = loaded.meta.session_title;
         sup.orchestration = loaded.meta.orchestration;
         sup.context_manager = Self::make_context_manager(&sup.config, &sup.model).await;
         Ok(sup)
@@ -370,6 +373,12 @@ impl Supervisor {
         self.check_and_summarize_context().await;
 
         self.refresh_session_summary();
+
+        // Generate session title from the first user prompt if not yet set.
+        if self.session_title.is_none() {
+            self.generate_session_title(prompt).await;
+        }
+
         self.save().await.map_err(ProviderError::Other)?;
         self.update_last_session()
             .await
@@ -624,6 +633,7 @@ impl Supervisor {
                 inherited_summary: self.inherited_summary.clone(),
                 spawn_reason: self.spawn_reason.clone(),
                 session_summary: self.session_summary.clone(),
+                session_title: self.session_title.clone(),
                 orchestration: self.orchestration.clone(),
             },
             messages: self.agent.messages.clone(),
@@ -643,6 +653,47 @@ impl Supervisor {
 
     pub fn set_session_summary(&mut self, summary: Option<String>) {
         self.session_summary = summary.filter(|summary| !summary.trim().is_empty());
+    }
+
+    pub fn set_session_title(&mut self, title: Option<String>) {
+        self.session_title = title.filter(|t| !t.trim().is_empty());
+    }
+
+    pub fn session_title(&self) -> Option<&str> {
+        self.session_title.as_deref()
+    }
+
+    /// Generate a concise session title from the first user prompt using the LLM.
+    /// Runs asynchronously and does not block the main turn flow.
+    pub async fn generate_session_title(&mut self, first_prompt: &str) {
+        if self.session_title.is_some() {
+            return;
+        }
+        let prompt = format!(
+            "Based on the user's first message below, generate a very short title \
+             (at most 20 words, in the same language as the user's message) that \
+             summarizes the topic of this coding session. Output ONLY the title, \
+             nothing else.\n\nUser's first message:\n{first_prompt}"
+        );
+        match self.summarize_with_ai(&prompt).await {
+            Ok(title) => {
+                let cleaned = title
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if !cleaned.is_empty() {
+                    self.set_session_title(Some(cleaned));
+                }
+            }
+            Err(e) => {
+                tracing::warn!("failed to generate session title: {e}");
+            }
+        }
     }
 
     pub async fn append_memory_note(
@@ -691,6 +742,7 @@ impl Supervisor {
         self.inherited_summary = None;
         self.spawn_reason = None;
         self.session_summary = None;
+        self.session_title = None;
         self.agent.cost_tracker = Default::default();
         self.status = SessionStatus::Running;
         self.created_at = Utc::now();
@@ -1569,6 +1621,7 @@ mod tests {
                 inherited_summary: None,
                 spawn_reason: None,
                 session_summary: None,
+                session_title: None,
                 orchestration: None,
             },
             messages: vec![Message::user("hello")],

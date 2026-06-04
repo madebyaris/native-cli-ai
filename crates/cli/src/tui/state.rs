@@ -166,7 +166,7 @@ pub struct TuiSessionState {
     pub session_picker_open: bool,
     pub session_picker_search: String,
     pub session_picker_index: usize,
-    pub session_picker_entries: Vec<String>,
+    pub session_picker_entries: Vec<nca_common::session::SessionSnapshot>,
     /// Scroll offset for the session picker viewport.
     pub session_picker_scroll: usize,
     /// When true, the onboarding gate is active — connect modal is locked open.
@@ -383,10 +383,14 @@ impl TuiSessionState {
         self.question_modal_scroll = 0;
     }
 
-    pub fn open_session_picker(&mut self, entries: Vec<String>, current: &str) {
+    pub fn open_session_picker(
+        &mut self,
+        entries: Vec<nca_common::session::SessionSnapshot>,
+        current: &str,
+    ) {
         self.session_picker_open = true;
         self.session_picker_search.clear();
-        self.session_picker_index = entries.iter().position(|e| e == current).unwrap_or(0);
+        self.session_picker_index = entries.iter().position(|e| e.id == current).unwrap_or(0);
         self.session_picker_entries = entries;
         self.session_picker_scroll = 0;
     }
