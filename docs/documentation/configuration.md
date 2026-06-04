@@ -51,18 +51,24 @@ app_name = ""       # Optional app name header
 
 ```toml
 [model]
-default_model = "MiniMax-M2.7"
 max_tokens = 8192
 enable_thinking = false
 thinking_budget = 5120
+```
 
+> **Note:** `default_model` is no longer a user-facing config key. It is derived
+> automatically from the active provider's model field (`provider.<name>.model`).
+> To change the default model, set the model on the provider section directly, or use
+> `/model <name>` in the REPL (which handles provider switching automatically).
+
+```toml
 [model.aliases]
 # Built-in aliases (pre-configured):
-# default    → MiniMax-M2.7
-# minimax    → MiniMax-M2.7
-# m2.7       → MiniMax-M2.7
-# coding     → MiniMax-M2.7
-# reasoning  → MiniMax-M2.7
+# default    → MiniMax-M2.5
+# minimax    → MiniMax-M2.5
+# m2.5       → MiniMax-M2.5
+# coding     → MiniMax-M2.5
+# reasoning  → MiniMax-M2.5
 # openai     → gpt-4o-mini
 # gpt4o      → gpt-4o
 # claude     → claude-3-7-sonnet-latest

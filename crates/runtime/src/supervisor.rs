@@ -1060,9 +1060,9 @@ impl ApprovalHandler for IpcApprovalHandler {
             let mut m = self.pending.lock().unwrap();
             m.insert(call.id.clone(), tx);
         }
-        match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
-            Ok(Ok(verdict)) => verdict,
-            _ => {
+        match rx.await {
+            Ok(verdict) => verdict,
+            Err(_) => {
                 let mut m = self.pending.lock().unwrap();
                 m.remove(&call.id);
                 ApprovalVerdict::Denied

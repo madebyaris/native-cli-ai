@@ -690,10 +690,9 @@ impl Repl {
             }
             "/model" => {
                 if let Some(model) = parts.next() {
-                    let resolved = self.runtime.config().model.resolve_alias(model);
                     let mut cfg = self.runtime.config().clone();
-                    cfg.apply_model_override(&resolved);
-                    cfg.model.track_recent_model(&resolved);
+                    cfg.apply_model_override(model);
+                    cfg.model.track_recent_model(&self.runtime.config().model.resolve_alias(model));
                     match self.runtime.apply_nca_config(cfg) {
                         Ok(()) => {
                             if let Err(e) = self
@@ -1739,10 +1738,11 @@ impl Repl {
                     }
                 }
                 TuiCmd::ApplyModel(model_name) => {
-                    let resolved = self.runtime.config().model.resolve_alias(&model_name);
                     let mut cfg = self.runtime.config().clone();
-                    cfg.apply_model_override(&resolved);
-                    cfg.model.track_recent_model(&resolved);
+                    cfg.apply_model_override(&model_name);
+                    cfg.model.track_recent_model(
+                        &self.runtime.config().model.resolve_alias(&model_name),
+                    );
                     match self.runtime.apply_nca_config(cfg) {
                         Ok(()) => {
                             if let Err(e) = self

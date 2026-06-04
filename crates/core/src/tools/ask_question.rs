@@ -11,8 +11,6 @@ use tokio::sync::oneshot;
 
 use super::ToolExecutor;
 
-const WAIT_SECS: u64 = 3600;
-
 fn selection_summary(sel: &QuestionSelection, payload: &InteractiveQuestionPayload) -> String {
     match sel {
         QuestionSelection::Suggested => {
@@ -208,24 +206,21 @@ impl ToolExecutor for AskQuestionTool {
             };
         }
 
-        let selection =
-            match tokio::time::timeout(std::time::Duration::from_secs(WAIT_SECS), rx).await {
-                Ok(Ok(sel)) => sel,
-                Ok(Err(_)) | Err(_) => {
-                    let mut m = self.pending.lock().unwrap();
-                    m.remove(&question_id);
-                    return ToolResult {
-                        call_id: call.id.clone(),
-                        success: false,
-                        output: String::new(),
-                        error: Some(
-                            "timed out or channel closed waiting for question answer; use IPC \
-                         AnswerQuestion or an interactive terminal"
-                                .into(),
-                        ),
-                    };
-                }
-            };
+        let selection = match rx.await {
+            Ok(sel) => sel,
+            Err(_) => {
+                let mut m = self.pending.lock().unwrap();
+                m.remove(&question_id);
+                return ToolResult {
+                    call_id: call.id.clone(),
+                    success: false,
+                    output: String::new(),
+                    error: Some(
+                        "channel closed waiting for question answer (session ended?)".into(),
+                    ),
+                };
+            }
+        };
 
         let summary = selection_summary(&selection, &payload);
         let _ = self

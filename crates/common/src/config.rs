@@ -81,10 +81,59 @@ impl NcaConfig {
         save_config_to_path(self, &path)
     }
 
-    /// Save the full config as the workspace-local override file.
+    /// Save only the workspace-specific overrides (diff against defaults + global + env).
+    ///
+    /// This avoids dumping the entire merged config into `.nca/config.local.toml`,
+    /// which would override global config values with defaults.
     pub fn save_workspace_file(&self, workspace_root: &Path) -> Result<(), ConfigError> {
+        // Base = defaults + global + env (everything except the local file itself).
+        let mut base = Self::load_global_file().unwrap_or_default();
+        base.apply_env();
+
+        let current_toml =
+            toml::Value::try_from(self).map_err(|source| ConfigError::SerializeToml {
+                path: workspace_config_path(workspace_root),
+                source,
+            })?;
+        let base_toml =
+            toml::Value::try_from(&base).map_err(|source| ConfigError::SerializeToml {
+                path: workspace_config_path(workspace_root),
+                source,
+            })?;
+
+        let diff = match diff_toml_values(&current_toml, &base_toml) {
+            Some(d) => d,
+            None => {
+                // No overrides — remove the local file if it exists.
+                let path = workspace_config_path(workspace_root);
+                if path.exists() {
+                    std::fs::remove_file(&path).map_err(|source| ConfigError::Io {
+                        action: "remove empty local config",
+                        path,
+                        source,
+                    })?;
+                }
+                return Ok(());
+            }
+        };
+
         let path = workspace_config_path(workspace_root);
-        save_config_to_path(self, &path)
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| ConfigError::Io {
+                action: "create config directory",
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        let raw = toml::to_string_pretty(&diff).map_err(|source| ConfigError::SerializeToml {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        std::fs::write(&path, raw).map_err(|source| ConfigError::Io {
+            action: "write config file",
+            path,
+            source,
+        })
     }
 
     /// Remove the workspace-local config file, if present.
@@ -102,11 +151,6 @@ impl NcaConfig {
 
     fn merge(&mut self, partial: PartialNcaConfig) {
         let provider_changed = partial.provider.is_some();
-        let explicit_model_override = partial
-            .model
-            .as_ref()
-            .and_then(|model| model.default_model.as_ref())
-            .is_some();
         if let Some(provider) = partial.provider {
             self.provider.merge(provider);
         }
@@ -141,12 +185,7 @@ impl NcaConfig {
             self.ui.merge(ui);
         }
 
-        if explicit_model_override {
-            self.provider
-                .set_model_for_default(self.model.default_model.clone());
-        }
-
-        if provider_changed || explicit_model_override {
+        if provider_changed {
             self.sync_default_model_from_provider();
         }
     }
@@ -510,6 +549,36 @@ fn save_config_to_path(config: &NcaConfig, path: &Path) -> Result<(), ConfigErro
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// Recursively compute the diff of two TOML values.
+/// Returns `Some(diff)` containing only the fields that differ,
+/// or `None` if they are identical.
+fn diff_toml_values(current: &toml::Value, base: &toml::Value) -> Option<toml::Value> {
+    if current == base {
+        return None;
+    }
+    match (current, base) {
+        (toml::Value::Table(curr), toml::Value::Table(base_t)) => {
+            let mut diff_table = toml::map::Map::new();
+            for (key, val) in curr.iter() {
+                if let Some(base_val) = base_t.get(key) {
+                    if let Some(sub_diff) = diff_toml_values(val, base_val) {
+                        diff_table.insert(key.clone(), sub_diff);
+                    }
+                } else {
+                    // Key exists in current but not in base → include it.
+                    diff_table.insert(key.clone(), val.clone());
+                }
+            }
+            if diff_table.is_empty() {
+                None
+            } else {
+                Some(toml::Value::Table(diff_table))
+            }
+        }
+        (_, _) => Some(current.clone()),
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1022,6 +1091,9 @@ impl DeepSeekConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
+    /// Active model name �� always derived from `provider.active_model()`, never persisted.
+    /// Kept in memory for fast access by the runtime and REPL.
+    #[serde(skip)]
     pub default_model: String,
     pub max_tokens: u32,
     pub enable_thinking: bool,
@@ -1048,9 +1120,6 @@ impl Default for ModelConfig {
 
 impl ModelConfig {
     fn merge(&mut self, partial: PartialModelConfig) {
-        if let Some(default_model) = partial.default_model {
-            self.default_model = default_model;
-        }
         if let Some(max_tokens) = partial.max_tokens {
             self.max_tokens = max_tokens;
         }
@@ -1587,7 +1656,6 @@ struct PartialDeepSeekConfig {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct PartialModelConfig {
-    default_model: Option<String>,
     max_tokens: Option<u32>,
     enable_thinking: Option<bool>,
     thinking_budget: Option<u32>,
@@ -2177,5 +2245,150 @@ blocking = false
                 || !config.hooks.subagent_stop.is_empty()
                 || !config.hooks.turn_complete.is_empty()
         );
+    }
+
+    #[test]
+    fn save_workspace_file_only_saves_overrides_not_full_config() {
+        // Simulate: user switches provider.  The local file should only contain
+        // the provider change, not all defaults.
+        let tmp_home = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::set(&[
+            ("HOME", Some(tmp_home.path().to_str().unwrap())),
+            ("MINIMAX_API_KEY", None),
+            ("OPENAI_API_KEY", None),
+            ("NCA_EDITOR", None),
+            ("EDITOR", None),
+        ]);
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Base = defaults (no global file in test — HOME points to empty tmpdir).
+        let mut config = NcaConfig::default();
+        config.set_default_provider(ProviderKind::OpenAi);
+        config.save_workspace_file(dir.path()).expect("save");
+
+        let local_path = workspace_config_path(dir.path());
+        assert!(local_path.exists(), "local config should be written");
+
+        let raw = std::fs::read_to_string(&local_path).expect("read local config");
+        // The diff should be minimal — just the provider.default change.
+        // default_model is now derived (#[serde(skip)]), so it does NOT appear in persisted config.
+        assert!(
+            raw.contains("openai"),
+            "local config should reference openai: {raw}"
+        );
+        // It should NOT contain all the provider sections (minimax, anthropic, etc.)
+        // since those haven't changed from defaults.
+        assert!(
+            !raw.contains("anthropic"),
+            "local config should NOT contain unchanged provider sections: {raw}"
+        );
+        assert!(
+            !raw.contains("deepseek"),
+            "local config should NOT contain unchanged provider sections: {raw}"
+        );
+        assert!(
+            !raw.contains("zhipuai"),
+            "local config should NOT contain unchanged provider sections: {raw}"
+        );
+        // Should NOT contain full config sections like [session], [harness], etc.
+        assert!(
+            !raw.contains("history_dir"),
+            "local config should NOT contain session defaults: {raw}"
+        );
+        assert!(
+            !raw.contains("built_in_enabled"),
+            "local config should NOT contain harness defaults: {raw}"
+        );
+    }
+
+    #[test]
+    fn save_workspace_file_removes_local_config_when_no_overrides() {
+        let tmp_home = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::set(&[
+            ("HOME", Some(tmp_home.path().to_str().unwrap())),
+            ("MINIMAX_API_KEY", None),
+            ("OPENAI_API_KEY", None),
+            ("NCA_EDITOR", None),
+            ("EDITOR", None),
+        ]);
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Write a local config first (create .nca/ dir)
+        let local_path = workspace_config_path(dir.path());
+        std::fs::create_dir_all(local_path.parent().unwrap()).expect("create .nca dir");
+        std::fs::write(&local_path, "[ui]\neditor = \"vim\"").expect("write");
+        assert!(local_path.exists());
+
+        // Save with default config (no overrides) — should remove the local file.
+        let config = NcaConfig::default();
+        config.save_workspace_file(dir.path()).expect("save");
+
+        assert!(
+            !local_path.exists(),
+            "local config should be removed when there are no overrides"
+        );
+    }
+
+    #[test]
+    fn diff_toml_values_identical_returns_none() {
+        let val = toml::Value::String("hello".into());
+        assert!(diff_toml_values(&val, &val).is_none());
+    }
+
+    /// Regression: a stale `model.default_model` in the config file must NOT
+    /// overwrite the active provider's model field.  default_model is now derived
+    /// (not persisted), so any old value is silently ignored during merge.
+    #[test]
+    fn stale_default_model_does_not_pollute_active_provider() {
+        let toml_str = r#"
+[provider]
+default = "deepseek"
+
+[model]
+default_model = "glm-5-turbo"
+"#;
+        let partial: PartialNcaConfig = toml::from_str(toml_str).expect("parse");
+        let mut config = NcaConfig::default();
+        config.merge(partial);
+
+        // Provider must be deepseek (explicit in config)
+        assert_eq!(config.provider.default, ProviderKind::DeepSeek);
+        // DeepSeek model must remain the deepseek default — NOT polluted by glm-5-turbo
+        assert_eq!(config.provider.deepseek.model, "deepseek-v4-flash");
+        // ZhipuAI model must remain the zhipuai default
+        assert_eq!(config.provider.zhipuai.model, "glm-5-turbo");
+        // In-memory default_model is derived from the active provider
+        assert_eq!(config.model.default_model, "deepseek-v4-flash");
+    }
+
+    #[test]
+    fn diff_toml_values_different_scalars() {
+        let a = toml::Value::String("a".into());
+        let b = toml::Value::String("b".into());
+        let diff = diff_toml_values(&a, &b).expect("diff");
+        assert_eq!(diff, toml::Value::String("a".into()));
+    }
+
+    #[test]
+    fn diff_toml_values_nested_tables() {
+        let mut curr = toml::map::Map::new();
+        curr.insert("x".into(), toml::Value::Integer(1));
+        curr.insert("y".into(), toml::Value::String("same".into()));
+
+        let mut base = toml::map::Map::new();
+        base.insert("x".into(), toml::Value::Integer(2));
+        base.insert("y".into(), toml::Value::String("same".into()));
+
+        let curr_table = toml::Value::Table(curr);
+        let base_table = toml::Value::Table(base);
+
+        let diff = diff_toml_values(&curr_table, &base_table).expect("diff");
+        if let toml::Value::Table(map) = diff {
+            // Only "x" should differ; "y" is the same and should be omitted.
+            assert_eq!(map.len(), 1);
+            assert_eq!(map.get("x"), Some(&toml::Value::Integer(1)));
+        } else {
+            panic!("expected table");
+        }
     }
 }
