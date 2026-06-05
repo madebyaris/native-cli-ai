@@ -32,7 +32,7 @@ The product surface is the CLI. No desktop wrapper, no Electron, no browser in t
 - Persists session state and event logs under the current workspace.
 - Exposes machine-readable JSON and NDJSON for automation.
 - Spawns child agents with explicit parent/child lineage and optional git worktrees.
-- Uses MiniMax by default, with OpenAI, Anthropic, and OpenRouter support.
+- Uses MiniMax by default, with DeepSeek, OpenAI, Anthropic, OpenRouter, and Zhipuai support.
 - Loads built-in tools plus optional MCP tools from config.
 - Sends **native multimodal** (text + image) messages to MiniMax and other vision-capable models.
 - Auto-summarizes long conversations to prevent token overflow.
@@ -233,6 +233,19 @@ Use `nca skills --json` to see all discovered skills with their sources.
 - **Summary format** preserves key topics, decisions, and critical context.
 - System messages are always preserved; recent messages use a sliding window.
 
+### Size Guardrails
+
+Several guards prevent any single turn from blowing the context window:
+
+- Tool output truncated at 32 KB (head+tail strategy) before entering the model context.
+- `list_directory` capped at 1,000 entries.
+- Skill descriptions clipped to 120 chars in the system prompt index.
+- Skills index capped at 4,000 chars total in `harness.rs`.
+
+### Cache Token Accounting
+
+Cost tracking includes cache-aware token pricing. `cache_read` tokens (e.g. from DeepSeek prefix caching) are billed at 1/50 of the normal input rate.
+
 Configuration in `~/.nca/config.toml`:
 
 ```toml
@@ -245,14 +258,18 @@ enable_auto_summarize = true
 
 ## Providers
 
-MiniMax is the default provider path. The codebase also supports OpenAI, Anthropic, and OpenRouter, so the project can stay MiniMax-first without boxing itself into one provider forever.
+MiniMax is the default provider path. The codebase also supports DeepSeek, OpenAI, Anthropic, OpenRouter, and Zhipuai, so the project can stay MiniMax-first without boxing itself into one provider forever.
 
 Typical environment variables:
 
 - `MINIMAX_API_KEY`
+- `DEEPSEEK_API_KEY`
 - `OPENAI_API_KEY`
 - `ANTHROPIC_API_KEY`
 - `OPENROUTER_API_KEY`
+- `ZHIPUAI_API_KEY`
+
+DeepSeek sessions benefit from provider-level token optimizations: `reasoning_content` (thinking chain) is stripped before re-uploading to save ~500 prompt-input tokens per turn and keep the prefix cache byte-stable.
 
 Provider config is loaded from defaults, then `~/.nca/config.toml`, then `<workspace>/.nca/config.local.toml`, then environment overrides.
 
@@ -264,13 +281,13 @@ The system prompt is layered in this order:
 
 1. Built-in harness prompt
 2. Permission-mode guidance
-3. Project guidance from `AGENTS.md` (full file as instructions)
-4. Project instructions from `.ncarc`
-5. Local instructions from `.nca/instructions.md`
+3. `AGENTS.md` (full file as instructions)
+4. `.ncarc` (committed project instructions)
+5. `.nca/instructions.md` (local instructions)
 6. Discovered skills summary
-7. Orchestration context
+7. Orchestration context (`NCA_ORCH_*` env vars)
 
-The built-in tool surface includes filesystem editing, search, diffing, patching, shell execution, web access, `ask_question`, and `spawn_subagent`. MCP tools are loaded dynamically when configured, so the available tool set can grow with your environment.
+The built-in tool surface includes filesystem editing, search, diffing, patching, shell execution, web access, `ask_question`, and `spawn_subagent`. MCP tools are loaded dynamically via the `rmcp` crate when configured, so the available tool set can grow with your environment.
 
 ### Search And Edit Tools
 
@@ -313,7 +330,7 @@ Full user-facing documentation lives in [`docs/documentation/`](docs/documentati
 | [Commands](docs/documentation/commands.md) | Complete CLI command and flag reference |
 | [Interactive Mode](docs/documentation/interactive-mode.md) | TUI, REPL, slash commands, keyboard shortcuts |
 | [Configuration](docs/documentation/configuration.md) | Config files, TOML format, and environment variables |
-| [Providers](docs/documentation/providers.md) | LLM provider setup — MiniMax, Anthropic, OpenAI, OpenRouter |
+| [Providers](docs/documentation/providers.md) | LLM provider setup — MiniMax, DeepSeek, Anthropic, OpenAI, OpenRouter, Zhipuai |
 | [Tools](docs/documentation/tools.md) | All agent tools — file ops, search, shell, web, and more |
 | [Sessions](docs/documentation/sessions.md) | Session lifecycle, persistence, resume, and management |
 | [Permissions](docs/documentation/permissions.md) | Approval system, permission modes, and safe mode |
