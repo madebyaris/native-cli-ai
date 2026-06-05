@@ -291,7 +291,9 @@ pub struct Message {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<MessageToolCall>>,
     /// Reasoning/thinking content from providers like DeepSeek R1.
-    /// Must be passed back in subsequent requests for DeepSeek reasoning models.
+    /// Stored for display/logging but deliberately NOT sent back to the provider:
+    /// it is a response-only signal and re-uploading costs ~500 tokens per turn.
+    /// The provider generates fresh reasoning each turn without needing history.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
 }

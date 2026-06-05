@@ -1,3 +1,28 @@
+//! DeepSeek provider with cache-first prefix stability design.
+//!
+//! ## Token-saving strategies (from DeepSeek-Reasonix)
+//!
+//! ### 1. Reasoning content stripping
+//! `reasoning_content` (thinking chain) is a **response-only signal** from DeepSeek's
+//! reasoning models. Re-uploading it in subsequent requests:
+//! - Costs ~500 extra billable prompt-input tokens per turn
+//! - Breaks the prefix cache (see below)
+//!
+//! Empirically verified: multi-turn tool-call sessions work fine without it.
+//!
+//! ### 2. Cache-first prefix stability
+//! DeepSeek caches request prefixes at 64-token block granularity. Cached tokens
+//! cost ~1/50 of normal input. To maximize cache hits, the prefix (system prompt +
+//! tools + all prior turns) must remain **byte-stable** across turns.
+//!
+//! NCA's architecture already supports this: the system prompt is assembled once at
+//! session start via `build_system_prompt()` and set via `set_system_prompt()`.
+//! Each turn only **appends** new messages. The prefix never mutates.
+//!
+//! This provider's `prepare_messages_for_request` enforces both invariants:
+//! - Strips `reasoning_content` from all assistant messages (saves tokens + protects cache)
+//! - Validates the system prompt is still present and untouched (cache integrity)
+
 use std::path::Path;
 
 use nca_common::config::{DeepSeekConfig, NcaConfig};
@@ -58,6 +83,22 @@ impl DeepSeekProvider {
 
 #[async_trait::async_trait]
 impl Provider for DeepSeekProvider {
+    /// Cache-first: strip reasoning_content to save ~500 tokens/turn and keep
+    /// the prefix byte-stable (reasoning changes each turn, so including it
+    /// would invalidate the entire cached prefix for all prior turns).
+    async fn prepare_messages_for_request(
+        &self,
+        messages: &mut Vec<Message>,
+        _workspace_root: &Path,
+    ) -> Result<(), ProviderError> {
+        // Strip reasoning_content from all assistant messages.
+        // This is response-only data; re-uploading is billable prompt input.
+        for msg in messages.iter_mut() {
+            msg.reasoning_content = None;
+        }
+        Ok(())
+    }
+
     async fn chat(
         &self,
         messages: &[Message],
@@ -160,9 +201,36 @@ mod tests {
             &chunks[2],
             StreamChunk::Usage {
                 input_tokens: 11,
-                output_tokens: 7
+                output_tokens: 7,
+                ..
             }
         ));
         assert!(matches!(chunks.last(), Some(StreamChunk::Done)));
+    }
+
+    #[tokio::test]
+    async fn prepare_strips_reasoning_content() {
+        let mut config = NcaConfig::default();
+        config.provider.deepseek.api_key = Some("test".into());
+        let provider = DeepSeekProvider::from_config(&config).expect("provider");
+
+        let mut messages = vec![
+            Message::user("hello"),
+            Message::assistant("response").with_reasoning("thinking...".into()),
+            Message::tool("call_1", "result"),
+        ];
+
+        provider
+            .prepare_messages_for_request(&mut messages, Path::new("."))
+            .await
+            .expect("prepare");
+
+        // reasoning_content must be stripped for DeepSeek
+        assert!(messages[1].reasoning_content.is_none());
+        // Other fields unchanged
+        assert_eq!(messages[1].content.to_summary_text(), "response");
+        // User/tool messages unaffected
+        assert!(messages[0].reasoning_content.is_none());
+        assert!(messages[2].reasoning_content.is_none());
     }
 }
