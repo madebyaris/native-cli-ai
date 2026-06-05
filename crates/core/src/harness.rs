@@ -144,6 +144,18 @@ fn skills_section(
     section.push_str(
         "\nUse the invoke_skill tool to load full instructions when a task matches a skill.",
     );
+
+    // Cap the skills index so it can't bloat the cache-stable system-prompt prefix.
+    // Skill bodies are loaded on-demand via invoke_skill; only the index goes here.
+    const MAX_SKILL_INDEX_CHARS: usize = 4000;
+    if section.len() > MAX_SKILL_INDEX_CHARS {
+        let truncated: String = section.chars().take(MAX_SKILL_INDEX_CHARS).collect();
+        let dropped = section.len() - MAX_SKILL_INDEX_CHARS;
+        section = format!(
+            "{truncated}\n… (skill index truncated: {dropped} chars omitted; use invoke_skill to load full details)"
+        );
+    }
+
     Some(section)
 }
 

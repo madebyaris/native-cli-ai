@@ -219,12 +219,20 @@ impl AgentLoop {
                     StreamChunk::Usage {
                         input_tokens,
                         output_tokens,
+                        cache_creation_tokens,
+                        cache_read_tokens,
                     } => {
                         got_usage = true;
-                        self.cost_tracker.add(input_tokens, output_tokens);
+                        self.cost_tracker.add(
+                            input_tokens,
+                            output_tokens,
+                            cache_creation_tokens,
+                            cache_read_tokens,
+                        );
                         self.emit(AgentEvent::CostUpdated {
                             input_tokens: self.cost_tracker.input_tokens,
                             output_tokens: self.cost_tracker.output_tokens,
+                            cache_read_tokens: self.cost_tracker.cache_read_tokens,
                             estimated_cost_usd: self.cost_tracker.estimated_cost_usd(),
                         })
                         .await;
@@ -561,10 +569,11 @@ impl AgentLoop {
                 .sum::<usize>()
                 / 4) as u64;
             let estimated_output = (final_text.len() / 4) as u64;
-            self.cost_tracker.add(estimated_input, estimated_output);
+            self.cost_tracker.add(estimated_input, estimated_output, 0, 0);
             self.emit(AgentEvent::CostUpdated {
                 input_tokens: self.cost_tracker.input_tokens,
                 output_tokens: self.cost_tracker.output_tokens,
+                cache_read_tokens: self.cost_tracker.cache_read_tokens,
                 estimated_cost_usd: self.cost_tracker.estimated_cost_usd(),
             })
             .await;
@@ -625,6 +634,58 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// Maximum bytes for a single tool result before it enters the model's context.
+/// ~32KB ≈ 8K tokens — enough for a full file read or a busy search, while
+/// preventing one accidental "read this 5 MB log" from blowing the context
+/// window before compaction runs.
+const MAX_TOOL_OUTPUT_BYTES: usize = 32 * 1024;
+
+/// Head/tail budget for tool output truncation.
+const TOOL_TRUNCATE_HEAD: usize = 16 * 1024;
+const TOOL_TRUNCATE_TAIL: usize = 16 * 1024;
+
+/// Truncate a tool result string if it exceeds [`MAX_TOOL_OUTPUT_BYTES`].
+/// Uses head+tail strategy to keep the beginning and end visible.
+fn truncate_tool_output(output: &str) -> String {
+    let byte_len = output.len();
+    if byte_len <= MAX_TOOL_OUTPUT_BYTES {
+        return output.to_string();
+    }
+
+    // Find safe UTF-8 boundaries for head and tail.
+    let head_end = match output.is_char_boundary(TOOL_TRUNCATE_HEAD) {
+        true => TOOL_TRUNCATE_HEAD,
+        false => {
+            let mut pos = TOOL_TRUNCATE_HEAD;
+            while pos > 0 && !output.is_char_boundary(pos) {
+                pos -= 1;
+            }
+            pos
+        }
+    };
+
+    let tail_start = match output.is_char_boundary(byte_len - TOOL_TRUNCATE_TAIL) {
+        true => byte_len - TOOL_TRUNCATE_TAIL,
+        false => {
+            let mut pos = byte_len - TOOL_TRUNCATE_TAIL;
+            while pos < byte_len && !output.is_char_boundary(pos) {
+                pos += 1;
+            }
+            pos
+        }
+    };
+
+    let truncated_bytes = byte_len - (TOOL_TRUNCATE_HEAD + TOOL_TRUNCATE_TAIL);
+    format!(
+        "{}\n\n[... truncated {} bytes ({} → {}KB limit) ...]\n\n{}",
+        &output[..head_end],
+        truncated_bytes,
+        byte_len / 1024,
+        MAX_TOOL_OUTPUT_BYTES / 1024,
+        &output[tail_start..]
+    )
+}
+
 fn cleanup_processed_attachments(
     messages: &mut [Message],
     workspace_root: &Path,
@@ -657,12 +718,13 @@ fn cleanup_processed_attachments(
 }
 
 fn format_tool_result(result: &nca_common::tool::ToolResult) -> String {
-    if result.success {
+    let raw = if result.success {
         result.output.clone()
     } else {
         result
             .error
             .clone()
             .unwrap_or_else(|| "tool failed".to_string())
-    }
+    };
+    truncate_tool_output(&raw)
 }

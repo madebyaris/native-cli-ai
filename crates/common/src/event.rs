@@ -94,6 +94,8 @@ pub enum AgentEvent {
     CostUpdated {
         input_tokens: u64,
         output_tokens: u64,
+        #[serde(default)]
+        cache_read_tokens: u64,
         estimated_cost_usd: f64,
     },
     Checkpoint {

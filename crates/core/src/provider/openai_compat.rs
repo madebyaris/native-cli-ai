@@ -103,11 +103,39 @@ pub fn spawn_openai_stream(
                 if let Some(usage) = event.get("usage") {
                     let input_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0);
                     let output_tokens = usage["completion_tokens"].as_u64().unwrap_or(0);
+
+                    // OpenAI format: prompt_tokens_details.cached_tokens
+                    // DeepSeek format: prompt_cache_hit_tokens / prompt_cache_miss_tokens
+                    let cached_tokens = usage
+                        .get("prompt_tokens_details")
+                        .and_then(|d| d.get("cached_tokens"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let (cache_creation_tokens, cache_read_tokens) =
+                        if cached_tokens > 0 {
+                            // OpenAI style: cached_tokens are hits; misses are input - cached
+                            (0, cached_tokens)
+                        } else if let Some(miss) = usage
+                            .get("prompt_cache_miss_tokens")
+                            .and_then(|v| v.as_u64())
+                        {
+                            // DeepSeek style: explicit hit/miss fields
+                            let hit = usage
+                                .get("prompt_cache_hit_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            (miss, hit)
+                        } else {
+                            (0, 0)
+                        };
+
                     if input_tokens > 0 || output_tokens > 0 {
                         let _ = tx
                             .send(StreamChunk::Usage {
                                 input_tokens,
                                 output_tokens,
+                                cache_creation_tokens,
+                                cache_read_tokens,
                             })
                             .await;
                     }
@@ -314,4 +342,31 @@ fn to_openai_messages(
     }
 
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reasoning_content_is_serialized_by_default() {
+        let messages = vec![
+            Message::user("hello"),
+            Message::assistant("response").with_reasoning("I was thinking...".into()),
+            Message::tool("call_1", "result"),
+        ];
+
+        let out = to_openai_messages(&messages, std::path::Path::new(".")).expect("messages");
+        assert_eq!(out.len(), 3);
+
+        // By default (non-DeepSeek providers), reasoning_content IS serialized
+        // because some models require it for multi-turn reasoning continuity.
+        let assistant = &out[1];
+        assert_eq!(assistant["role"], "assistant");
+        assert_eq!(
+            assistant["reasoning_content"].as_str().unwrap(),
+            "I was thinking..."
+        );
+        assert_eq!(assistant["content"], "response");
+    }
 }

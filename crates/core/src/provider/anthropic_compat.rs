@@ -151,6 +151,8 @@ pub fn spawn_anthropic_stream(
                                 .send(StreamChunk::Usage {
                                     input_tokens,
                                     output_tokens,
+                                    cache_creation_tokens: 0,
+                                    cache_read_tokens: 0,
                                 })
                                 .await;
                             input_tokens = 0;

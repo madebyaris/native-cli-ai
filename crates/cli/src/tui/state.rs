@@ -639,6 +639,7 @@ impl TuiSessionState {
             AgentEvent::CostUpdated {
                 input_tokens,
                 output_tokens,
+                cache_read_tokens: _,
                 estimated_cost_usd,
             } => {
                 self.input_tokens = *input_tokens;

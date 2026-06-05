@@ -2,6 +2,10 @@ use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
 
 use super::ToolExecutor;
 
+/// Maximum number of entries returned by list_directory.
+/// Prevents massive directory listings (e.g., node_modules) from blowing context.
+const MAX_DIRECTORY_ENTRIES: usize = 1000;
+
 /// Lists files/directories under the workspace root.
 pub struct ListDirectoryTool {
     workspace_root: std::path::PathBuf,
@@ -59,7 +63,12 @@ impl ToolExecutor for ListDirectoryTool {
                 };
 
                 let mut out = Vec::new();
+                let mut truncated = false;
                 loop {
+                    if out.len() >= MAX_DIRECTORY_ENTRIES {
+                        truncated = true;
+                        break;
+                    }
                     match entries.next_entry().await {
                         Ok(Some(entry)) => {
                             let name = entry.file_name();
@@ -83,10 +92,17 @@ impl ToolExecutor for ListDirectoryTool {
                 }
 
                 out.sort();
+                let mut output = out.join("\n");
+                if truncated {
+                    output.push_str(&format!(
+                        "\n… (truncated at {} entries)",
+                        MAX_DIRECTORY_ENTRIES
+                    ));
+                }
                 ToolResult {
                     call_id: call.id.clone(),
                     success: true,
-                    output: out.join("\n"),
+                    output,
                     error: None,
                 }
             }

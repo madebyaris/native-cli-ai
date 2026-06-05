@@ -180,7 +180,8 @@ mod tests {
             &chunks[1],
             StreamChunk::Usage {
                 input_tokens: 9,
-                output_tokens: 4
+                output_tokens: 4,
+                ..
             }
         ));
         assert!(matches!(chunks.last(), Some(StreamChunk::Done)));

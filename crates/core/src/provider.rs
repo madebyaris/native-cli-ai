@@ -28,6 +28,8 @@ pub enum StreamChunk {
     Usage {
         input_tokens: u64,
         output_tokens: u64,
+        cache_creation_tokens: u64,
+        cache_read_tokens: u64,
     },
     Done,
 }

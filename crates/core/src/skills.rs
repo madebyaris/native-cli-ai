@@ -117,10 +117,18 @@ impl Skill {
     }
 
     pub fn manifest_summary(&self) -> String {
-        let description = self
+        let raw_description = self
             .description
             .as_deref()
             .unwrap_or("No description provided.");
+        // Clip description to keep the skill index compact in the system prompt.
+        const MAX_DESC_CHARS: usize = 120;
+        let description = if raw_description.len() > MAX_DESC_CHARS {
+            let clipped: String = raw_description.chars().take(MAX_DESC_CHARS).collect();
+            format!("{clipped}…")
+        } else {
+            raw_description.to_string()
+        };
         let model = self.model.as_deref().unwrap_or("inherit");
         let permission_mode = self
             .permission_mode
