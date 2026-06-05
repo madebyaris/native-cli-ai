@@ -138,7 +138,7 @@ impl Supervisor {
             ToolRegistry::with_default_full_tools(workspace_root.clone(), config.web.clone())
         };
         if !config.mcp.servers.is_empty() && (!cfg.safe_mode || config.mcp.expose_in_safe_mode) {
-            match load_mcp_tools(&workspace_root, &config.mcp.servers) {
+            match load_mcp_tools(&workspace_root, &config.mcp.servers).await {
                 Ok(mcp_tools) => {
                     for tool in mcp_tools {
                         tools.register(tool);

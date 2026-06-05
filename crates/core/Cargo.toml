@@ -12,7 +12,7 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { workspace = true, features = ["stream"] }
 genai = "0.5"
 similar = "2"
 globset = "0.4"
@@ -21,7 +21,7 @@ base64 = "0.22"
 scraper = "0.23"
 futures-util = "0.3"
 serde_yaml = "0.9.34"
-mcpr = "0.2.3"
+rmcp = { version = "1.7", default-features = false, features = ["client", "transport-async-rw"] }
 regex = "1"
 chrono = { version = "0.4", features = ["serde", "clock"] }
 tempfile = "3"
