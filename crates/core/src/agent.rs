@@ -569,7 +569,8 @@ impl AgentLoop {
                 .sum::<usize>()
                 / 4) as u64;
             let estimated_output = (final_text.len() / 4) as u64;
-            self.cost_tracker.add(estimated_input, estimated_output, 0, 0);
+            self.cost_tracker
+                .add(estimated_input, estimated_output, 0, 0);
             self.emit(AgentEvent::CostUpdated {
                 input_tokens: self.cost_tracker.input_tokens,
                 output_tokens: self.cost_tracker.output_tokens,

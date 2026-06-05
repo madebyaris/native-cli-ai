@@ -1,5 +1,6 @@
 pub mod apply_patch;
 pub mod ask_question;
+pub mod ast_grep;
 pub mod bash;
 pub mod code_intel_tool;
 pub mod copy_path;
@@ -53,6 +54,9 @@ impl ToolRegistry {
         registry.register(Box::new(search::SearchCodeTool::new(
             workspace_root.clone(),
         )));
+        registry.register(Box::new(ast_grep::AstGrepSearchTool::new(
+            workspace_root.clone(),
+        )));
         registry.register(Box::new(list_directory::ListDirectoryTool::new(
             workspace_root.clone(),
         )));
@@ -84,6 +88,9 @@ impl ToolRegistry {
             workspace_root.clone(),
         )));
         registry.register(Box::new(replace_match::ReplaceMatchTool::new(
+            workspace_root.clone(),
+        )));
+        registry.register(Box::new(ast_grep::AstGrepReplaceTool::new(
             workspace_root.clone(),
         )));
         registry.register(Box::new(rename_path::RenamePathTool::new(

@@ -1,8 +1,8 @@
 use crate::tools::ToolExecutor;
 use nca_common::config::McpServerConfig;
 use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
-use rmcp::model::{CallToolRequestParams, ClientInfo, Implementation};
 use rmcp::ServiceExt;
+use rmcp::model::{CallToolRequestParams, ClientInfo, Implementation};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -77,8 +77,14 @@ impl ToolExecutor for McpTool {
 fn spawn_mcp_server(
     server: &McpServerConfig,
     workspace_root: &Path,
-) -> Result<(tokio::process::ChildStdout, tokio::process::ChildStdin, tokio::process::Child), String>
-{
+) -> Result<
+    (
+        tokio::process::ChildStdout,
+        tokio::process::ChildStdin,
+        tokio::process::Child,
+    ),
+    String,
+> {
     let mut cmd = Command::new(&server.command);
     cmd.args(&server.args)
         .envs(&server.env)
@@ -171,16 +177,10 @@ async fn execute_mcp_call(
         .await
         .map_err(|err| format!("MCP server `{}` init failed: {err}", server.name))?;
 
-    let arguments = input
-        .as_object()
-        .cloned()
-        .map(serde_json::Map::into)
-        .unwrap_or_default();
+    let arguments = input.as_object().cloned().unwrap_or_default();
 
     let result = client
-        .call_tool(
-            CallToolRequestParams::new(tool_name.to_owned()).with_arguments(arguments),
-        )
+        .call_tool(CallToolRequestParams::new(tool_name.to_owned()).with_arguments(arguments))
         .await
         .map_err(|err| format!("MCP tool `{}` call failed: {err}", tool_name))?;
 
@@ -190,9 +190,7 @@ async fn execute_mcp_call(
     let output: Vec<String> = result
         .content
         .iter()
-        .filter_map(|c| {
-            c.as_text().map(|t| t.text.clone())
-        })
+        .filter_map(|c| c.as_text().map(|t| t.text.clone()))
         .collect();
     serde_json::to_string(&output).map_err(|err| err.to_string())
 }

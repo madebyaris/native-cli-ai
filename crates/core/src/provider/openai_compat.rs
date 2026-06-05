@@ -111,23 +111,22 @@ pub fn spawn_openai_stream(
                         .and_then(|d| d.get("cached_tokens"))
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
-                    let (cache_creation_tokens, cache_read_tokens) =
-                        if cached_tokens > 0 {
-                            // OpenAI style: cached_tokens are hits; misses are input - cached
-                            (0, cached_tokens)
-                        } else if let Some(miss) = usage
-                            .get("prompt_cache_miss_tokens")
+                    let (cache_creation_tokens, cache_read_tokens) = if cached_tokens > 0 {
+                        // OpenAI style: cached_tokens are hits; misses are input - cached
+                        (0, cached_tokens)
+                    } else if let Some(miss) = usage
+                        .get("prompt_cache_miss_tokens")
+                        .and_then(|v| v.as_u64())
+                    {
+                        // DeepSeek style: explicit hit/miss fields
+                        let hit = usage
+                            .get("prompt_cache_hit_tokens")
                             .and_then(|v| v.as_u64())
-                        {
-                            // DeepSeek style: explicit hit/miss fields
-                            let hit = usage
-                                .get("prompt_cache_hit_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0);
-                            (miss, hit)
-                        } else {
-                            (0, 0)
-                        };
+                            .unwrap_or(0);
+                        (miss, hit)
+                    } else {
+                        (0, 0)
+                    };
 
                     if input_tokens > 0 || output_tokens > 0 {
                         let _ = tx
