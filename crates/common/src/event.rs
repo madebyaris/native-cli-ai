@@ -90,6 +90,9 @@ pub enum AgentEvent {
     ApprovalResolved {
         call_id: String,
         approved: bool,
+        /// Pattern being persisted when user chose "always allow".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_pattern: Option<String>,
     },
     CostUpdated {
         input_tokens: u64,
@@ -141,6 +144,12 @@ pub enum AgentEvent {
     QuestionResolved {
         question_id: String,
         selection: QuestionSelection,
+    },
+    /// Live context usage statistics for the UI (token count + percentage).
+    ContextStatsUpdated {
+        estimated_tokens: usize,
+        context_window: usize,
+        usage_percent: u8,
     },
     /// Warning that context is approaching limit.
     ContextWarning {

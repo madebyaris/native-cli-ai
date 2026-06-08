@@ -1826,6 +1826,19 @@ pub fn run_blocking(
                         Line::from(format!("total   {}", g.input_tokens + g.output_tokens)),
                         Line::from(format!("cost    ${:.4}", g.cost_usd)),
                         Line::default(),
+                        Line::from({
+                            let pct = g.context_usage_percent;
+                            let color = if pct >= 90 { theme::ERROR } else if pct >= 70 { theme::WARN } else { theme::SUCCESS };
+                            Span::styled(format!("ctx  {}%", pct), Style::default().fg(color))
+                        }),
+                        if g.context_window > 0 {
+                            Line::from(Span::styled(
+                                format!("win  {}", g.context_window),
+                                Style::default().fg(theme::MUTED),
+                            ))
+                        } else {
+                            Line::default()
+                        },
                         Line::from(if g.active_approval.is_some() {
                             "pending approval"
                         } else if g.active_question.is_some() {
@@ -2053,6 +2066,19 @@ pub fn run_blocking(
                         ),
                     ]);
                 }
+                // Context usage percentage (always on status bar).
+                let ctx_pct_color = if g.context_usage_percent >= 90 {
+                    theme::ERROR
+                } else if g.context_usage_percent >= 70 {
+                    theme::WARN
+                } else {
+                    theme::MUTED
+                };
+                status_spans.push(Span::raw(" │ ctx:"));
+                status_spans.push(Span::styled(
+                    format!("{}%", g.context_usage_percent),
+                    Style::default().fg(ctx_pct_color),
+                ));
                 status_spans.push(Span::raw(" │ "));
                 status_spans.push(time_span);
                 let status = Line::from(status_spans);

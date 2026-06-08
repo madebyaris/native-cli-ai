@@ -212,6 +212,11 @@ impl SessionRuntime {
         self.supervisor.snapshot()
     }
 
+    /// Current context window usage statistics.
+    pub fn context_stats(&self) -> nca_runtime::context_manager::ContextStats {
+        self.supervisor.context_stats()
+    }
+
     pub fn compact_summary(&self) -> String {
         self.supervisor.compact_summary()
     }

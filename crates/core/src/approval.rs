@@ -99,6 +99,8 @@ pub struct ApprovalPolicy {
     handler: Option<Arc<dyn ApprovalHandler>>,
     fail_on_ask: bool,
     pub session_allow: Vec<String>,
+    /// Optional callback invoked when a new allow pattern is added (for persistence).
+    on_allow_pattern: Option<Arc<dyn Fn(String) + Send + Sync>>,
 }
 
 impl ApprovalPolicy {
@@ -108,18 +110,29 @@ impl ApprovalPolicy {
             handler: None,
             fail_on_ask: false,
             session_allow: Vec::new(),
+            on_allow_pattern: None,
         }
     }
 
     /// Add a pattern to the session-scoped allow list. Skips duplicates.
+    /// If an `on_allow_pattern` callback is registered, it is invoked for new patterns.
     pub fn add_session_allow(&mut self, pattern: String) {
         if !self.session_allow.contains(&pattern) {
-            self.session_allow.push(pattern);
+            self.session_allow.push(pattern.clone());
+            if let Some(ref cb) = self.on_allow_pattern {
+                cb(pattern);
+            }
         }
     }
 
     pub fn with_handler(mut self, handler: Arc<dyn ApprovalHandler>) -> Self {
         self.handler = Some(handler);
+        self
+    }
+
+    /// Register a callback invoked whenever a new allow pattern is added.
+    pub fn with_persist(mut self, f: impl Fn(String) + Send + Sync + 'static) -> Self {
+        self.on_allow_pattern = Some(Arc::new(f));
         self
     }
 

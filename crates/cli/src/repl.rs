@@ -768,16 +768,31 @@ impl Repl {
             }
             "/cost" => {
                 let snapshot = self.runtime.snapshot();
+                let cs = self.runtime.context_stats();
                 out.eprintln(&format!("[cost] Session: {}", snapshot.id));
-                out.eprintln("[cost] Use 'nca logs --follow' to see real-time token usage");
+                out.eprintln(&format!(
+                    "[cost] Context: {}% ({} / {} tokens)",
+                    cs.usage_percent, cs.estimated_tokens, cs.context_window
+                ));
+                out.eprintln(&format!(
+                    "[cost] Tokens: {} in + {} out",
+                    snapshot.total_input_tokens, snapshot.total_output_tokens
+                ));
+                out.eprintln(&format!(
+                    "[cost] Cost: ${:.4}", snapshot.estimated_cost_usd
+                ));
             }
             "/stats" => {
                 let snapshot = self.runtime.snapshot();
+                let cs = self.runtime.context_stats();
                 let lines = vec![
                     format!("Session:     {}", snapshot.id),
                     format!("Model:       {}", self.runtime.model()),
                     format!("Agent:       @{}", self.agent_profile.label()),
                     format!("Permission:  {:?}", self.runtime.permission_mode()),
+                    format!("Context:     {}% ({} / {} tokens)", cs.usage_percent, cs.estimated_tokens, cs.context_window),
+                    format!("Tokens:      {} in + {} out", snapshot.total_input_tokens, snapshot.total_output_tokens),
+                    format!("Cost:        ${:.4}", snapshot.estimated_cost_usd),
                     format!("Children:    {}", snapshot.child_session_ids.len()),
                     format!("Memory:      {}", self.runtime.memory_store_path().display()),
                 ];

@@ -362,6 +362,7 @@ fn render_event(event: &AgentEvent, stats: &StreamStats) {
         AgentEvent::ApprovalResolved {
             call_id: _,
             approved,
+            allow_pattern: _,
         } => {
             print!("{}", theme::CLEAR_LINE);
             if *approved {
@@ -426,6 +427,26 @@ fn render_event(event: &AgentEvent, stats: &StreamStats) {
                 *input_tokens,
                 *output_tokens,
                 (*estimated_cost_usd * 100.0) as u64,
+            );
+        }
+        AgentEvent::ContextStatsUpdated {
+            estimated_tokens,
+            context_window,
+            usage_percent,
+        } => {
+            let pct_color = if *usage_percent >= 90 {
+                theme::ERROR
+            } else if *usage_percent >= 70 {
+                theme::WARNING
+            } else {
+                theme::TEXT_DIM
+            };
+            eprintln!(
+                "  {} ctx: {}% ({} / {} tokens)",
+                "⊗".color(pct_color),
+                usage_percent,
+                estimated_tokens,
+                context_window,
             );
         }
         AgentEvent::SessionEnded { reason } => {

@@ -117,6 +117,27 @@ impl SupervisorHandle {
     }
 }
 
+/// Persist an approved allow pattern to the workspace config file.
+fn persist_allow_pattern(workspace_root: &Path, pattern: String) {
+    let root = workspace_root.to_path_buf();
+    std::mem::drop(tokio::runtime::Handle::current().spawn_blocking(move || {
+        match nca_common::config::NcaConfig::load_for_workspace(&root) {
+            Ok(mut config) => {
+                if !config.permissions.allow.contains(&pattern) {
+                    config.permissions.allow.push(pattern);
+                    tracing::info!("persisted allow pattern to workspace config");
+                    if let Err(e) = config.save_workspace_file(&root) {
+                        tracing::warn!("failed to persist allow pattern: {e}");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("failed to load config for pattern persistence: {e}");
+            }
+        }
+    }));
+}
+
 impl Supervisor {
     /// Create a new supervised session. This sets up the agent loop, IPC server,
     /// event channels, and persists initial session metadata.
@@ -161,13 +182,22 @@ impl Supervisor {
             match cfg.approval_handler {
                 Some(handler) => {
                     approval_pending = None;
-                    ApprovalPolicy::new(config.permissions.clone()).with_handler(handler)
+                    ApprovalPolicy::new(config.permissions.clone())
+                        .with_handler(handler)
+                        .with_persist({
+                            let wr = workspace_root.clone();
+                            move |p| persist_allow_pattern(&wr, p)
+                        })
                 }
                 None => {
                     let ipc_handler = IpcApprovalHandler::new();
                     approval_pending = Some(ipc_handler.pending());
                     ApprovalPolicy::new(config.permissions.clone())
                         .with_handler(ipc_handler as Arc<dyn ApprovalHandler>)
+                        .with_persist({
+                            let wr = workspace_root.clone();
+                            move |p| persist_allow_pattern(&wr, p)
+                        })
                 }
             }
         } else {
@@ -175,6 +205,10 @@ impl Supervisor {
             ApprovalPolicy::new(config.permissions.clone())
                 .fail_on_ask()
                 .with_handler(Arc::new(AutoDenyHandler) as Arc<dyn ApprovalHandler>)
+                .with_persist({
+                    let wr = workspace_root.clone();
+                    move |p| persist_allow_pattern(&wr, p)
+                })
         };
 
         let (event_tx, event_rx) = mpsc::channel(256);
@@ -372,6 +406,9 @@ impl Supervisor {
         // Check context after turn
         self.check_and_summarize_context().await;
 
+        // Emit context stats for UI
+        self.emit_context_stats().await;
+
         self.refresh_session_summary();
 
         // Generate session title from the first user prompt if not yet set.
@@ -469,6 +506,20 @@ impl Supervisor {
                 // Reset so we can try again
                 self.last_summary_at_tokens = 0;
             }
+        }
+    }
+
+    /// Emit current context statistics to the UI via the event bus.
+    async fn emit_context_stats(&self) {
+        let stats = self.context_manager.stats(&self.agent.messages);
+        if let Some(tx) = self.agent.event_sender() {
+            let _ = tx
+                .send(AgentEvent::ContextStatsUpdated {
+                    estimated_tokens: stats.estimated_tokens,
+                    context_window: stats.context_window,
+                    usage_percent: stats.usage_percent,
+                })
+                .await;
         }
     }
 

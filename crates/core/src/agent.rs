@@ -358,13 +358,18 @@ impl AgentLoop {
                         }
                         let verdict = self.approval.resolve(call, &description).await;
                         let approved = verdict.is_approved();
+                        let allow_pattern = match &verdict {
+                            ApprovalVerdict::AllowPattern(p) => Some(p.clone()),
+                            _ => None,
+                        };
                         self.emit(AgentEvent::ApprovalResolved {
                             call_id: call.id.clone(),
                             approved,
+                            allow_pattern: allow_pattern.clone(),
                         })
                         .await;
-                        if let ApprovalVerdict::AllowPattern(pattern) = &verdict {
-                            self.approval.add_session_allow(pattern.clone());
+                        if let Some(pattern) = allow_pattern {
+                            self.approval.add_session_allow(pattern);
                         }
 
                         if approved {

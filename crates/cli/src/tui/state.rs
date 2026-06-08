@@ -84,6 +84,10 @@ pub struct TuiSessionState {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cost_usd: f64,
+    /// Context window usage percentage (0–100).
+    pub context_usage_percent: u8,
+    /// Model context window size in tokens.
+    pub context_window: usize,
     pub started: Instant,
     pub busy: bool,
     /// Current busy state (for animated indicator).
@@ -223,6 +227,8 @@ impl TuiSessionState {
             input_tokens: 0,
             output_tokens: 0,
             cost_usd: 0.0,
+            context_usage_percent: 0,
+            context_window: 0,
             started: Instant::now(),
             busy: false,
             current_busy_state: BusyState::Idle,
@@ -595,7 +601,11 @@ impl TuiSessionState {
                     self.blocks.push(DisplayBlock::ApprovalPending(req));
                 }
             }
-            AgentEvent::ApprovalResolved { call_id, approved } => {
+            AgentEvent::ApprovalResolved {
+                call_id,
+                approved,
+                allow_pattern: _,
+            } => {
                 let tool = self
                     .active_approval
                     .as_ref()
@@ -645,6 +655,14 @@ impl TuiSessionState {
                 self.input_tokens = *input_tokens;
                 self.output_tokens = *output_tokens;
                 self.cost_usd = *estimated_cost_usd;
+            }
+            AgentEvent::ContextStatsUpdated {
+                estimated_tokens: _,
+                context_window,
+                usage_percent,
+            } => {
+                self.context_usage_percent = *usage_percent;
+                self.context_window = *context_window;
             }
             AgentEvent::Error { message } => {
                 self.blocks.push(DisplayBlock::ErrorLine(message.clone()));
