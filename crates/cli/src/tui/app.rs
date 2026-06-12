@@ -1140,61 +1140,58 @@ fn transcript_lines_and_hits(
                         None,
                     );
                 }
-                // When the modal is open, skip inline options — the popup handles selection.
-                if !state.question_modal_open {
+                push_transcript_line(
+                    &mut lines,
+                    &mut hits,
+                    Line::from(vec![
+                        Span::styled(
+                            format!("  [0] suggested: {} ", q.suggested_answer),
+                            Style::default()
+                                .fg(theme::SUCCESS)
+                                .add_modifier(Modifier::UNDERLINED),
+                        ),
+                        Span::styled("(click)", Style::default().fg(theme::MUTED)),
+                    ]),
+                    Some(QuestionSelection::Suggested),
+                );
+                for (i, o) in q.options.iter().enumerate() {
                     push_transcript_line(
                         &mut lines,
                         &mut hits,
                         Line::from(vec![
                             Span::styled(
-                                format!("  [0] suggested: {} ", q.suggested_answer),
+                                format!("  [{}] ({}) {} ", i + 1, o.id, o.label),
                                 Style::default()
-                                    .fg(theme::SUCCESS)
+                                    .fg(theme::TEXT)
                                     .add_modifier(Modifier::UNDERLINED),
                             ),
                             Span::styled("(click)", Style::default().fg(theme::MUTED)),
                         ]),
-                        Some(QuestionSelection::Suggested),
+                        Some(QuestionSelection::Option {
+                            option_id: o.id.clone(),
+                        }),
                     );
-                    for (i, o) in q.options.iter().enumerate() {
-                        push_transcript_line(
-                            &mut lines,
-                            &mut hits,
-                            Line::from(vec![
-                                Span::styled(
-                                    format!("  [{}] ({}) {} ", i + 1, o.id, o.label),
-                                    Style::default()
-                                        .fg(theme::TEXT)
-                                        .add_modifier(Modifier::UNDERLINED),
-                                ),
-                                Span::styled("(click)", Style::default().fg(theme::MUTED)),
-                            ]),
-                            Some(QuestionSelection::Option {
-                                option_id: o.id.clone(),
-                            }),
-                        );
-                    }
-                    if q.allow_custom {
-                        push_transcript_line(
-                            &mut lines,
-                            &mut hits,
-                            Line::from(Span::styled(
-                                "  [c] type your own answer below, then Enter",
-                                Style::default().fg(theme::MUTED),
-                            )),
-                            None,
-                        );
-                    }
+                }
+                if q.allow_custom {
                     push_transcript_line(
                         &mut lines,
                         &mut hits,
                         Line::from(Span::styled(
-                            "  Tip: /auto-answer or Enter on empty = suggested · click an option above",
+                            "  [c] type your own answer below, then Enter",
                             Style::default().fg(theme::MUTED),
                         )),
                         None,
                     );
                 }
+                push_transcript_line(
+                    &mut lines,
+                    &mut hits,
+                    Line::from(Span::styled(
+                        "  Tip: /auto-answer or Enter on empty = suggested · click an option above",
+                        Style::default().fg(theme::MUTED),
+                    )),
+                    None,
+                );
                 push_transcript_line(&mut lines, &mut hits, Line::default(), None);
             }
             DisplayBlock::ErrorLine(s) => {
@@ -2200,7 +2197,7 @@ pub fn run_blocking(
                         "Approval: y/n · Ctrl+Y approve · Ctrl+N deny · Ctrl+U always allow · /approve · /deny · other /commands still work",
                         Style::default().fg(theme::ERROR),
                     ))
-                } else if g.active_question.is_some() && !g.question_modal_open {
+                } else if g.active_question.is_some() {
                     Line::from(Span::styled(
                         "Enter / 0 = suggested · 1–n = option · click underlined line · /auto-answer · End = transcript bottom (empty input)",
                         Style::default().fg(theme::WARN),
@@ -2536,113 +2533,6 @@ pub fn run_blocking(
                         .style(Style::default().bg(theme::SURFACE))
                         .wrap(Wrap { trim: false });
                     frame.render_widget(popup, popup_area);
-                }
-
-                // Question modal popup (arrow-key option picker).
-                if g.question_modal_open
-                    && let Some(ref q) = g.active_question
-                {
-                        let has_chat_option = q.allow_custom;
-                        let total_items = 1 + q.options.len() + if has_chat_option { 1 } else { 0 };
-                        // +4 for: title line, blank, blank before footer, footer
-                        let rows = (total_items as u16).saturating_add(6).max(8);
-                        let popup_w = 60u16.min(area.width.saturating_sub(4));
-                        let popup_area = centered_rect(area, popup_w, rows);
-
-                        let mut lines: Vec<Line> = vec![
-                            Line::from(Span::styled(
-                                format!(" {} ", q.prompt),
-                                Style::default()
-                                    .fg(theme::ASSISTANT)
-                                    .add_modifier(Modifier::BOLD),
-                            )),
-                            Line::default(),
-                        ];
-
-                        // Suggested answer (index 0)
-                        let suggested_label = format!(" Suggested: {} ", q.suggested_answer);
-                        if g.question_modal_index == 0 {
-                            lines.push(Line::from(Span::styled(
-                                format!(" ► {}", suggested_label.trim()),
-                                Style::default()
-                                    .fg(Color::Black)
-                                    .bg(theme::USER)
-                                    .add_modifier(Modifier::BOLD),
-                            )));
-                        } else {
-                            lines.push(Line::from(Span::styled(
-                                format!("   {}", suggested_label.trim()),
-                                Style::default().fg(theme::TEXT),
-                            )));
-                        }
-
-                        // Options (index 1..n)
-                        for (i, o) in q.options.iter().enumerate() {
-                            let item_idx = i + 1;
-                            let label = format!("{} ", o.label);
-                            if g.question_modal_index == item_idx {
-                                lines.push(Line::from(Span::styled(
-                                    format!(" ► {}", label.trim()),
-                                    Style::default()
-                                        .fg(Color::Black)
-                                        .bg(theme::USER)
-                                        .add_modifier(Modifier::BOLD),
-                                )));
-                            } else {
-                                lines.push(Line::from(Span::styled(
-                                    format!("   {}", label.trim()),
-                                    Style::default().fg(theme::TEXT),
-                                )));
-                            }
-                        }
-
-                        // "Chat about this" (last item, only if allow_custom)
-                        if has_chat_option {
-                            let chat_idx = 1 + q.options.len();
-                            if g.question_modal_index == chat_idx {
-                                lines.push(Line::from(Span::styled(
-                                    " ► Chat about this",
-                                    Style::default()
-                                        .fg(Color::Black)
-                                        .bg(theme::USER)
-                                        .add_modifier(Modifier::BOLD),
-                                )));
-                            } else {
-                                lines.push(Line::from(Span::styled(
-                                    "   Chat about this",
-                                    Style::default()
-                                        .fg(theme::MUTED)
-                                        .add_modifier(Modifier::ITALIC),
-                                )));
-                            }
-                        }
-
-                        // Footer
-                        lines.push(Line::default());
-                        let footer_text = if has_chat_option {
-                            " ↑↓ select · Enter confirm · Esc chat "
-                        } else {
-                            " ↑↓ select · Enter confirm "
-                        };
-                        lines.push(Line::from(Span::styled(
-                            footer_text,
-                            Style::default().fg(theme::MUTED),
-                        )));
-
-                        frame.render_widget(ClearWidget, popup_area);
-                        let popup = Paragraph::new(Text::from(lines))
-                            .block(
-                                Block::default()
-                                    .borders(Borders::ALL)
-                                    .border_style(Style::default().fg(theme::BORDER))
-                                    .title(Span::styled(
-                                        " question ",
-                                        Style::default().fg(theme::WARN),
-                                    )),
-                            )
-                            .style(Style::default().bg(theme::SURFACE))
-                            .wrap(Wrap { trim: false });
-                        frame.render_widget(popup, popup_area);
                 }
 
                 if g.session_picker_open {
@@ -3119,7 +3009,6 @@ pub fn run_blocking(
                 Event::Mouse(_) if g.permission_picker_open => continue,
                 Event::Mouse(_) if g.agent_picker_open => continue,
                 Event::Mouse(_) if g.session_picker_open => continue,
-                Event::Mouse(_) if g.question_modal_open => continue,
                 Event::Mouse(m) => {
                     let sz = terminal.size()?;
                     let area = Rect::new(0, 0, sz.width, sz.height);
@@ -3658,61 +3547,6 @@ pub fn run_blocking(
                                 g.branch_picker_index = 0;
                             }
                             _ => {}
-                        }
-                        continue;
-                    }
-
-                    // Question modal keyboard handling.
-                    if g.question_modal_open {
-                        if let Some(ref q) = g.active_question.clone() {
-                            // Total items: 1 (suggested) + options.len() + (1 if allow_custom for "Chat about this")
-                            let total = 1 + q.options.len() + if q.allow_custom { 1 } else { 0 };
-                            match (key.code, key.modifiers) {
-                                (KeyCode::Esc, _) if q.allow_custom => {
-                                    // Fall back to inline text input
-                                    g.close_question_modal();
-                                }
-                                // If !allow_custom, Esc is a no-op
-                                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
-                                    g.question_modal_index =
-                                        g.question_modal_index.saturating_sub(1);
-                                }
-                                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
-                                    g.question_modal_index =
-                                        (g.question_modal_index + 1).min(total - 1);
-                                }
-                                (KeyCode::Enter, _) => {
-                                    let idx = g.question_modal_index;
-                                    let sel = if idx == 0 {
-                                        // Suggested answer
-                                        Some(QuestionSelection::Suggested)
-                                    } else if idx <= q.options.len() {
-                                        // Regular option (1-based → 0-based)
-                                        Some(QuestionSelection::Option {
-                                            option_id: q.options[idx - 1].id.clone(),
-                                        })
-                                    } else {
-                                        // "Chat about this" — fall back to inline text input
-                                        None
-                                    };
-
-                                    if let Some(sel) = sel {
-                                        let qid = q.question_id.clone();
-                                        g.close_question_modal();
-                                        g.active_question = None;
-                                        drop(g);
-                                        if let Some(ref tx) = question_answer_tx {
-                                            let _ = tx.send((qid, sel));
-                                        } else {
-                                            let _ = cmd_tx.send(TuiCmd::QuestionAnswer(sel));
-                                        }
-                                    } else {
-                                        // "Chat about this" — close modal, keep active_question
-                                        g.close_question_modal();
-                                    }
-                                }
-                                _ => {}
-                            }
                         }
                         continue;
                     }
