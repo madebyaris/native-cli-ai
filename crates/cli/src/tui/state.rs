@@ -181,6 +181,13 @@ pub struct TuiSessionState {
     pub transcript_dragging: bool,
     /// The (line, col) where the current drag started. Cleared on mouse-up.
     pub transcript_drag_anchor: Option<(usize, usize)>,
+    // ── Command history ────────────────────────────────────────────────
+    /// Previously submitted commands (newest last). In-memory, per-session.
+    pub command_history: Vec<String>,
+    /// Current position when browsing history. `command_history.len()` means "below oldest entry".
+    pub history_index: usize,
+    /// Saved draft restored from the input buffer before entering history navigation.
+    pub history_draft: String,
 }
 
 #[derive(Debug, Clone)]
@@ -280,6 +287,9 @@ impl TuiSessionState {
             transcript_selection: None,
             transcript_dragging: false,
             transcript_drag_anchor: None,
+            command_history: Vec::new(),
+            history_index: 0,
+            history_draft: String::new(),
         }
     }
 
@@ -443,6 +453,72 @@ impl TuiSessionState {
 
     pub fn set_current_branch(&mut self, branch: &str) {
         self.current_branch = branch.to_string();
+    }
+
+    // ── Command history ────────────────────────────────────────────────
+
+    /// Push a submitted command into history. Deduplicates consecutive entries.
+    pub fn push_history(&mut self, line: &str) {
+        let trimmed = line.trim().to_string();
+        if trimmed.is_empty() {
+            return;
+        }
+        // Remove consecutive duplicate at tail.
+        if self.command_history.last().map(|s| s.as_str()) == Some(&trimmed) {
+            return;
+        }
+        self.command_history.push(trimmed);
+        // Cap at 200 entries.
+        if self.command_history.len() > 200 {
+            self.command_history
+                .drain(..self.command_history.len() - 200);
+        }
+        // Reset navigation state.
+        self.history_index = self.command_history.len();
+        self.history_draft.clear();
+    }
+
+    /// Navigate one step older (toward index 0). Returns true if index changed.
+    pub fn history_back(&mut self) -> bool {
+        if self.command_history.is_empty() {
+            return false;
+        }
+        let idx = self.history_index;
+        // Save current buffer as draft when first leaving the present.
+        if idx == self.command_history.len() {
+            self.history_draft = self.input_buffer.clone();
+        }
+        if idx == 0 {
+            return false;
+        }
+        self.history_index = idx - 1;
+        self.input_buffer = self.command_history[self.history_index].clone();
+        self.cursor_char_idx = self.input_buffer.chars().count();
+        true
+    }
+
+    /// Navigate one step newer (toward the present). Returns true if index changed.
+    pub fn history_forward(&mut self) -> bool {
+        if self.history_index >= self.command_history.len() {
+            return false;
+        }
+        self.history_index += 1;
+        if self.history_index == self.command_history.len() {
+            // Restored the draft.
+            self.input_buffer = std::mem::take(&mut self.history_draft);
+        } else {
+            self.input_buffer = self.command_history[self.history_index].clone();
+        }
+        self.cursor_char_idx = self.input_buffer.chars().count();
+        true
+    }
+
+    /// Reset history navigation to the present (used when user types).
+    pub fn history_reset(&mut self) {
+        if self.history_index != self.command_history.len() {
+            self.history_index = self.command_history.len();
+            self.history_draft.clear();
+        }
     }
 
     pub fn open_branch_picker(&mut self, branches: Vec<String>, current: &str) {

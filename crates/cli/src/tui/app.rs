@@ -1249,7 +1249,7 @@ fn transcript_lines_and_hits(
             &mut lines,
             &mut hits,
             Line::from(Span::styled(
-                "Tab  agent   Ctrl+V  image   Ctrl+P  commands   !cmd  shell   @path  search   /  inline   wheel  scroll\n\n                drag to select  ·  release to copy to clipboard",
+                "Tab  agent   Ctrl+V  image   Ctrl+P  commands   !cmd  shell   @path  search   /  inline   PgUp/Dn  scroll\n\n                drag to select  ·  release to copy to clipboard",
                 Style::default().fg(theme::MUTED),
             )),
             None,
@@ -3918,6 +3918,7 @@ pub fn run_blocking(
                             let line = std::mem::take(&mut g.input_buffer);
                             g.cursor_char_idx = 0;
                             g.slash_menu_index = 0;
+                            g.push_history(&line);
                             let active_approval = g.active_approval.clone();
                             let active_q = g.active_question.clone();
                             if let Some(req) = active_approval {
@@ -4065,8 +4066,7 @@ pub fn run_blocking(
                                 {
                                     g.slash_menu_index = g.slash_menu_index.saturating_sub(1);
                                 } else {
-                                    g.transcript_follow_tail = false;
-                                    g.scroll_lines = g.scroll_lines.saturating_sub(1);
+                                    g.history_back();
                                 }
                             }
                         }
@@ -4090,27 +4090,52 @@ pub fn run_blocking(
                                     let n = slash_filtered.len();
                                     g.slash_menu_index = (g.slash_menu_index + 1) % n;
                                 } else {
-                                    let sz = terminal.size().ok();
-                                    if let Some(sz) = sz {
-                                        let area = Rect::new(0, 0, sz.width, sz.height);
-                                        let (main_area, _) = layout_with_sidebar(area);
-                                        let sh = composer_chrome_height(
-                                            &slash_entries,
-                                            &workspace_files,
-                                            &g.input_buffer,
-                                            g.cursor_char_idx,
-                                        );
-                                        let (tr, _, _, _) = layout_chunks(main_area, sh);
-                                        let lines =
-                                            transcript_lines(&g, tr.width.saturating_sub(2));
-                                        let total = lines.len();
-                                        let th = tr.height.saturating_sub(2) as usize;
-                                        let max_scroll = total.saturating_sub(th);
-                                        g.scroll_lines = (g.scroll_lines + 1).min(max_scroll);
-                                        if g.scroll_lines >= max_scroll {
-                                            g.transcript_follow_tail = true;
-                                        }
-                                    }
+                                    g.history_forward();
+                                }
+                            }
+                        }
+                        (KeyCode::PageUp, _) => {
+                            let sz = terminal.size().ok();
+                            if let Some(sz) = sz {
+                                let area = Rect::new(0, 0, sz.width, sz.height);
+                                let (main_area, _) = layout_with_sidebar(area);
+                                let sh = composer_chrome_height(
+                                    &slash_entries,
+                                    &workspace_files,
+                                    &g.input_buffer,
+                                    g.cursor_char_idx,
+                                );
+                                let (tr, _, _, _) = layout_chunks(main_area, sh);
+                                let total = transcript_lines(&g, tr.width.saturating_sub(2)).len();
+                                let th = tr.height.saturating_sub(2) as usize;
+                                let max_scroll = total.saturating_sub(th);
+                                let page = th.saturating_sub(1).max(1);
+                                g.transcript_follow_tail = false;
+                                g.scroll_lines = g.scroll_lines.saturating_sub(page);
+                                if g.scroll_lines > max_scroll {
+                                    g.scroll_lines = max_scroll;
+                                }
+                            }
+                        }
+                        (KeyCode::PageDown, _) => {
+                            let sz = terminal.size().ok();
+                            if let Some(sz) = sz {
+                                let area = Rect::new(0, 0, sz.width, sz.height);
+                                let (main_area, _) = layout_with_sidebar(area);
+                                let sh = composer_chrome_height(
+                                    &slash_entries,
+                                    &workspace_files,
+                                    &g.input_buffer,
+                                    g.cursor_char_idx,
+                                );
+                                let (tr, _, _, _) = layout_chunks(main_area, sh);
+                                let total = transcript_lines(&g, tr.width.saturating_sub(2)).len();
+                                let th = tr.height.saturating_sub(2) as usize;
+                                let max_scroll = total.saturating_sub(th);
+                                let page = th.saturating_sub(1).max(1);
+                                g.scroll_lines = (g.scroll_lines + page).min(max_scroll);
+                                if g.scroll_lines >= max_scroll {
+                                    g.transcript_follow_tail = true;
                                 }
                             }
                         }
@@ -4138,6 +4163,7 @@ pub fn run_blocking(
                             }
                         }
                         (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                            g.history_reset();
                             let idx = g.cursor_char_idx;
                             let mut cs: Vec<char> = g.input_buffer.chars().collect();
                             cs.insert(idx, c);
