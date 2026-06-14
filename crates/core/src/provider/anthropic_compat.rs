@@ -132,6 +132,16 @@ pub fn spawn_anthropic_stream(
                                     tool_input.push_str(partial);
                                 }
                             }
+                            "thinking_delta" => {
+                                // Anthropic thinking blocks (used by MiniMax and others).
+                                if let Some(thinking) = delta["thinking"].as_str()
+                                    && !thinking.is_empty()
+                                {
+                                    let _ = tx
+                                        .send(StreamChunk::ReasoningDelta(thinking.to_string()))
+                                        .await;
+                                }
+                            }
                             _ => {}
                         }
                     }

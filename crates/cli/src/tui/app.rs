@@ -47,8 +47,21 @@ pub enum ApprovalAnswer {
     AllowPattern { call_id: String, pattern: String },
 }
 
-/// Per flattened transcript line: click selects this answer (same indices as `transcript_lines`).
-type LineAnswerHit = Option<QuestionSelection>;
+/// Actions triggered by clicking transcript lines.
+#[derive(Debug, Clone)]
+pub(crate) enum TranscriptHit {
+    /// Click selects this question answer.
+    Question(QuestionSelection),
+    /// Click toggles thinking block expand/collapse (block index).
+    ToggleThinking(usize),
+    /// Click toggles the streaming reasoning block expand/collapse.
+    ToggleStreamingThinking,
+    /// Click toggles a specific tool output block expand/collapse (block index).
+    ToggleToolOutput(usize),
+}
+
+/// Per flattened transcript line: click selects this answer or toggles thinking.
+type LineAnswerHit = Option<TranscriptHit>;
 
 #[derive(Debug)]
 pub enum TuiCmd {
@@ -131,6 +144,7 @@ const SIDEBAR_WIDTH: u16 = 32;
 const SIDEBAR_MIN_TOTAL_WIDTH: u16 = 110;
 const COMMAND_PALETTE_WIDTH: u16 = 48;
 const COMMAND_PALETTE_MAX_ROWS: usize = 10;
+const COMPOSER_MAX_ROWS: usize = 5;
 
 fn slash_panel_visible(buffer: &str) -> bool {
     buffer.starts_with('/') && !buffer.contains(' ')
@@ -299,6 +313,7 @@ fn char_width(ch: char) -> usize {
 
 /// Compute the visible character window so the cursor stays within `max_cols`.
 /// Returns `(start_char_idx, end_char_idx)` – half-open range of chars to render.
+#[cfg(test)]
 fn input_visible_window(buffer: &str, cursor_char_idx: usize, max_cols: usize) -> (usize, usize) {
     let chars: Vec<char> = buffer.chars().collect();
     let n = chars.len();
@@ -337,6 +352,8 @@ fn input_visible_window(buffer: &str, cursor_char_idx: usize, max_cols: usize) -
     (start, end)
 }
 
+/// Render a single-line composer with horizontal scrolling (legacy, used only in tests).
+#[cfg(test)]
 fn composer_line(buffer: &str, cursor_char_idx: usize, max_cols: usize) -> Line<'static> {
     // Prompt "❯ " or "… " occupies 2 display columns (1 symbol + 1 space).
     const PROMPT_COLS: usize = 2;
@@ -407,6 +424,207 @@ fn composer_line(buffer: &str, cursor_char_idx: usize, max_cols: usize) -> Line<
     }
 
     Line::from(spans)
+}
+
+/// A visual row of the multi-line composer buffer.
+#[derive(Debug)]
+pub(super) struct ComposerVisualRow {
+    /// Prompt or indent prefix ("❯ ", "… ", or "  ").
+    prefix: &'static str,
+    /// Start char index in the buffer (exclusive of newlines).
+    char_start: usize,
+    /// End char index in the buffer (exclusive of newlines).
+    char_end: usize,
+}
+
+/// Greedy character-wrap a single logical line to fit within `max_width` display columns.
+/// Returns a list of char counts per visual row.
+pub(super) fn wrap_char_counts(text: &str, max_width: usize) -> Vec<usize> {
+    if max_width == 0 || text.is_empty() {
+        return vec![text.chars().count()];
+    }
+    let mut rows = Vec::new();
+    let mut width = 0usize;
+    let mut count = 0usize;
+    for ch in text.chars() {
+        let w = char_width(ch);
+        if width + w > max_width && count > 0 {
+            rows.push(count);
+            width = 0;
+            count = 0;
+        }
+        width += w;
+        count += 1;
+    }
+    rows.push(count);
+    rows
+}
+
+/// Build all visual rows for the composer buffer.
+pub(super) fn build_composer_visual_rows(buffer: &str, max_cols: usize) -> Vec<ComposerVisualRow> {
+    const PREFIX_COLS: usize = 2;
+    let buf_cols = max_cols.saturating_sub(PREFIX_COLS).max(1);
+
+    let mut rows = Vec::new();
+    let mut char_pos = 0;
+    let mut is_first = true;
+
+    for segment in buffer.split('\n') {
+        let counts = wrap_char_counts(segment, buf_cols);
+        for &count in &counts {
+            let prefix = if is_first { "❯ " } else { "  " };
+            let start = char_pos;
+            rows.push(ComposerVisualRow {
+                prefix,
+                char_start: start,
+                char_end: start + count,
+            });
+            char_pos = start + count;
+            is_first = false;
+        }
+        char_pos += 1; // +1 for the '\n' itself
+    }
+
+    if rows.is_empty() {
+        rows.push(ComposerVisualRow {
+            prefix: "❯ ",
+            char_start: 0,
+            char_end: 0,
+        });
+    }
+
+    rows
+}
+
+/// Find which visual row index the cursor is on.
+pub(super) fn cursor_visual_row_idx(rows: &[ComposerVisualRow], cursor_char_idx: usize) -> usize {
+    for (i, row) in rows.iter().enumerate() {
+        if cursor_char_idx >= row.char_start && cursor_char_idx <= row.char_end {
+            return i;
+        }
+    }
+    // Cursor on a newline between rows: return the preceding row.
+    let mut best = 0;
+    for (i, row) in rows.iter().enumerate() {
+        if row.char_end <= cursor_char_idx {
+            best = i;
+        } else {
+            break;
+        }
+    }
+    best
+}
+
+/// How many visual rows the composer text needs (minimum 1).
+pub(super) fn composer_input_rows(buffer: &str, max_cols: usize) -> usize {
+    build_composer_visual_rows(buffer, max_cols).len().max(1)
+}
+
+/// Render a single visual row of the composer with styling and optional cursor.
+fn style_composer_row(
+    row: &ComposerVisualRow,
+    buffer_chars: &[char],
+    cursor_char_idx: usize,
+    has_cursor: bool,
+    is_scrolled: bool,
+    mention_ranges: &[(usize, usize)],
+) -> Line<'static> {
+    let mut spans = Vec::new();
+
+    // Prefix
+    let prefix_text = if is_scrolled { "… " } else { row.prefix };
+    let prefix_style = if row.prefix == "❯ " {
+        Style::default().fg(theme::USER).bold()
+    } else {
+        Style::default().fg(theme::TEXT)
+    };
+    spans.push(Span::styled(prefix_text.to_string(), prefix_style));
+
+    // Characters in this row
+    let start = row.char_start.min(buffer_chars.len());
+    let end = row.char_end.min(buffer_chars.len());
+    let mut run = String::new();
+    let mut run_style: Option<Style> = None;
+
+    for idx in start..=end {
+        let is_cursor_pos = has_cursor && idx == cursor_char_idx;
+        let ch = buffer_chars.get(idx).copied().unwrap_or(' ');
+        let in_mention =
+            idx < buffer_chars.len() && mention_ranges.iter().any(|(s, e)| *s <= idx && idx < *e);
+
+        let style = if is_cursor_pos {
+            if in_mention {
+                Style::default()
+                    .bg(theme::USER)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .bg(theme::MUTED)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD)
+            }
+        } else if in_mention {
+            Style::default()
+                .fg(theme::TEXT)
+                .bg(theme::MENTION_BG)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::TEXT)
+        };
+
+        push_styled_run(&mut spans, &mut run, &mut run_style, style, ch);
+
+        if idx == buffer_chars.len() {
+            break;
+        }
+    }
+
+    if !run.is_empty() {
+        spans.push(Span::styled(run, run_style.unwrap_or_default()));
+    }
+
+    Line::from(spans)
+}
+
+/// Render multi-line composer text as a list of styled Lines.
+pub(super) fn composer_text_lines(
+    buffer: &str,
+    cursor_char_idx: usize,
+    max_cols: usize,
+) -> Vec<Line<'static>> {
+    let chars: Vec<char> = buffer.chars().collect();
+    let cursor_char_idx = cursor_char_idx.min(chars.len());
+    let mention_ranges = at_mention_char_ranges(buffer);
+
+    let rows = build_composer_visual_rows(buffer, max_cols);
+    let cursor_row = cursor_visual_row_idx(&rows, cursor_char_idx);
+
+    // Scroll to keep cursor visible within max rows.
+    let total = rows.len();
+    let max_rows = COMPOSER_MAX_ROWS;
+    let scroll_offset = if total <= max_rows {
+        0
+    } else {
+        cursor_row.saturating_sub(max_rows - 1)
+    };
+
+    let mut result = Vec::new();
+    for (local_idx, row) in rows.iter().enumerate().skip(scroll_offset).take(max_rows) {
+        let has_cursor = local_idx == cursor_row;
+        let is_scrolled = scroll_offset > 0 && local_idx == scroll_offset;
+        let line = style_composer_row(
+            row,
+            &chars,
+            cursor_char_idx,
+            has_cursor,
+            is_scrolled,
+            &mention_ranges,
+        );
+        result.push(line);
+    }
+
+    result
 }
 
 /// Entry for the slash panel: either a hardcoded command or a discovered skill.
@@ -600,6 +818,10 @@ const PALETTE_CATALOG: &[PaletteRow] = &[
         label: "Toggle thinking",
         shortcut: "",
     },
+    PaletteRow::Entry {
+        label: "Toggle tool output",
+        shortcut: "",
+    },
     PaletteRow::Section("Provider"),
     PaletteRow::Entry {
         label: "Connect provider",
@@ -668,6 +890,7 @@ fn palette_command_for_label(label: &str) -> &'static str {
         "Skills" => "/skills",
         "Agent profile" => "/agent",
         "Toggle thinking" => "/thinking",
+        "Toggle tool output" => "/tool-output",
         "Switch provider" => "/provider",
         "API key" => "/apikey",
         "View status" => "/status",
@@ -736,7 +959,15 @@ fn slash_panel_height(filtered_len: usize) -> u16 {
         .min(14)
 }
 
-fn layout_chunks(area: Rect, slash_h: u16) -> (Rect, Rect, Option<Rect>, Rect) {
+/// Compute the total input area content rows (text rows + hint row) for layout_chunks.
+pub(super) fn input_area_content_rows(buffer: &str, main_width: u16) -> u16 {
+    let text_cols = main_width.saturating_sub(2) as usize; // subtract input border
+    let text_rows = composer_input_rows(buffer, text_cols) as u16;
+    text_rows.saturating_add(1) // +1 for hint line
+}
+
+fn layout_chunks(area: Rect, slash_h: u16, input_rows: u16) -> (Rect, Rect, Option<Rect>, Rect) {
+    let input_h = input_rows.saturating_add(2); // content rows + top/bottom border
     if slash_h > 0 {
         let c = Layout::default()
             .direction(Direction::Vertical)
@@ -744,7 +975,7 @@ fn layout_chunks(area: Rect, slash_h: u16) -> (Rect, Rect, Option<Rect>, Rect) {
                 Constraint::Min(4),
                 Constraint::Length(2),
                 Constraint::Length(slash_h),
-                Constraint::Length(3),
+                Constraint::Length(input_h),
             ])
             .split(area);
         (c[0], c[1], Some(c[2]), c[3])
@@ -754,7 +985,7 @@ fn layout_chunks(area: Rect, slash_h: u16) -> (Rect, Rect, Option<Rect>, Rect) {
             .constraints([
                 Constraint::Min(4),
                 Constraint::Length(2),
-                Constraint::Length(3),
+                Constraint::Length(input_h),
             ])
             .split(area);
         (c[0], c[1], None, c[2])
@@ -932,7 +1163,9 @@ fn plain_text_from_lines(
         } else {
             out.push_str(&full_text);
         }
-        out.push('\n');
+        if idx < lines[s..e].len() - 1 {
+            out.push('\n');
+        }
     }
     out
 }
@@ -989,7 +1222,7 @@ fn transcript_lines_and_hits(
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut hits: Vec<LineAnswerHit> = Vec::new();
 
-    for block in &state.blocks {
+    for (bi, block) in state.blocks.iter().enumerate() {
         match block {
             DisplayBlock::User(content) => {
                 push_transcript_line(
@@ -1077,12 +1310,19 @@ fn transcript_lines_and_hits(
                 );
                 push_transcript_line(&mut lines, &mut hits, Line::default(), None);
             }
-            DisplayBlock::ToolDone { name, ok, detail } => {
+            DisplayBlock::ToolDone {
+                name,
+                ok,
+                detail,
+                full_output,
+                expanded,
+            } => {
                 let (icon, st) = if *ok {
                     ("✓", Style::default().fg(theme::SUCCESS))
                 } else {
                     ("✗", Style::default().fg(theme::ERROR))
                 };
+                // Summary line (always shown)
                 push_transcript_line(
                     &mut lines,
                     &mut hits,
@@ -1101,6 +1341,49 @@ fn transcript_lines_and_hits(
                     ]),
                     None,
                 );
+
+                // Collapsible full output
+                let all_lines: Vec<String> = wrap_text(full_output, w);
+                let total = all_lines.len();
+                let preview_lines = 3usize;
+                let is_expanded = *expanded;
+                let show_lines = if is_expanded || total <= preview_lines {
+                    total
+                } else {
+                    preview_lines
+                };
+
+                // Content lines (dimmed)
+                for text_line in &all_lines[..show_lines] {
+                    push_transcript_line(
+                        &mut lines,
+                        &mut hits,
+                        Line::from(Span::styled(
+                            text_line.clone(),
+                            Style::default().fg(theme::MUTED),
+                        )),
+                        None,
+                    );
+                }
+
+                // Toggle button (clickable)
+                if total > preview_lines {
+                    let label: String = if is_expanded {
+                        format!(" ▾ hide {name} output ")
+                    } else {
+                        format!(" ▸ show {name} output ({}/{}) ", show_lines, total)
+                    };
+                    push_transcript_line(
+                        &mut lines,
+                        &mut hits,
+                        Line::from(vec![
+                            Span::styled(label, Style::default().fg(theme::TOOL)),
+                            Span::styled("(click)", Style::default().fg(theme::MUTED)),
+                        ]),
+                        Some(TranscriptHit::ToggleToolOutput(bi)),
+                    );
+                }
+                push_transcript_line(&mut lines, &mut hits, Line::default(), None);
             }
             DisplayBlock::System(s) => {
                 push_transcript_line(
@@ -1152,7 +1435,7 @@ fn transcript_lines_and_hits(
                         ),
                         Span::styled("(click)", Style::default().fg(theme::MUTED)),
                     ]),
-                    Some(QuestionSelection::Suggested),
+                    Some(TranscriptHit::Question(QuestionSelection::Suggested)),
                 );
                 for (i, o) in q.options.iter().enumerate() {
                     push_transcript_line(
@@ -1167,9 +1450,9 @@ fn transcript_lines_and_hits(
                             ),
                             Span::styled("(click)", Style::default().fg(theme::MUTED)),
                         ]),
-                        Some(QuestionSelection::Option {
+                        Some(TranscriptHit::Question(QuestionSelection::Option {
                             option_id: o.id.clone(),
-                        }),
+                        })),
                     );
                 }
                 if q.allow_custom {
@@ -1194,6 +1477,58 @@ fn transcript_lines_and_hits(
                 );
                 push_transcript_line(&mut lines, &mut hits, Line::default(), None);
             }
+            DisplayBlock::Thinking { content, expanded } => {
+                let all_lines: Vec<String> = wrap_text(content, w);
+                let total = all_lines.len();
+                let is_expanded = *expanded;
+                let preview_lines = 3usize;
+                let show_lines = if is_expanded || total <= preview_lines {
+                    total
+                } else {
+                    preview_lines
+                };
+
+                // Header
+                push_transcript_line(
+                    &mut lines,
+                    &mut hits,
+                    Line::from(Span::styled(
+                        " 💭 thinking ",
+                        Style::default().fg(theme::MUTED),
+                    )),
+                    None,
+                );
+                // Content lines (dimmed)
+                for text_line in &all_lines[..show_lines] {
+                    push_transcript_line(
+                        &mut lines,
+                        &mut hits,
+                        Line::from(Span::styled(
+                            text_line.clone(),
+                            Style::default().fg(theme::MUTED),
+                        )),
+                        None,
+                    );
+                }
+                // Toggle button (clickable)
+                if total > preview_lines {
+                    let label: String = if is_expanded {
+                        " ▾ hide thinking ".into()
+                    } else {
+                        format!(" ▸ show thinking ({}/{}) ", show_lines, total)
+                    };
+                    push_transcript_line(
+                        &mut lines,
+                        &mut hits,
+                        Line::from(vec![
+                            Span::styled(label, Style::default().fg(theme::TOOL)),
+                            Span::styled("(click)", Style::default().fg(theme::MUTED)),
+                        ]),
+                        Some(TranscriptHit::ToggleThinking(bi)),
+                    );
+                }
+                push_transcript_line(&mut lines, &mut hits, Line::default(), None);
+            }
             DisplayBlock::ErrorLine(s) => {
                 push_transcript_line(
                     &mut lines,
@@ -1206,6 +1541,53 @@ fn transcript_lines_and_hits(
                 );
             }
         }
+    }
+
+    if let Some(reasoning) = &state.streaming_reasoning
+        && !reasoning.is_empty()
+    {
+        let all_rl: Vec<String> = wrap_text(reasoning, w);
+        let total_rl = all_rl.len();
+        let preview_rl = 5usize;
+        let show_rl = if state.streaming_reasoning_expanded || total_rl <= preview_rl {
+            total_rl
+        } else {
+            preview_rl
+        };
+        push_transcript_line(
+            &mut lines,
+            &mut hits,
+            Line::from(vec![
+                Span::styled(" 💭 thinking ", Style::default().fg(theme::MUTED)),
+                Span::styled("…", Style::default().fg(theme::MUTED)),
+            ]),
+            None,
+        );
+        for rl in &all_rl[..show_rl] {
+            push_transcript_line(
+                &mut lines,
+                &mut hits,
+                Line::from(Span::styled(rl.clone(), Style::default().fg(theme::MUTED))),
+                None,
+            );
+        }
+        if total_rl > preview_rl {
+            let label: String = if state.streaming_reasoning_expanded {
+                " ▾ hide thinking ".into()
+            } else {
+                format!(" ▸ show thinking ({}/{}) ", show_rl, total_rl)
+            };
+            push_transcript_line(
+                &mut lines,
+                &mut hits,
+                Line::from(vec![
+                    Span::styled(label, Style::default().fg(theme::TOOL)),
+                    Span::styled("(click)", Style::default().fg(theme::MUTED)),
+                ]),
+                Some(TranscriptHit::ToggleStreamingThinking),
+            );
+        }
+        push_transcript_line(&mut lines, &mut hits, Line::default(), None);
     }
 
     if let Some(stream) = &state.streaming_assistant
@@ -1576,7 +1958,11 @@ pub fn run_blocking(
             terminal.draw(|frame| {
                 let area = frame.area();
                 let (main_area, sidebar_opt) = layout_with_sidebar(area);
-                let (tr, st_r, slash_opt, inp_r) = layout_chunks(main_area, chrome_h);
+                // Compute dynamic input area size based on buffer content.
+                let inp_text_cols = main_area.width.saturating_sub(2) as usize;
+                let text_rows = composer_input_rows(&g.input_buffer, inp_text_cols) as u16;
+                let total_input_rows = text_rows.saturating_add(1); // +1 for hint line
+                let (tr, st_r, slash_opt, inp_r) = layout_chunks(main_area, chrome_h, total_input_rows);
 
                 let transcript_h = tr.height.saturating_sub(2) as usize;
                 let inner_w = tr.width.saturating_sub(2);
@@ -2186,10 +2572,11 @@ pub fn run_blocking(
                     }
                 }
 
-                let input_line = composer_line(
+                let composer_cols = inp_r.width.saturating_sub(2) as usize; // border
+                let mut input_lines = composer_text_lines(
                     &g.input_buffer,
                     g.cursor_char_idx,
-                    inp_r.width.saturating_sub(2) as usize, // border
+                    composer_cols,
                 );
 
                 let hint = if g.active_approval.is_some() {
@@ -2202,13 +2589,11 @@ pub fn run_blocking(
                         "Enter / 0 = suggested · 1–n = option · click underlined line · /auto-answer · End = transcript bottom (empty input)",
                         Style::default().fg(theme::WARN),
                     ))
-                } else if g.input_buffer.is_empty() {
+                } else {
                     Line::from(Span::styled(
-                        "Enter send · Tab agent · Ctrl+V image · /image · Ctrl+P palette · Ctrl+Q exit · Ctrl+L clear · drag select → copy",
+                        "Enter send · Alt+Enter newline · Tab agent · Ctrl+V image · /image · Ctrl+P palette · Ctrl+Q exit · Ctrl+L clear · drag select → copy",
                         Style::default().fg(theme::MUTED),
                     ))
-                } else {
-                    Line::default()
                 };
 
                 let input_title = if g.active_approval.is_some() {
@@ -2218,7 +2603,6 @@ pub fn run_blocking(
                 } else {
                     " message "
                 };
-                let mut input_lines = vec![input_line];
                 if !g.staged_image_attachments.is_empty() {
                     input_lines.push(Line::from(Span::styled(
                         format!(
@@ -3000,7 +3384,50 @@ pub fn run_blocking(
             let mut g = state.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
 
             match ev {
-                Event::Mouse(_) if g.command_palette_open => continue,
+                Event::Mouse(m) if g.command_palette_open => {
+                    if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+                        let sz = terminal.size().unwrap_or_default();
+                        let area = Rect::new(0, 0, sz.width, sz.height);
+                        let filtered = filter_palette_rows(&g.command_palette_query);
+                        let selectable = palette_selectable_indices(&filtered);
+                        let pick_abs = if selectable.is_empty() {
+                            0
+                        } else {
+                            selectable[g.palette_index.min(selectable.len().saturating_sub(1))]
+                        };
+                        let total_vis = filtered.len().clamp(1, COMMAND_PALETTE_MAX_ROWS);
+                        let popup_area = centered_rect(
+                            area,
+                            COMMAND_PALETTE_WIDTH,
+                            (total_vis as u16).saturating_add(6),
+                        );
+                        if rect_contains(popup_area, m.column, m.row) {
+                            // Click inside popup – resolve which entry row.
+                            let inner_top = popup_area.y.saturating_add(1); // +1 border
+                            let entry_start = inner_top.saturating_add(2); // search + blank
+                            let list_scroll = pick_abs.saturating_sub(COMMAND_PALETTE_MAX_ROWS / 2);
+                            let list_end =
+                                (list_scroll + COMMAND_PALETTE_MAX_ROWS).min(filtered.len());
+                            let list_visible = list_end - list_scroll;
+                            if m.row >= entry_start
+                                && m.row < entry_start.saturating_add(list_visible as u16)
+                            {
+                                let row_offset = (m.row - entry_start) as usize;
+                                let idx = list_scroll + row_offset;
+                                if let Some(PaletteRow::Entry { label, .. }) = filtered.get(idx) {
+                                    let cmd = palette_command_for_label(label);
+                                    g.input_buffer = cmd.to_string();
+                                    g.cursor_char_idx = g.input_buffer.chars().count();
+                                }
+                            }
+                        }
+                        // Close palette (click inside = executed, outside = dismissed).
+                        g.command_palette_open = false;
+                        g.command_palette_query.clear();
+                        g.palette_index = 0;
+                    }
+                    continue;
+                }
                 Event::Mouse(_) if g.info_modal_open => continue,
                 Event::Mouse(_) if g.model_picker_open => continue,
                 Event::Mouse(_) if g.connect_modal_open => continue,
@@ -3022,7 +3449,11 @@ pub fn run_blocking(
                         &g.input_buffer,
                         g.cursor_char_idx,
                     );
-                    let (tr, _, slash_r, _) = layout_chunks(main_area, sh);
+                    let (tr, _, slash_r, _) = layout_chunks(
+                        main_area,
+                        sh,
+                        input_area_content_rows(&g.input_buffer, main_area.width),
+                    );
 
                     if rect_contains(tr, m.column, m.row) {
                         let inner_w = tr.width.saturating_sub(2);
@@ -3030,6 +3461,14 @@ pub fn run_blocking(
                         let total = lines.len();
                         let th = tr.height.saturating_sub(2) as usize;
                         let max_scroll = total.saturating_sub(th);
+                        // Clamp scroll offset to keep gline in bounds even when the
+                        // transcript layout changed between the last render and this
+                        // event (e.g. reasoning committed from streaming to a block).
+                        if g.transcript_follow_tail {
+                            g.scroll_lines = max_scroll;
+                        } else {
+                            g.scroll_lines = g.scroll_lines.min(max_scroll);
+                        }
                         let inner_top = tr.y.saturating_add(1);
                         let row_in_area = if m.row >= inner_top {
                             Some((m.row - inner_top) as usize)
@@ -3058,26 +3497,61 @@ pub fn run_blocking(
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 if let Some(gl) = gline {
-                                    let picked = if gl < hits.len() {
-                                        hits[gl].clone().zip(
-                                            g.active_question
-                                                .as_ref()
-                                                .map(|q| q.question_id.clone()),
-                                        )
-                                    } else {
-                                        None
-                                    };
-                                    if let Some((sel, qid)) = picked {
-                                        // Clear any text selection when clicking a question option.
-                                        g.transcript_selection = None;
-                                        g.transcript_dragging = false;
-                                        drop(g);
-                                        if let Some(ref tx) = question_answer_tx {
-                                            let _ = tx.send((qid, sel));
-                                        } else {
-                                            let _ = cmd_tx.send(TuiCmd::QuestionAnswer(sel));
+                                    // Handle transcript hit: toggle thinking or answer question.
+                                    if gl < hits.len() {
+                                        match &hits[gl] {
+                                            Some(TranscriptHit::ToggleThinking(block_idx)) => {
+                                                if let Some(DisplayBlock::Thinking {
+                                                    expanded,
+                                                    ..
+                                                }) = g.blocks.get_mut(*block_idx)
+                                                {
+                                                    *expanded = !*expanded;
+                                                }
+                                                g.transcript_selection = None;
+                                                g.transcript_dragging = false;
+                                                continue;
+                                            }
+                                            Some(TranscriptHit::ToggleStreamingThinking) => {
+                                                g.streaming_reasoning_expanded =
+                                                    !g.streaming_reasoning_expanded;
+                                                g.transcript_selection = None;
+                                                g.transcript_dragging = false;
+                                                continue;
+                                            }
+                                            Some(TranscriptHit::ToggleToolOutput(block_idx)) => {
+                                                if let Some(DisplayBlock::ToolDone {
+                                                    expanded,
+                                                    ..
+                                                }) = g.blocks.get_mut(*block_idx)
+                                                {
+                                                    *expanded = !*expanded;
+                                                }
+                                                g.transcript_selection = None;
+                                                g.transcript_dragging = false;
+                                                continue;
+                                            }
+                                            Some(TranscriptHit::Question(sel)) => {
+                                                let qid = g
+                                                    .active_question
+                                                    .as_ref()
+                                                    .map(|q| q.question_id.clone());
+                                                if let Some(qid) = qid {
+                                                    g.transcript_selection = None;
+                                                    g.transcript_dragging = false;
+                                                    drop(g);
+                                                    if let Some(ref tx) = question_answer_tx {
+                                                        let _ = tx.send((qid, sel.clone()));
+                                                    } else {
+                                                        let _ = cmd_tx.send(
+                                                            TuiCmd::QuestionAnswer(sel.clone()),
+                                                        );
+                                                    }
+                                                    continue;
+                                                }
+                                            }
+                                            None => {}
                                         }
-                                        continue;
                                     }
                                     // No question hit — start a new text selection or extend existing.
                                     if m.modifiers.contains(KeyModifiers::SHIFT) {
@@ -3793,6 +4267,7 @@ pub fn run_blocking(
                         (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
                             g.blocks.clear();
                             g.streaming_assistant = None;
+                            g.streaming_reasoning = None;
                             g.scroll_lines = 0;
                             g.transcript_follow_tail = true;
                         }
@@ -3902,6 +4377,15 @@ pub fn run_blocking(
                                 }
                                 continue;
                             }
+                        }
+                        // Alt+Enter inserts a newline for multi-line input.
+                        (KeyCode::Enter, KeyModifiers::ALT) => {
+                            g.history_reset();
+                            let idx = g.cursor_char_idx;
+                            let mut cs: Vec<char> = g.input_buffer.chars().collect();
+                            cs.insert(idx, '\n');
+                            g.input_buffer = cs.into_iter().collect();
+                            g.cursor_char_idx += 1;
                         }
                         (KeyCode::Enter, _) => {
                             if let Some((buf, cidx)) = apply_selected_at_completion(
@@ -4031,7 +4515,11 @@ pub fn run_blocking(
                                         &g.input_buffer,
                                         g.cursor_char_idx,
                                     );
-                                    let (tr, _, _, _) = layout_chunks(main_area, sh);
+                                    let (tr, _, _, _) = layout_chunks(
+                                        main_area,
+                                        sh,
+                                        input_area_content_rows(&g.input_buffer, main_area.width),
+                                    );
                                     let total =
                                         transcript_lines(&g, tr.width.saturating_sub(2)).len();
                                     let th = tr.height.saturating_sub(2) as usize;
@@ -4105,7 +4593,11 @@ pub fn run_blocking(
                                     &g.input_buffer,
                                     g.cursor_char_idx,
                                 );
-                                let (tr, _, _, _) = layout_chunks(main_area, sh);
+                                let (tr, _, _, _) = layout_chunks(
+                                    main_area,
+                                    sh,
+                                    input_area_content_rows(&g.input_buffer, main_area.width),
+                                );
                                 let total = transcript_lines(&g, tr.width.saturating_sub(2)).len();
                                 let th = tr.height.saturating_sub(2) as usize;
                                 let max_scroll = total.saturating_sub(th);
@@ -4128,7 +4620,11 @@ pub fn run_blocking(
                                     &g.input_buffer,
                                     g.cursor_char_idx,
                                 );
-                                let (tr, _, _, _) = layout_chunks(main_area, sh);
+                                let (tr, _, _, _) = layout_chunks(
+                                    main_area,
+                                    sh,
+                                    input_area_content_rows(&g.input_buffer, main_area.width),
+                                );
                                 let total = transcript_lines(&g, tr.width.saturating_sub(2)).len();
                                 let th = tr.height.saturating_sub(2) as usize;
                                 let max_scroll = total.saturating_sub(th);
@@ -4194,8 +4690,10 @@ pub fn run_blocking(
 mod approval_parse_tests {
     use super::{
         TuiCmd, apply_selected_at_completion, branch_picker_enter_command,
-        completed_at_mention_range_before_cursor, composer_line, delete_completed_at_mention,
-        escape_cancels_active_turn, filtered_branch_indices, parse_approval_verdict,
+        build_composer_visual_rows, completed_at_mention_range_before_cursor, composer_input_rows,
+        composer_line, composer_text_lines, cursor_visual_row_idx, delete_completed_at_mention,
+        escape_cancels_active_turn, filtered_branch_indices, input_area_content_rows,
+        parse_approval_verdict, wrap_char_counts,
     };
     use crate::tui::state::TuiSessionState;
     use nca_common::event::BusyState;
@@ -4333,5 +4831,90 @@ mod approval_parse_tests {
 
         state.set_busy_state(BusyState::ApprovalPending);
         assert!(!escape_cancels_active_turn(&state));
+    }
+
+    #[test]
+    fn composer_input_rows_single_line() {
+        assert_eq!(super::composer_input_rows("", 80), 1);
+        assert_eq!(super::composer_input_rows("hello", 80), 1);
+    }
+
+    #[test]
+    fn composer_input_rows_two_lines() {
+        assert_eq!(super::composer_input_rows("hello\nworld", 80), 2);
+    }
+
+    #[test]
+    fn composer_input_rows_wrapping() {
+        // 80 cols - 2 prefix = 78 avail. 78 'a's should wrap to 2 rows.
+        let long = "a".repeat(78);
+        assert_eq!(super::composer_input_rows(&long, 80), 1);
+        let longer = "a".repeat(79);
+        assert_eq!(super::composer_input_rows(&longer, 80), 2);
+    }
+
+    #[test]
+    fn composer_text_lines_empty_buffer() {
+        let lines = super::composer_text_lines("", 0, 80);
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn composer_text_lines_single_line() {
+        let lines = super::composer_text_lines("hello", 5, 80);
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn composer_text_lines_multiline() {
+        let lines = super::composer_text_lines("hello\nworld", 11, 80);
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn cursor_visual_row_on_first_line() {
+        let rows = super::build_composer_visual_rows("hello\nworld", 80);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(super::cursor_visual_row_idx(&rows, 0), 0);
+        assert_eq!(super::cursor_visual_row_idx(&rows, 4), 0);
+    }
+
+    #[test]
+    fn cursor_visual_row_on_newline() {
+        let rows = super::build_composer_visual_rows("hello\nworld", 80);
+        // Cursor on '\n' at index 5 should stay on first row
+        assert_eq!(super::cursor_visual_row_idx(&rows, 5), 0);
+    }
+
+    #[test]
+    fn cursor_visual_row_on_second_line() {
+        let rows = super::build_composer_visual_rows("hello\nworld", 80);
+        assert_eq!(super::cursor_visual_row_idx(&rows, 6), 1);
+        assert_eq!(super::cursor_visual_row_idx(&rows, 10), 1);
+    }
+
+    #[test]
+    fn wrap_char_counts_short() {
+        assert_eq!(super::wrap_char_counts("abc", 10), vec![3]);
+    }
+
+    #[test]
+    fn wrap_char_counts_wraps() {
+        assert_eq!(super::wrap_char_counts("abcde", 3), vec![3, 2]);
+    }
+
+    #[test]
+    fn wrap_char_counts_empty() {
+        assert_eq!(super::wrap_char_counts("", 10), vec![0]);
+    }
+
+    #[test]
+    fn input_area_content_rows_minimum() {
+        assert_eq!(super::input_area_content_rows("", 80), 2); // 1 text + 1 hint
+    }
+
+    #[test]
+    fn input_area_content_rows_multiline() {
+        assert_eq!(super::input_area_content_rows("hello\nworld", 80), 3); // 2 text + 1 hint
     }
 }

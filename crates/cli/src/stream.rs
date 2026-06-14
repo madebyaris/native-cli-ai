@@ -311,11 +311,18 @@ fn render_event(event: &AgentEvent, stats: &StreamStats) {
             print!("{delta}");
             stats.record_output_token();
         }
+        AgentEvent::ReasoningStreamed { delta } => {
+            // Dim reasoning output in human mode (not counted as output tokens).
+            print!("{}", delta.color(theme::TEXT_DIM));
+        }
         AgentEvent::ToolCallStarted {
             tool,
             input: _,
             call_id: _,
         } => {
+            // Ensure any inline reasoning text ends on a clean line before
+            // the tool header, otherwise CLEAR_LINE would erase it.
+            println!();
             print!("{}", theme::CLEAR_LINE);
             println!();
             println!(

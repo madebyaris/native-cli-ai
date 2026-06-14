@@ -452,27 +452,47 @@ impl Supervisor {
     }
 
     /// Check if context needs attention or summarization.
+    /// Proactively compact context **before** a turn runs.
+    /// Unlike `check_and_summarize_context` (post-turn), this must act immediately
+    /// to prevent empty-response failures caused by an overflowing context window.
     async fn maybe_compact_context(&mut self) {
         if !self.context_manager.config().enable_auto_summarize {
             return;
         }
 
         let stats = self.context_manager.stats(&self.agent.messages);
-        if stats.needs_attention
-            && let Some(tx) = self.agent.event_sender()
+
+        // Already small enough — nothing to do.
+        if !stats.should_summarize {
+            return;
+        }
+
+        // Don't re-summarize if we already compacted in this session and context
+        // has not grown past the previous post-compaction size.
+        if self.last_summary_at_tokens > 0 && stats.estimated_tokens <= self.last_summary_at_tokens
         {
+            return;
+        }
+
+        if let Some(tx) = self.agent.event_sender() {
             let _ = tx
-                .send(AgentEvent::ContextWarning {
+                .send(AgentEvent::ContextCompaction {
+                    phase: "starting".to_string(),
                     message: format!(
-                        "Context window at {}% ({} tokens). Consider summarizing.",
+                        "Auto-summarizing context before turn ({}% full, {} tokens)",
                         stats.usage_percent, stats.estimated_tokens
                     ),
                 })
                 .await;
         }
+
+        if let Err(e) = self.perform_auto_summarize().await {
+            tracing::error!("Pre-turn auto-summarize failed: {}", e);
+            self.last_summary_at_tokens = 0;
+        }
     }
 
-    /// Check if context should be summarized and trigger if needed.
+    /// Check if context should be summarized after a turn and trigger if needed.
     async fn check_and_summarize_context(&mut self) {
         if !self.context_manager.config().enable_auto_summarize {
             return;

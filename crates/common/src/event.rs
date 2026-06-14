@@ -73,6 +73,10 @@ pub enum AgentEvent {
     TokensStreamed {
         delta: String,
     },
+    /// Streaming reasoning/thinking content from the provider (e.g., DeepSeek R1, MiniMax M2.5).
+    ReasoningStreamed {
+        delta: String,
+    },
     ToolCallStarted {
         call_id: String,
         tool: String,
@@ -275,6 +279,19 @@ mod interactive_question_serde_tests {
         let back: AgentEvent = serde_json::from_str(&json).expect("deserialize");
         match back {
             AgentEvent::QuestionRequested { question } => assert_eq!(question, q),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn reasoning_streamed_roundtrip() {
+        let ev = AgentEvent::ReasoningStreamed {
+            delta: "thinking...".into(),
+        };
+        let json = serde_json::to_string(&ev).expect("serialize");
+        let back: AgentEvent = serde_json::from_str(&json).expect("deserialize");
+        match back {
+            AgentEvent::ReasoningStreamed { delta } => assert_eq!(delta, "thinking..."),
             _ => panic!("wrong variant"),
         }
     }

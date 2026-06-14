@@ -533,6 +533,7 @@ impl Repl {
                     "  /new               Start a new session".into(),
                     "  /export            Export session to markdown".into(),
                     "  /thinking          Toggle thinking/reasoning visibility".into(),
+                    "  /tool-output      Toggle tool output expand/collapse (TUI)".into(),
                     "  /skills            List discovered skills".into(),
                     "  /memory [text]     Show or store memory notes".into(),
                     "  /models            Browse and select models".into(),
@@ -1475,6 +1476,35 @@ impl Repl {
                         }
                     }
                     Err(e) => out.eprintln(&format!("[thinking] {e}")),
+                }
+            }
+            "/tool-output" => {
+                if let ReplOutput::Tui(state) = &out {
+                    if let Ok(mut g) = state.lock() {
+                        let any_collapsed = g.blocks.iter().any(|b| {
+                            matches!(
+                                b,
+                                DisplayBlock::ToolDone {
+                                    expanded: false,
+                                    ..
+                                }
+                            )
+                        });
+                        for block in g.blocks.iter_mut() {
+                            if let DisplayBlock::ToolDone { expanded, .. } = block {
+                                *expanded = any_collapsed;
+                            }
+                        }
+                        let msg = if any_collapsed {
+                            "tool output expanded"
+                        } else {
+                            "tool output collapsed"
+                        };
+                        g.blocks
+                            .push(DisplayBlock::System(format!("[tool-output] {msg}")));
+                    }
+                } else {
+                    out.println("[tool-output] only available in TUI mode");
                 }
             }
             _ => {

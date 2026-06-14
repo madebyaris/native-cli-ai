@@ -109,6 +109,30 @@ impl AgentLoop {
         })
         .await;
 
+        let result = self.run_turn_inner(workspace_root, attachments).await;
+
+        // On failure, remove the user message we just pushed so the message
+        // history isn't left in a corrupted state (consecutive user messages
+        // with no assistant reply confuses providers and causes repeated
+        // empty responses).
+        if result.is_err() {
+            self.messages.pop();
+        }
+
+        self.emit(AgentEvent::BusyStateChanged {
+            state: BusyState::Idle,
+        })
+        .await;
+        result
+    }
+
+    /// Inner loop for `run_turn`. Separated so the outer function can handle
+    /// cleanup (message removal, busy-state reset) on all error paths.
+    async fn run_turn_inner(
+        &mut self,
+        workspace_root: &Path,
+        attachments: &[ImageAttachment],
+    ) -> Result<String, ProviderError> {
         let mut turn = 0_u32;
         let mut empty_retries = 0_u32;
         let mut attachments_cleaned = attachments.is_empty();
@@ -146,13 +170,7 @@ impl AgentLoop {
             .await;
             self.provider
                 .prepare_messages_for_request(&mut self.messages, workspace_root)
-                .await
-                .inspect_err(|_| {
-                    // Ensure the UI exits the thinking state on API failure.
-                    let _ = self.event_tx.try_send(AgentEvent::BusyStateChanged {
-                        state: BusyState::Idle,
-                    });
-                })?;
+                .await?;
             let mut stream = self
                 .provider
                 .chat(
@@ -161,13 +179,7 @@ impl AgentLoop {
                     &self.model,
                     workspace_root,
                 )
-                .await
-                .inspect_err(|_| {
-                    // Ensure the UI exits the thinking state on API failure.
-                    let _ = self.event_tx.try_send(AgentEvent::BusyStateChanged {
-                        state: BusyState::Idle,
-                    });
-                })?;
+                .await?;
 
             let mut assistant_text = String::new();
             let mut reasoning_text = String::new();
@@ -206,6 +218,7 @@ impl AgentLoop {
                     }
                     StreamChunk::ReasoningDelta(delta) => {
                         reasoning_text.push_str(&delta);
+                        self.emit(AgentEvent::ReasoningStreamed { delta }).await;
                     }
                     StreamChunk::ToolUse(call) => {
                         self.emit(AgentEvent::ToolCallStarted {
@@ -598,10 +611,6 @@ impl AgentLoop {
                 .await;
         }
 
-        self.emit(AgentEvent::BusyStateChanged {
-            state: BusyState::Idle,
-        })
-        .await;
         Ok(final_text)
     }
 

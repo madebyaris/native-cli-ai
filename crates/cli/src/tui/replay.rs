@@ -34,7 +34,10 @@ fn value_to_event(v: &Value) -> Option<AgentEvent> {
 
 /// Skip streaming deltas when replaying; final `MessageReceived` for assistant already has full text.
 fn should_skip_on_replay(ev: &AgentEvent) -> bool {
-    matches!(ev, AgentEvent::TokensStreamed { .. })
+    matches!(
+        ev,
+        AgentEvent::TokensStreamed { .. } | AgentEvent::ReasoningStreamed { .. }
+    )
 }
 
 /// Load historical events from disk into TUI state (used on resume / reopen same log).
@@ -93,6 +96,13 @@ mod tests {
         );
         let vals = parse_json_values_on_line(line);
         assert_eq!(vals.len(), 2);
+    }
+
+    #[test]
+    fn skips_reasoning_streamed_on_replay() {
+        assert!(should_skip_on_replay(&AgentEvent::ReasoningStreamed {
+            delta: "x".into()
+        }));
     }
 
     #[test]

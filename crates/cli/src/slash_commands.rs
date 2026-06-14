@@ -31,6 +31,7 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/new",
     "/export",
     "/thinking",
+    "/tool-output",
     "/stop",
     "/exit",
     "/quit",

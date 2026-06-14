@@ -11,6 +11,12 @@ use std::time::Instant;
 pub enum DisplayBlock {
     User(String),
     Assistant(String),
+    /// Collapsible reasoning/thinking content from the model.
+    Thinking {
+        content: String,
+        /// Whether this thinking block is expanded (true = show full content).
+        expanded: bool,
+    },
     ToolRunning {
         name: String,
         call_id: String,
@@ -25,6 +31,10 @@ pub enum DisplayBlock {
         name: String,
         ok: bool,
         detail: String,
+        /// Full output content (before truncation) for collapsible display.
+        full_output: String,
+        /// Whether this tool block is expanded (true = show full output).
+        expanded: bool,
     },
     /// Interactive `ask_question` prompt (options + suggested answer).
     Question(InteractiveQuestionPayload),
@@ -63,6 +73,10 @@ pub struct TuiSessionState {
     pub blocks: Vec<DisplayBlock>,
     /// In-progress assistant text (shown below committed blocks until finalized).
     pub streaming_assistant: Option<String>,
+    /// In-progress reasoning text (shown dimmed above streaming assistant text).
+    pub streaming_reasoning: Option<String>,
+    /// Whether the streaming reasoning block is expanded.
+    pub streaming_reasoning_expanded: bool,
     pub input_buffer: String,
     pub cursor_char_idx: usize,
     /// Scroll offset in *lines* (flattened transcript).
@@ -215,6 +229,8 @@ impl TuiSessionState {
         Self {
             blocks: Vec::new(),
             streaming_assistant: None,
+            streaming_reasoning: None,
+            streaming_reasoning_expanded: false,
             input_buffer: String::new(),
             cursor_char_idx: 0,
             scroll_lines: 0,
@@ -544,6 +560,14 @@ impl TuiSessionState {
     }
 
     fn flush_stream_before_tool(&mut self) {
+        if let Some(reasoning) = self.streaming_reasoning.take()
+            && !reasoning.trim().is_empty()
+        {
+            self.blocks.push(DisplayBlock::Thinking {
+                content: reasoning,
+                expanded: false,
+            });
+        }
         if let Some(s) = self.streaming_assistant.take()
             && !s.trim().is_empty()
         {
@@ -570,6 +594,15 @@ impl TuiSessionState {
                     self.set_busy_state(BusyState::Thinking);
                 } else if role == "assistant" {
                     self.streaming_assistant = None;
+                    // Commit any accumulated reasoning before the assistant text.
+                    if let Some(reasoning) = self.streaming_reasoning.take()
+                        && !reasoning.trim().is_empty()
+                    {
+                        self.blocks.push(DisplayBlock::Thinking {
+                            content: reasoning,
+                            expanded: false,
+                        });
+                    }
                     self.blocks.push(DisplayBlock::Assistant(content.clone()));
                     self.set_busy_state(BusyState::Idle);
                 }
@@ -579,6 +612,10 @@ impl TuiSessionState {
                     .get_or_insert_with(String::new)
                     .push_str(delta);
                 self.set_busy_state(BusyState::Streaming);
+            }
+            AgentEvent::ReasoningStreamed { delta } => {
+                let s = self.streaming_reasoning.get_or_insert(String::new());
+                s.push_str(delta);
             }
             AgentEvent::ToolCallStarted {
                 call_id,
@@ -600,11 +637,12 @@ impl TuiSessionState {
                     .take()
                     .filter(|req| req.call_id != *call_id);
                 self.set_busy_state(BusyState::Thinking);
-                let detail = if ok {
-                    truncate(&output.output, 120)
+                let full_output = if ok {
+                    output.output.clone()
                 } else {
                     output.error.clone().unwrap_or_else(|| "failed".into())
                 };
+                let detail = truncate(&full_output, 120);
                 if let Some(idx) = self.blocks.iter().rposition(
                     |b| {
                         matches!(b, DisplayBlock::ToolRunning { call_id: id, .. } if id == call_id)
@@ -616,12 +654,20 @@ impl TuiSessionState {
                         DisplayBlock::ApprovalPending(req) => req.tool.clone(),
                         _ => "?".into(),
                     };
-                    self.blocks[idx] = DisplayBlock::ToolDone { name, ok, detail };
+                    self.blocks[idx] = DisplayBlock::ToolDone {
+                        name,
+                        ok,
+                        detail,
+                        full_output: full_output.clone(),
+                        expanded: false,
+                    };
                 } else {
                     self.blocks.push(DisplayBlock::ToolDone {
                         name: "?".into(),
                         ok,
                         detail,
+                        full_output: full_output.clone(),
+                        expanded: false,
                     });
                 }
             }

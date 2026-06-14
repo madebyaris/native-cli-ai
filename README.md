@@ -120,7 +120,7 @@ The full-screen UI appears when `stdin` and `stdout` are TTYs and `--stream huma
 In the default TUI you can attach images for the **next** user message:
 
 - **Ctrl+V** — paste a bitmap from the system clipboard (saved as PNG under the session).
-- **Ctrl+Shift+C** — copy selected transcript text to the system clipboard.
+- **Ctrl+Shift+C** or **Ctrl+Shift+Insert** — copy selected transcript text to the system clipboard.
 - **`/image paste`** — same as clipboard paste if Ctrl+V is not available.
 - **`/image path/to/screenshot.png`** — copy a file into the session attachment dir.
 - **`/image clear`** — remove staged images before you press Enter.
@@ -211,7 +211,7 @@ See [Orchestration Contract](docs/orchestration.md) for the subprocess-facing su
 | `$XDG_RUNTIME_DIR/nca/<session_id>.sock` | IPC socket path when `XDG_RUNTIME_DIR` is set. |
 | `/tmp/nca/<session_id>.sock` | IPC socket fallback when `XDG_RUNTIME_DIR` is not set. |
 | `~/.nca/workspaces/<workspace-id>/cli-index.json` | Cached CLI index for agents and tooling. |
-| `.ncarc` | Project instructions file committed with the repo. |
+| `.ncarc` | Project instructions file committed with the repo, if present. |
 | `.nca/instructions.md` | Local instructions file. |
 
 ## Skills System
@@ -250,9 +250,9 @@ Configuration in `~/.nca/config.toml`:
 
 ```toml
 [memory.context]
-context_window_target = 32000
+context_window_target = 0          # 0 = auto-detect from model; set explicitly to override
 max_retained_messages = 50
-auto_summarize_threshold = 75
+auto_summarize_threshold = 75     # percentage of context window
 enable_auto_summarize = true
 ```
 
@@ -282,7 +282,7 @@ The system prompt is layered in this order:
 1. Built-in harness prompt
 2. Permission-mode guidance
 3. `AGENTS.md` (full file as instructions)
-4. `.ncarc` (committed project instructions)
+4. `.ncarc` (committed project instructions, if present)
 5. `.nca/instructions.md` (local instructions)
 6. Discovered skills summary
 7. Orchestration context (`NCA_ORCH_*` env vars)

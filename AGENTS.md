@@ -19,9 +19,17 @@ cargo build --release && cp target/release/nca /usr/local/bin/
 
 # Dev run (debug)
 cargo run -p nca-cli
+
+# Check formatting (non-destructive)
+cargo fmt -- --check
+
+# Lint with clippy
+cargo clippy --workspace -- -D warnings
 ```
 
-No pre-commit hooks configured. CI runs on push to all branches and PRs to `main`/`dev`.
+No pre-commit hooks are installed (despite `cargo-husky` appearing in cli dev-dependencies). CI runs on push to all branches and PRs to all branches.
+
+No `rust-toolchain.toml` or `rustfmt.toml` — CI pins stable channel via `dtolnay/rust-toolchain@stable`; formatting and linting use Rust defaults.
 
 ## Workspace Structure
 
@@ -32,17 +40,24 @@ common  ← leaf crate, no internal deps. Shared types: config, events, messages
 core    ← depends on common only. Agent loop, Provider trait, tool registry, harness, skills, approvals.
 runtime ← depends on common + core. Supervisor, IPC, session persistence, worktrees, PTY.
 cli     ← depends on all above. Binary entrypoint, TUI, REPL, stream rendering.
-autoresearch ← depends on common. Metric-driven research helpers.
+autoresearch ← depends on common only (parallel to core). Metric-driven research helpers.
 ```
 
-Dependency direction is strictly `cli → runtime → core → common`. Never reverse this.
+Dependency direction is strictly `cli → runtime → core → common` and `cli → autoresearch → common`. Never reverse this. `autoresearch` and `core` are siblings — neither depends on the other.
+
+Key UI dependencies in `cli`: `ratatui 0.30` + `crossterm 0.29` (TUI), `reedline 0.38` (REPL), `syntect 5` (syntax highlighting), `pulldown-cmark 0.12` (markdown rendering), `arboard 3` (clipboard).
 
 ## Provider Architecture
 
-All LLM calls go through the `Provider` trait in `core::provider`. Modules:
-`minimax` (default), `anthropic`, `openai`, `deepseek`, `openrouter`, `zhipuai`.
+All LLM calls go through the `Provider` trait in `core::provider`. Provider modules:
+`minimax` (default), `minimax_vlm` (vision-language model), `anthropic`, `openai`, `deepseek`, `openrouter`, `zhipuai`.
 
-- `openai_compat` and `anthropic_compat` are shared stream parsers for OpenAI-format and Anthropic-format SSE.
+Infrastructure modules in the same directory:
+- `factory.rs` — provider instantiation from config.
+- `openai_compat` / `anthropic_compat` — shared SSE stream parsers for their respective formats.
+- `test_support.rs` / `validate.rs` — test harness helpers and provider config validation.
+
+- `core` depends on `genai 0.5` (multi-provider LLM library) and `rmcp 1.7` (MCP client).
 - `prepare_messages_for_request()` is the hook for provider-specific message rewriting (e.g. DeepSeek strips `reasoning_content`).
 - Never hard-code a model name. Always read from config (`common::config::NcaConfig`).
 - Empty completions must fail loudly (never silently succeed).
@@ -53,11 +68,12 @@ All LLM calls go through the `Provider` trait in `core::provider`. Modules:
 - **All I/O is async** via tokio. Never call blocking I/O on the async runtime; use `spawn_blocking` if unavoidable.
 - **Error handling:** library crates use `thiserror`. Application code (`cli`) may use `anyhow`. Never `.unwrap()` in library code.
 - **Visibility:** default to `pub(crate)`, promote to `pub` only when another crate needs it. All public types and traits must have doc comments.
-- **Tests:** inline `#[cfg(test)] mod tests` in source files. Integration tests in `crates/cli/tests/`. Use `tempfile` for filesystem tests. Never depend on network access in tests—mock the `Provider` trait.
+- **Tests:** inline `#[cfg(test)] mod tests` in source files. Integration tests in `crates/cli/tests/`. Use `tempfile` for filesystem tests. Never depend on network access in tests—mock the `Provider` trait. `core` has a `tiny_http` dev-dependency for mock HTTP servers in tests. `cli` uses `insta` for TUI snapshot tests.
 - **IPC:** newline-delimited JSON over Unix domain sockets. `AgentEvent` enum is the shared event bus.
 - **Sessions:** `<workspace>/.nca/sessions/<id>.json` (state) + `<id>.events.jsonl` (event log). IPC socket at `$XDG_RUNTIME_DIR/nca/` (fallback `/tmp/nca/`).
 - **Config resolution:** compiled defaults → `~/.nca/config.toml` → `<workspace>/.nca/config.local.toml` → env vars → CLI flags.
 - **Conventional Commits** for commit messages (type(scope): description).
+- **Do not edit `for-test/`** — it is gitignored and used for transient test artifacts.
 
 ## Context & Cost Guardrails
 
@@ -70,19 +86,13 @@ The system has several size guards to prevent context window overflow:
 - `reasoning_content` from DeepSeek is stripped before re-upload (response-only signal, ~500 tokens saved per turn).
 - Cost tracker includes cache token accounting (cache_read priced at 1/50 of normal input).
 
-## Code Search Tools
+## System Dependencies
 
-Two search tools with different semantics:
-
-- `search_code` — ripgrep text search. Fast, regex-capable, handles any file type.
-- `ast_grep_search` — AST-aware structural search. Matches syntax tree patterns using meta-variables (`$VAR`, `$$$`). Supports 25 languages. Use when pattern matching needs to respect code structure (e.g. `def $FUNC($$$):`, `console.log($MSG)`).
-- `ast_grep_replace` — AST-aware structural replace. Dry-run by default (`apply=false`); set `apply=true` to write. Uses same pattern syntax as search.
-
-Both `ast_grep_*` tools shell out to the `ast-grep` CLI (must be installed on PATH).
+Linux builds require `libssl-dev`, `pkg-config`, and `ripgrep`. macOS builds may need the Homebrew equivalents.
 
 ## MCP Tools
 
-MCP servers are loaded via `rmcp` crate (v1.7). `load_mcp_tools()` is async—callers must await. MCP tool results go through the same `truncate_tool_output` guardrail as built-in tools.
+MCP servers are loaded via `rmcp` crate (v1.7, features: `client`, `transport-async-rw`). `load_mcp_tools()` is async—callers must await. MCP tool results go through the same `truncate_tool_output` guardrail as built-in tools.
 
 ## System Prompt Layering
 
@@ -90,14 +100,30 @@ Built in `core::harness::build_system_prompt`:
 1. Built-in harness prompt
 2. Permission-mode guidance
 3. `AGENTS.md` (full file as instructions)
-4. `.ncarc` (committed project instructions)
+4. `.ncarc` (committed project instructions, if present)
 5. `.nca/instructions.md` (local instructions)
 6. Discovered skills summary
 7. Orchestration context (`NCA_ORCH_*` env vars)
+
+## Key File Map
+
+| Path | Purpose |
+|---|---|
+| `crates/core/src/agent.rs` | Main agent loop, `truncate_tool_output`, token estimation |
+| `crates/core/src/harness.rs` | System prompt builder, skills index assembly |
+| `crates/core/src/provider/` | All provider implementations, factory, stream parsers |
+| `crates/core/src/tools/` | Built-in tool definitions (file ops, search, shell, etc.) |
+| `crates/core/src/skills.rs` | Skill discovery and resolution |
+| `crates/runtime/src/` | Supervisor, IPC server, session persistence, PTY, worktrees |
+| `crates/cli/src/main.rs` | Binary entrypoint |
+| `crates/cli/src/tui/` | Full-screen TUI implementation |
+| `crates/cli/src/repl.rs` | Line-oriented REPL (reedline-based) |
+| `crates/common/src/config.rs` | Config schema and resolution chain |
 
 ## Release & Distribution
 
 - Release targets: `x86_64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`.
 - Binary: single `nca` executable.
 - Release profile: `opt-level = 3`, thin LTO, `codegen-units = 1`, stripped, abort panic.
-- Linux CI requires `libssl-dev` and `pkg-config` system packages.
+- Linux CI requires `libssl-dev`, `pkg-config`, and `ripgrep` system packages.
+- Release triggers: PR merge to `main` or tag push `v*`. GitHub Release created only on tag pushes.
