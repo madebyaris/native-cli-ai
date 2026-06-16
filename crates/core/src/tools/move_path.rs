@@ -1,15 +1,25 @@
-use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
+use std::sync::Arc;
 
-use super::{ToolExecutor, rename_path::rename_impl};
+use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
+use serde::Deserialize;
+
+use super::{ToolCallExt, ToolExecutor};
+use crate::workspace_fs::{WorkspaceFs, sandbox_error_to_tool_result};
 
 pub struct MovePathTool {
-    workspace_root: std::path::PathBuf,
+    fs: Arc<dyn WorkspaceFs>,
 }
 
 impl MovePathTool {
-    pub fn new(workspace_root: std::path::PathBuf) -> Self {
-        Self { workspace_root }
+    pub fn new(fs: Arc<dyn WorkspaceFs>) -> Self {
+        Self { fs }
     }
+}
+
+#[derive(Deserialize)]
+struct Params {
+    from: String,
+    to: String,
 }
 
 #[async_trait::async_trait]
@@ -30,6 +40,18 @@ impl ToolExecutor for MovePathTool {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolResult {
-        rename_impl(&self.workspace_root, call, "moved").await
+        let p: Params = match call.extract_params() {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+        match self.fs.rename(&p.from, &p.to).await {
+            Ok(()) => ToolResult {
+                call_id: call.id.clone(),
+                success: true,
+                output: format!("Moved {} -> {}", p.from, p.to),
+                error: None,
+            },
+            Err(e) => sandbox_error_to_tool_result(&call.id, e),
+        }
     }
 }

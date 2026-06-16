@@ -1,7 +1,6 @@
-use futures_util::future::join_all;
 use nca_common::event::{AgentEvent, BusyState};
 use nca_common::message::{ContentPart, ImageAttachment, Message, MessageToolCall};
-use nca_common::tool::{PermissionTier, ToolCall, ToolDefinition, ToolResult};
+use nca_common::tool::{ToolCall, ToolDefinition};
 use serde_json::json;
 use std::collections::HashSet;
 use std::path::Path;
@@ -9,10 +8,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::approval::{ApprovalPolicy, ApprovalVerdict};
+use crate::approval::ApprovalPolicy;
 use crate::cost::CostTracker;
 use crate::hooks::{HookEventKind, HookRunner};
 use crate::provider::{Provider, ProviderError, StreamChunk};
+use crate::tool_pipeline;
 use crate::tools::ToolRegistry;
 
 /// Drives the multi-turn conversation and tool-use loop.
@@ -152,10 +152,12 @@ impl AgentLoop {
             }
             turn += 1;
             if turn > self.max_turns {
-                return Err(ProviderError::Other(format!(
-                    "turn budget exceeded (max {})",
-                    self.max_turns
-                )));
+                let msg = format!("turn budget exceeded (max {})", self.max_turns);
+                self.emit(AgentEvent::Error {
+                    message: msg.clone(),
+                })
+                .await;
+                return Err(ProviderError::Other(msg));
             }
 
             self.emit(AgentEvent::BusyStateChanged {
@@ -315,219 +317,21 @@ impl AgentLoop {
                 )));
             }
 
-            // ── Phase 1: permission checks (sequential — approvals may be interactive) ──
-            //
-            // Produces, in original order, either a pre-resolved result (denied /
-            // approval-denied) or a ticket to execute concurrently in phase 2.
-            enum Ticket {
-                Resolved(ToolResult),
-                Execute(ToolCall),
-            }
+            // ── Tool pipeline: permission checks + concurrent execution ──
+            let pipeline = tool_pipeline::run_tool_pipeline(
+                &self.tools,
+                &mut self.approval,
+                &self.hooks,
+                &self.event_tx,
+                &self.cancel_flag,
+                tool_calls.clone(),
+            )
+            .await
+            .map_err(ProviderError::Other)?;
 
-            if self.is_cancelled() {
-                self.emit(AgentEvent::Error {
-                    message: "Run cancelled before tool execution".into(),
-                })
-                .await;
-                return Err(ProviderError::Other("run cancelled".into()));
-            }
+            let n = pipeline.results.len();
 
-            let mut tickets: Vec<Ticket> = Vec::with_capacity(tool_calls.len());
-
-            for call in &tool_calls {
-                let tier = self.approval.check(&call.name, &call.input.to_string());
-
-                match tier {
-                    PermissionTier::Denied => {
-                        tickets.push(Ticket::Resolved(ToolResult {
-                            call_id: call.id.clone(),
-                            success: false,
-                            output: String::new(),
-                            error: Some(format!("tool `{}` denied by policy", call.name)),
-                        }));
-                    }
-
-                    PermissionTier::Ask => {
-                        let description = format!("Tool `{}` requires approval", call.name);
-                        self.emit(AgentEvent::ApprovalRequested {
-                            call_id: call.id.clone(),
-                            tool: call.name.clone(),
-                            description: description.clone(),
-                        })
-                        .await;
-                        if let Some(hooks) = &self.hooks {
-                            hooks
-                                .run_best_effort(
-                                    HookEventKind::ApprovalRequested,
-                                    Some(&call.name),
-                                    &json!({
-                                        "call_id": call.id.clone(),
-                                        "tool": call.name.clone(),
-                                        "input": call.input.clone(),
-                                        "description": description,
-                                    }),
-                                )
-                                .await;
-                        }
-                        let verdict = self.approval.resolve(call, &description).await;
-                        let approved = verdict.is_approved();
-                        let allow_pattern = match &verdict {
-                            ApprovalVerdict::AllowPattern(p) => Some(p.clone()),
-                            _ => None,
-                        };
-                        self.emit(AgentEvent::ApprovalResolved {
-                            call_id: call.id.clone(),
-                            approved,
-                            allow_pattern: allow_pattern.clone(),
-                        })
-                        .await;
-                        if let Some(pattern) = allow_pattern {
-                            self.approval.add_session_allow(pattern);
-                        }
-
-                        if approved {
-                            if let Some(hooks) = &self.hooks
-                                && let Err(reason) = hooks
-                                    .run(
-                                        HookEventKind::PreToolUse,
-                                        Some(&call.name),
-                                        &json!({
-                                            "call_id": call.id.clone(),
-                                            "tool": call.name.clone(),
-                                            "input": call.input.clone(),
-                                        }),
-                                    )
-                                    .await
-                            {
-                                tickets.push(Ticket::Resolved(ToolResult {
-                                    call_id: call.id.clone(),
-                                    success: false,
-                                    output: String::new(),
-                                    error: Some(reason),
-                                }));
-                                continue;
-                            }
-                            tickets.push(Ticket::Execute(call.clone()));
-                        } else {
-                            if self.approval.should_fail_on_ask() {
-                                let message = format!(
-                                    "tool `{}` requires approval in headless mode; rerun with a non-interactive permission mode such as `dont-ask` or `bypass-permissions`",
-                                    call.name
-                                );
-                                self.emit(AgentEvent::Error {
-                                    message: message.clone(),
-                                })
-                                .await;
-                                return Err(ProviderError::Other(message));
-                            }
-                            tickets.push(Ticket::Resolved(ToolResult {
-                                call_id: call.id.clone(),
-                                success: false,
-                                output: String::new(),
-                                error: Some(format!(
-                                    "tool `{}` requires approval; request was denied",
-                                    call.name
-                                )),
-                            }));
-                        }
-                    }
-
-                    PermissionTier::Allowed => {
-                        if let Some(hooks) = &self.hooks
-                            && let Err(reason) = hooks
-                                .run(
-                                    HookEventKind::PreToolUse,
-                                    Some(&call.name),
-                                    &json!({
-                                        "call_id": call.id.clone(),
-                                        "tool": call.name.clone(),
-                                        "input": call.input.clone(),
-                                    }),
-                                )
-                                .await
-                        {
-                            tickets.push(Ticket::Resolved(ToolResult {
-                                call_id: call.id.clone(),
-                                success: false,
-                                output: String::new(),
-                                error: Some(reason),
-                            }));
-                            continue;
-                        }
-                        tickets.push(Ticket::Execute(call.clone()));
-                    }
-                }
-            }
-
-            // ── Phase 2: concurrent execution ────────────────────────────────────────
-            //
-            // All approved calls run simultaneously. `ToolRegistry::execute` takes
-            // `&self` so multiple concurrent borrows are safe.
-            //
-            // We keep a parallel `Option<ToolResult>` vec (None = still executing)
-            // and fill it from the join results.
-            let n = tickets.len();
-            let mut results: Vec<Option<ToolResult>> = (0..n).map(|_| None).collect();
-
-            // Gather indices and refs for calls that actually need execution
-            let to_execute: Vec<(usize, &ToolCall)> = tickets
-                .iter()
-                .enumerate()
-                .filter_map(|(i, t)| {
-                    if let Ticket::Execute(call) = t {
-                        Some((i, call))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            if !to_execute.is_empty() {
-                let futs = to_execute.iter().map(|(i, call)| {
-                    let fut = self.tools.execute(call);
-                    async move { (*i, fut.await) }
-                });
-                let executed: Vec<(usize, ToolResult)> = join_all(futs).await;
-                for (i, result) in executed {
-                    results[i] = Some(result);
-                }
-            }
-
-            // Fill pre-resolved slots
-            for (i, ticket) in tickets.into_iter().enumerate() {
-                if let Ticket::Resolved(result) = ticket {
-                    results[i] = Some(result);
-                }
-            }
-
-            let mut final_results = Vec::new();
-            for result in results.into_iter().flatten() {
-                final_results.push(result);
-            }
-
-            if let Some(hooks) = &self.hooks {
-                for result in &final_results {
-                    let hook_event = if result.success {
-                        HookEventKind::PostToolUse
-                    } else {
-                        HookEventKind::PostToolFailure
-                    };
-                    hooks
-                        .run_best_effort(
-                            hook_event,
-                            None,
-                            &json!({
-                                "call_id": result.call_id,
-                                "success": result.success,
-                                "output": result.output,
-                                "error": result.error,
-                            }),
-                        )
-                        .await;
-                }
-            }
-
-            // ── Phase 3: push results to history + emit events (in original order) ──
+            // Checkpoint
             if self.checkpoint_interval > 0 && n as u32 >= self.checkpoint_interval {
                 self.emit(AgentEvent::Checkpoint {
                     phase: "tool_execution".into(),
@@ -538,8 +342,8 @@ impl AgentLoop {
             }
 
             // Track consecutive failures of the same tool to detect infinite retry loops.
-            let all_failed_same_tool = !final_results.is_empty()
-                && final_results.iter().all(|r| !r.success)
+            let all_failed_same_tool = !pipeline.results.is_empty()
+                && pipeline.results.iter().all(|r| !r.success)
                 && tool_calls.len() == 1;
             if all_failed_same_tool {
                 let tool_name = &tool_calls[0].name;
@@ -554,7 +358,7 @@ impl AgentLoop {
                 last_failed_tool.clear();
             }
 
-            for result in final_results {
+            for result in pipeline.results {
                 self.messages.push(Message::tool(
                     result.call_id.clone(),
                     format_tool_result(&result),

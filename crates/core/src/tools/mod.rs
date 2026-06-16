@@ -28,6 +28,9 @@ pub use invoke_skill::InvokeSkillTool;
 
 use nca_common::config::WebConfig;
 use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
+use std::sync::Arc;
+
+use crate::workspace_fs::WorkspaceFs;
 
 /// Registry of available tools the agent can invoke.
 pub struct ToolRegistry {
@@ -43,71 +46,38 @@ impl ToolRegistry {
         self.tools.push(tool);
     }
 
-    pub fn with_default_readonly_tools(
-        workspace_root: std::path::PathBuf,
-        web_config: WebConfig,
-    ) -> Self {
+    pub fn with_default_readonly_tools(fs: Arc<dyn WorkspaceFs>, web_config: WebConfig) -> Self {
         let mut registry = Self::new();
-        registry.register(Box::new(filesystem::ReadFileTool::new(
-            workspace_root.clone(),
-        )));
-        registry.register(Box::new(search::SearchCodeTool::new(
-            workspace_root.clone(),
-        )));
-        registry.register(Box::new(ast_grep::AstGrepSearchTool::new(
-            workspace_root.clone(),
-        )));
-        registry.register(Box::new(list_directory::ListDirectoryTool::new(
-            workspace_root.clone(),
-        )));
-        registry.register(Box::new(git::GitStatusTool::new(workspace_root.clone())));
-        registry.register(Box::new(git::GitDiffTool::new(workspace_root)));
+        registry.register(Box::new(filesystem::ReadFileTool::new(fs.clone())));
+        registry.register(Box::new(search::SearchCodeTool::new(fs.clone())));
+        registry.register(Box::new(ast_grep::AstGrepSearchTool::new(fs.clone())));
+        registry.register(Box::new(list_directory::ListDirectoryTool::new(fs.clone())));
+        registry.register(Box::new(git::GitStatusTool::new(fs.clone())));
+        registry.register(Box::new(git::GitDiffTool::new(fs)));
         registry.register(Box::new(web_search::WebSearchTool::new(web_config.clone())));
         registry.register(Box::new(fetch_url::FetchUrlTool::new(web_config)));
         registry
     }
 
-    pub fn with_default_full_tools(
-        workspace_root: std::path::PathBuf,
-        web_config: WebConfig,
-    ) -> Self {
-        let mut registry = Self::with_default_readonly_tools(workspace_root.clone(), web_config);
+    pub fn with_default_full_tools(fs: Arc<dyn WorkspaceFs>, web_config: WebConfig) -> Self {
+        let mut registry = Self::with_default_readonly_tools(fs.clone(), web_config);
         registry.register(Box::new(code_intel_tool::CodeIntelTool::new(
-            crate::code_intel::FastLocalCodeIntel::new(workspace_root.clone()),
+            crate::code_intel::FastLocalCodeIntel::new(fs.root()),
         )));
-        registry.register(Box::new(write_file::WriteFileTool::new(
-            workspace_root.clone(),
-        )));
+        registry.register(Box::new(write_file::WriteFileTool::new(fs.clone())));
         registry.register(Box::new(create_directory::CreateDirectoryTool::new(
-            workspace_root.clone(),
+            fs.clone(),
         )));
-        registry.register(Box::new(apply_patch::ApplyPatchTool::new(
-            workspace_root.clone(),
-        )));
-        registry.register(Box::new(edit_file::EditFileTool::new(
-            workspace_root.clone(),
-        )));
-        registry.register(Box::new(replace_match::ReplaceMatchTool::new(
-            workspace_root.clone(),
-        )));
-        registry.register(Box::new(ast_grep::AstGrepReplaceTool::new(
-            workspace_root.clone(),
-        )));
-        registry.register(Box::new(rename_path::RenamePathTool::new(
-            workspace_root.clone(),
-        )));
-        registry.register(Box::new(move_path::MovePathTool::new(
-            workspace_root.clone(),
-        )));
-        registry.register(Box::new(copy_path::CopyPathTool::new(
-            workspace_root.clone(),
-        )));
-        registry.register(Box::new(delete_path::DeletePathTool::new(
-            workspace_root.clone(),
-        )));
-        registry.register(Box::new(run_validation::RunValidationTool::new(
-            workspace_root,
-        )));
+        registry.register(Box::new(apply_patch::ApplyPatchTool::new(fs.clone())));
+        registry.register(Box::new(edit_file::EditFileTool::new(fs.clone())));
+        registry.register(Box::new(replace_match::ReplaceMatchTool::new(fs.clone())));
+        registry.register(Box::new(ast_grep::AstGrepReplaceTool::new(fs.clone())));
+        registry.register(Box::new(rename_path::RenamePathTool::new(fs.clone())));
+        registry.register(Box::new(move_path::MovePathTool::new(fs.clone())));
+        registry.register(Box::new(copy_path::CopyPathTool::new(fs.clone())));
+        registry.register(Box::new(delete_path::DeletePathTool::new(fs.clone())));
+        registry.register(Box::new(run_validation::RunValidationTool::new(fs.clone())));
+        registry.register(Box::new(bash::BashTool::new(fs)));
         registry
     }
 
@@ -142,4 +112,32 @@ impl Default for ToolRegistry {
 pub trait ToolExecutor: Send + Sync {
     fn definition(&self) -> ToolDefinition;
     async fn execute(&self, call: &ToolCall) -> ToolResult;
+}
+
+// ---------------------------------------------------------------------------
+// C2: Typed parameter extraction
+// ---------------------------------------------------------------------------
+
+/// Extension trait for extracting typed parameters from a [`ToolCall`].
+///
+/// Each tool defines a `#[derive(Deserialize)]` struct for its parameters and
+/// calls `call.extract_params::<Params>()?` at the top of `execute()`. This
+/// replaces the repetitive `call.input["key"].as_str().unwrap_or("")` pattern
+/// with a single deserialization call that:
+/// - reports missing required fields clearly,
+/// - coerces types via serde,
+/// - provides compile-time struct shape for tests.
+pub trait ToolCallExt {
+    fn extract_params<T: serde::de::DeserializeOwned>(&self) -> Result<T, ToolResult>;
+}
+
+impl ToolCallExt for ToolCall {
+    fn extract_params<T: serde::de::DeserializeOwned>(&self) -> Result<T, ToolResult> {
+        serde_json::from_value(self.input.clone()).map_err(|e| ToolResult {
+            call_id: self.id.clone(),
+            success: false,
+            output: String::new(),
+            error: Some(format!("Invalid tool parameters: {e}")),
+        })
+    }
 }

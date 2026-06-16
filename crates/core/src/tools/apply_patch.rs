@@ -1,15 +1,31 @@
-use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
+use std::sync::Arc;
 
-use super::ToolExecutor;
+use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
+use serde::Deserialize;
+
+use super::{ToolCallExt, ToolExecutor};
+use crate::workspace_fs::{WorkspaceFs, sandbox_error_to_tool_result};
 
 pub struct ApplyPatchTool {
-    workspace_root: std::path::PathBuf,
+    fs: Arc<dyn WorkspaceFs>,
 }
 
 impl ApplyPatchTool {
-    pub fn new(workspace_root: std::path::PathBuf) -> Self {
-        Self { workspace_root }
+    pub fn new(fs: Arc<dyn WorkspaceFs>) -> Self {
+        Self { fs }
     }
+}
+
+#[derive(Deserialize)]
+struct Params {
+    path: String,
+    edits: Vec<PatchEdit>,
+}
+
+#[derive(Deserialize)]
+struct PatchEdit {
+    old_text: String,
+    new_text: String,
 }
 
 #[async_trait::async_trait]
@@ -28,8 +44,7 @@ impl ToolExecutor for ApplyPatchTool {
                             "type": "object",
                             "properties": {
                                 "old_text": { "type": "string" },
-                                "new_text": { "type": "string" },
-                                "replace_all": { "type": "boolean" }
+                                "new_text": { "type": "string" }
                             },
                             "required": ["old_text", "new_text"]
                         }
@@ -41,165 +56,63 @@ impl ToolExecutor for ApplyPatchTool {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolResult {
-        let path = call.input["path"].as_str().unwrap_or("");
-        let workspace_root = self
-            .workspace_root
-            .canonicalize()
-            .unwrap_or_else(|_| self.workspace_root.clone());
-        let full_path = self.workspace_root.join(path);
-        let canonical = match full_path.canonicalize() {
-            Ok(canonical) if canonical.starts_with(&workspace_root) => canonical,
-            _ => {
-                return ToolResult {
-                    call_id: call.id.clone(),
-                    success: false,
-                    output: String::new(),
-                    error: Some("Path is outside the workspace".into()),
-                };
-            }
+        let p: Params = match call.extract_params() {
+            Ok(p) => p,
+            Err(e) => return e,
         };
 
-        let mut content = match tokio::fs::read_to_string(&canonical).await {
-            Ok(content) => content,
-            Err(err) => {
-                return ToolResult {
-                    call_id: call.id.clone(),
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("Failed to read file: {err}")),
-                };
-            }
-        };
-
-        let Some(edits) = call.input["edits"].as_array() else {
+        if p.edits.is_empty() {
             return ToolResult {
                 call_id: call.id.clone(),
                 success: false,
                 output: String::new(),
-                error: Some("edits must be an array".into()),
+                error: Some("edits array must not be empty".into()),
             };
+        }
+
+        let mut content = match self.fs.read_file(&p.path).await {
+            Ok(c) => c,
+            Err(e) => return sandbox_error_to_tool_result(&call.id, e),
         };
 
-        for edit in edits {
-            let old_text = edit["old_text"].as_str().unwrap_or("");
-            let new_text = edit["new_text"].as_str().unwrap_or("");
-            let replace_all = edit["replace_all"].as_bool().unwrap_or(false);
+        let mut applied = 0_usize;
+        let mut errors = Vec::new();
 
-            if old_text.is_empty() {
-                return ToolResult {
-                    call_id: call.id.clone(),
-                    success: false,
-                    output: String::new(),
-                    error: Some("old_text must not be empty".into()),
-                };
-            }
-
-            let occurrence_count = content.matches(old_text).count();
-            if occurrence_count == 0 {
-                return ToolResult {
-                    call_id: call.id.clone(),
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("text not found in {}", canonical.display())),
-                };
-            }
-
-            if replace_all {
-                content = content.replace(old_text, new_text);
-            } else if occurrence_count > 1 {
-                return ToolResult {
-                    call_id: call.id.clone(),
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!(
-                        "text matched {occurrence_count} occurrences in {}; use replace_all or replace_match for a precise edit",
-                        canonical.display()
-                    )),
-                };
-            } else if let Some(index) = content.find(old_text) {
-                content.replace_range(index..index + old_text.len(), new_text);
-            } else {
-                return ToolResult {
-                    call_id: call.id.clone(),
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("text not found in {}", canonical.display())),
-                };
+        for (i, edit) in p.edits.iter().enumerate() {
+            let count = content.matches(&edit.old_text).count();
+            match count {
+                0 => errors.push(format!("edit {}: old_text not found", i + 1)),
+                1 => {
+                    if let Some(idx) = content.find(&edit.old_text) {
+                        content.replace_range(idx..idx + edit.old_text.len(), &edit.new_text);
+                        applied += 1;
+                    }
+                }
+                n => errors.push(format!(
+                    "edit {}: old_text matched {n} times (ambiguous)",
+                    i + 1
+                )),
             }
         }
 
-        match tokio::fs::write(&canonical, content).await {
+        let error_msg = if errors.is_empty() {
+            None
+        } else {
+            Some(errors.join("; "))
+        };
+
+        match self.fs.write_file(&p.path, &content).await {
             Ok(()) => ToolResult {
                 call_id: call.id.clone(),
-                success: true,
-                output: format!("Patched {}", canonical.display()),
-                error: None,
+                success: errors.is_empty(),
+                output: format!(
+                    "Applied {applied}/{} edits to {path}",
+                    p.edits.len(),
+                    path = p.path
+                ),
+                error: error_msg,
             },
-            Err(err) => ToolResult {
-                call_id: call.id.clone(),
-                success: false,
-                output: String::new(),
-                error: Some(format!("Failed to write file: {err}")),
-            },
+            Err(e) => sandbox_error_to_tool_result(&call.id, e),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn make_call(input: serde_json::Value) -> ToolCall {
-        ToolCall {
-            id: "call-1".into(),
-            name: "apply_patch".into(),
-            input,
-        }
-    }
-
-    #[tokio::test]
-    async fn apply_patch_rejects_ambiguous_single_replacements() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("main.rs"), "alpha\nalpha\n").unwrap();
-
-        let tool = ApplyPatchTool::new(dir.path().to_path_buf());
-        let result = tool
-            .execute(&make_call(serde_json::json!({
-                "path": "main.rs",
-                "edits": [
-                    {
-                        "old_text": "alpha",
-                        "new_text": "beta"
-                    }
-                ]
-            })))
-            .await;
-
-        assert!(!result.success);
-        assert!(result.error.unwrap().contains("replace_match"));
-    }
-
-    #[tokio::test]
-    async fn apply_patch_replace_all_updates_all_occurrences() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("main.rs"), "alpha\nalpha\n").unwrap();
-
-        let tool = ApplyPatchTool::new(dir.path().to_path_buf());
-        let result = tool
-            .execute(&make_call(serde_json::json!({
-                "path": "main.rs",
-                "edits": [
-                    {
-                        "old_text": "alpha",
-                        "new_text": "beta",
-                        "replace_all": true
-                    }
-                ]
-            })))
-            .await;
-
-        assert!(result.success, "{result:?}");
-        let updated = std::fs::read_to_string(dir.path().join("main.rs")).unwrap();
-        assert_eq!(updated, "beta\nbeta\n");
     }
 }

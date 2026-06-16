@@ -1,35 +1,28 @@
-use std::path::PathBuf;
+use std::sync::Arc;
 
 use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
+use serde::Deserialize;
 
-use super::ToolExecutor;
+use super::{ToolCallExt, ToolExecutor};
+use crate::workspace_fs::{WorkspaceFs, sandbox_error_to_tool_result};
 
 pub struct ReplaceMatchTool {
-    workspace_root: PathBuf,
+    fs: Arc<dyn WorkspaceFs>,
 }
 
 impl ReplaceMatchTool {
-    pub fn new(workspace_root: PathBuf) -> Self {
-        Self { workspace_root }
+    pub fn new(fs: Arc<dyn WorkspaceFs>) -> Self {
+        Self { fs }
     }
 }
 
-fn canonicalize_workspace_path(
-    workspace_root: &std::path::Path,
-    path: &str,
-) -> Result<PathBuf, String> {
-    let canonical_root = workspace_root
-        .canonicalize()
-        .unwrap_or_else(|_| workspace_root.to_path_buf());
-    let full_path = workspace_root.join(path);
-    let canonical = full_path
-        .canonicalize()
-        .map_err(|err| format!("Failed to resolve path '{path}': {err}"))?;
-    if canonical.starts_with(&canonical_root) {
-        Ok(canonical)
-    } else {
-        Err("Path is outside the workspace".into())
-    }
+#[derive(Deserialize)]
+struct Params {
+    path: String,
+    line: usize,
+    column: usize,
+    old_text: String,
+    new_text: String,
 }
 
 fn line_segment(content: &str, target_line: usize) -> Option<(usize, &str)> {
@@ -105,13 +98,12 @@ impl ToolExecutor for ReplaceMatchTool {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolResult {
-        let path = call.input["path"].as_str().unwrap_or("");
-        let line = call.input["line"].as_u64().unwrap_or(0) as usize;
-        let column = call.input["column"].as_u64().unwrap_or(0) as usize;
-        let old_text = call.input["old_text"].as_str().unwrap_or("");
-        let new_text = call.input["new_text"].as_str().unwrap_or("");
+        let p: Params = match call.extract_params() {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
 
-        if old_text.is_empty() {
+        if p.old_text.is_empty() {
             return ToolResult {
                 call_id: call.id.clone(),
                 success: false,
@@ -119,7 +111,7 @@ impl ToolExecutor for ReplaceMatchTool {
                 error: Some("old_text must not be empty".into()),
             };
         }
-        if line == 0 || column == 0 {
+        if p.line == 0 || p.column == 0 {
             return ToolResult {
                 call_id: call.id.clone(),
                 success: false,
@@ -128,59 +120,37 @@ impl ToolExecutor for ReplaceMatchTool {
             };
         }
 
-        let canonical = match canonicalize_workspace_path(&self.workspace_root, path) {
-            Ok(path) => path,
-            Err(err) => {
-                return ToolResult {
-                    call_id: call.id.clone(),
-                    success: false,
-                    output: String::new(),
-                    error: Some(err),
-                };
-            }
+        let mut content = match self.fs.read_file(&p.path).await {
+            Ok(c) => c,
+            Err(e) => return sandbox_error_to_tool_result(&call.id, e),
         };
 
-        let mut content = match tokio::fs::read_to_string(&canonical).await {
-            Ok(content) => content,
-            Err(err) => {
-                return ToolResult {
-                    call_id: call.id.clone(),
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("Failed to read file: {err}")),
-                };
-            }
-        };
-
-        let total_occurrences = content.matches(old_text).count();
-        let Some((line_start, segment)) = line_segment(&content, line) else {
+        let total_occurrences = content.matches(&p.old_text).count();
+        let Some((line_start, segment)) = line_segment(&content, p.line) else {
             return ToolResult {
                 call_id: call.id.clone(),
                 success: false,
                 output: String::new(),
-                error: Some(format!(
-                    "line {line} does not exist in {}",
-                    canonical.display()
-                )),
+                error: Some(format!("line {} does not exist in {}", p.line, p.path)),
             };
         };
 
         let body = line_body(segment);
-        let byte_column = column - 1;
+        let byte_column = p.column - 1;
         if byte_column > body.len() {
             return ToolResult {
                 call_id: call.id.clone(),
                 success: false,
                 output: String::new(),
                 error: Some(format!(
-                    "column {column} is outside line {line} in {}",
-                    canonical.display()
+                    "column {} is outside line {} in {}",
+                    p.column, p.line, p.path
                 )),
             };
         }
 
         let absolute_start = line_start + byte_column;
-        let absolute_end = absolute_start + old_text.len();
+        let absolute_end = absolute_start + p.old_text.len();
         let Some(found_text) = content.get(absolute_start..absolute_end) else {
             return ToolResult {
                 call_id: call.id.clone(),
@@ -188,48 +158,35 @@ impl ToolExecutor for ReplaceMatchTool {
                 output: String::new(),
                 error: Some(format!(
                     "old_text does not fit at {}:{}:{}",
-                    canonical.display(),
-                    line,
-                    column
+                    p.path, p.line, p.column
                 )),
             };
         };
 
-        if found_text != old_text {
+        if found_text != p.old_text {
             return ToolResult {
                 call_id: call.id.clone(),
                 success: false,
                 output: String::new(),
                 error: Some(format!(
-                    "Expected '{old_text}' at {}:{}:{}, found '{}'",
-                    canonical.display(),
-                    line,
-                    column,
-                    found_text
+                    "Expected '{}' at {}:{}:{}, found '{}'",
+                    p.old_text, p.path, p.line, p.column, found_text
                 )),
             };
         }
 
-        content.replace_range(absolute_start..absolute_end, new_text);
-        match tokio::fs::write(&canonical, content).await {
+        content.replace_range(absolute_start..absolute_end, &p.new_text);
+        match self.fs.write_file(&p.path, &content).await {
             Ok(()) => ToolResult {
                 call_id: call.id.clone(),
                 success: true,
                 output: format!(
                     "Replaced match at {}:{}:{} ({} total occurrence(s) of old_text in file)",
-                    canonical.display(),
-                    line,
-                    column,
-                    total_occurrences
+                    p.path, p.line, p.column, total_occurrences
                 ),
                 error: None,
             },
-            Err(err) => ToolResult {
-                call_id: call.id.clone(),
-                success: false,
-                output: String::new(),
-                error: Some(format!("Failed to write file: {err}")),
-            },
+            Err(e) => sandbox_error_to_tool_result(&call.id, e),
         }
     }
 }
@@ -237,6 +194,7 @@ impl ToolExecutor for ReplaceMatchTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace_fs::RealFs;
 
     fn make_call(input: serde_json::Value) -> ToolCall {
         ToolCall {
@@ -255,7 +213,8 @@ mod tests {
         )
         .unwrap();
 
-        let tool = ReplaceMatchTool::new(dir.path().to_path_buf());
+        let fs: Arc<dyn WorkspaceFs> = Arc::new(RealFs::new(dir.path().to_path_buf()));
+        let tool = ReplaceMatchTool::new(fs);
         let result = tool
             .execute(&make_call(serde_json::json!({
                 "path": "main.rs",
@@ -279,7 +238,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("main.rs"), "fn main() { alpha; }\n").unwrap();
 
-        let tool = ReplaceMatchTool::new(dir.path().to_path_buf());
+        let fs: Arc<dyn WorkspaceFs> = Arc::new(RealFs::new(dir.path().to_path_buf()));
+        let tool = ReplaceMatchTool::new(fs);
         let result = tool
             .execute(&make_call(serde_json::json!({
                 "path": "main.rs",

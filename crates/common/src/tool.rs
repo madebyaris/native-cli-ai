@@ -9,7 +9,7 @@ pub struct ToolDefinition {
 }
 
 /// A tool invocation requested by the model.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,

@@ -1,20 +1,29 @@
+use std::sync::Arc;
+
 use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
+use serde::Deserialize;
 
-use super::ToolExecutor;
+use super::{ToolCallExt, ToolExecutor};
+use crate::workspace_fs::{WorkspaceFs, sandbox_error_to_tool_result};
 
-/// Maximum number of entries returned by list_directory.
-/// Prevents massive directory listings (e.g., node_modules) from blowing context.
-const MAX_DIRECTORY_ENTRIES: usize = 1000;
-
-/// Lists files/directories under the workspace root.
 pub struct ListDirectoryTool {
-    workspace_root: std::path::PathBuf,
+    fs: Arc<dyn WorkspaceFs>,
 }
 
 impl ListDirectoryTool {
-    pub fn new(workspace_root: std::path::PathBuf) -> Self {
-        Self { workspace_root }
+    pub fn new(fs: Arc<dyn WorkspaceFs>) -> Self {
+        Self { fs }
     }
+}
+
+#[derive(Deserialize)]
+struct Params {
+    #[serde(default = "default_path")]
+    path: String,
+}
+
+fn default_path() -> String {
+    ".".into()
 }
 
 #[async_trait::async_trait]
@@ -36,82 +45,41 @@ impl ToolExecutor for ListDirectoryTool {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolResult {
-        let rel_path = call.input["path"].as_str().unwrap_or(".");
-        let full_path = if rel_path == "." || rel_path.is_empty() {
-            self.workspace_root.clone()
-        } else {
-            let candidate = std::path::PathBuf::from(rel_path);
-            if candidate.is_absolute() {
-                candidate
-            } else {
-                self.workspace_root.join(candidate)
-            }
+        let p: Params = match call.extract_params() {
+            Ok(p) => p,
+            Err(e) => return e,
         };
 
-        match full_path.canonicalize() {
-            Ok(canonical) if canonical.starts_with(&self.workspace_root) => {
-                let mut entries = match tokio::fs::read_dir(&canonical).await {
-                    Ok(reader) => reader,
-                    Err(e) => {
-                        return ToolResult {
-                            call_id: call.id.clone(),
-                            success: false,
-                            output: String::new(),
-                            error: Some(format!("Failed to list directory: {e}")),
-                        };
-                    }
-                };
+        let entries = match self.fs.read_dir(&p.path).await {
+            Ok(e) => e,
+            Err(e) => return sandbox_error_to_tool_result(&call.id, e),
+        };
 
-                let mut out = Vec::new();
-                let mut truncated = false;
-                loop {
-                    if out.len() >= MAX_DIRECTORY_ENTRIES {
-                        truncated = true;
-                        break;
-                    }
-                    match entries.next_entry().await {
-                        Ok(Some(entry)) => {
-                            let name = entry.file_name();
-                            let name = name.to_string_lossy();
-                            let suffix = match entry.file_type().await {
-                                Ok(ft) if ft.is_dir() => "/",
-                                _ => "",
-                            };
-                            out.push(format!("{name}{suffix}"));
-                        }
-                        Ok(None) => break,
-                        Err(e) => {
-                            return ToolResult {
-                                call_id: call.id.clone(),
-                                success: false,
-                                output: String::new(),
-                                error: Some(format!("Failed to read directory entry: {e}")),
-                            };
-                        }
-                    }
-                }
+        let max_entries = 1000;
+        let truncated = entries.len() > max_entries;
+        let shown = entries.len().min(max_entries);
 
-                out.sort();
-                let mut output = out.join("\n");
-                if truncated {
-                    output.push_str(&format!(
-                        "\n… (truncated at {} entries)",
-                        MAX_DIRECTORY_ENTRIES
-                    ));
-                }
-                ToolResult {
-                    call_id: call.id.clone(),
-                    success: true,
-                    output,
-                    error: None,
-                }
-            }
-            _ => ToolResult {
-                call_id: call.id.clone(),
-                success: false,
-                output: String::new(),
-                error: Some("Path is outside the workspace".into()),
-            },
+        let mut lines = Vec::with_capacity(shown);
+        for entry in &entries[..shown] {
+            lines.push(if entry.is_dir {
+                format!("{}/", entry.name)
+            } else {
+                entry.name.clone()
+            });
+        }
+        if truncated {
+            lines.push(format!(
+                "… ({} more entries omitted; max {})",
+                entries.len() - max_entries,
+                max_entries
+            ));
+        }
+
+        ToolResult {
+            call_id: call.id.clone(),
+            success: true,
+            output: lines.join("\n"),
+            error: None,
         }
     }
 }

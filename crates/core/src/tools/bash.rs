@@ -1,17 +1,32 @@
+use std::sync::Arc;
+
 use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
+use serde::Deserialize;
 use tokio::time::{Duration, timeout};
 
-use super::ToolExecutor;
+use super::{ToolCallExt, ToolExecutor};
+use crate::workspace_fs::WorkspaceFs;
 
 /// Executes shell commands inside the workspace.
 pub struct BashTool {
-    workspace_root: std::path::PathBuf,
+    fs: Arc<dyn WorkspaceFs>,
 }
 
 impl BashTool {
-    pub fn new(workspace_root: std::path::PathBuf) -> Self {
-        Self { workspace_root }
+    pub fn new(fs: Arc<dyn WorkspaceFs>) -> Self {
+        Self { fs }
     }
+}
+
+#[derive(Deserialize)]
+struct Params {
+    command: String,
+    #[serde(default = "default_timeout")]
+    timeout_secs: u64,
+}
+
+fn default_timeout() -> u64 {
+    30
 }
 
 #[async_trait::async_trait]
@@ -38,17 +53,19 @@ impl ToolExecutor for BashTool {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolResult {
-        let command = call.input["command"].as_str().unwrap_or("");
-        let timeout_secs = call.input["timeout_secs"].as_u64().unwrap_or(30);
+        let p: Params = match call.extract_params() {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
 
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-lc")
-            .arg(command)
-            .current_dir(&self.workspace_root)
+            .arg(&p.command)
+            .current_dir(self.fs.root())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
-        let output = match timeout(Duration::from_secs(timeout_secs), cmd.output()).await {
+        let output = match timeout(Duration::from_secs(p.timeout_secs), cmd.output()).await {
             Ok(Ok(out)) => out,
             Ok(Err(e)) => {
                 return ToolResult {
@@ -63,7 +80,7 @@ impl ToolExecutor for BashTool {
                     call_id: call.id.clone(),
                     success: false,
                     output: String::new(),
-                    error: Some(format!("Command timed out after {timeout_secs}s")),
+                    error: Some(format!("Command timed out after {}s", p.timeout_secs)),
                 };
             }
         };

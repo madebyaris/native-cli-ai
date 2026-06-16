@@ -1,15 +1,24 @@
-use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
+use std::sync::Arc;
 
-use super::ToolExecutor;
+use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
+use serde::Deserialize;
+
+use super::{ToolCallExt, ToolExecutor};
+use crate::workspace_fs::{WorkspaceFs, sandbox_error_to_tool_result};
 
 pub struct ReadFileTool {
-    workspace_root: std::path::PathBuf,
+    fs: Arc<dyn WorkspaceFs>,
 }
 
 impl ReadFileTool {
-    pub fn new(workspace_root: std::path::PathBuf) -> Self {
-        Self { workspace_root }
+    pub fn new(fs: Arc<dyn WorkspaceFs>) -> Self {
+        Self { fs }
     }
+}
+
+#[derive(Deserialize)]
+struct Params {
+    path: String,
 }
 
 #[async_trait::async_trait]
@@ -32,33 +41,18 @@ impl ToolExecutor for ReadFileTool {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolResult {
-        let path = call.input["path"].as_str().unwrap_or("");
-        let full_path = self.workspace_root.join(path);
-
-        // Verify the path stays inside the workspace
-        match full_path.canonicalize() {
-            Ok(canonical) if canonical.starts_with(&self.workspace_root) => {
-                match tokio::fs::read_to_string(&canonical).await {
-                    Ok(content) => ToolResult {
-                        call_id: call.id.clone(),
-                        success: true,
-                        output: content,
-                        error: None,
-                    },
-                    Err(e) => ToolResult {
-                        call_id: call.id.clone(),
-                        success: false,
-                        output: String::new(),
-                        error: Some(format!("Failed to read file: {e}")),
-                    },
-                }
-            }
-            _ => ToolResult {
+        let p: Params = match call.extract_params() {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+        match self.fs.read_file(&p.path).await {
+            Ok(content) => ToolResult {
                 call_id: call.id.clone(),
-                success: false,
-                output: String::new(),
-                error: Some("Path is outside the workspace".into()),
+                success: true,
+                output: content,
+                error: None,
             },
+            Err(e) => sandbox_error_to_tool_result(&call.id, e),
         }
     }
 }

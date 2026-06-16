@@ -1,15 +1,25 @@
-use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
+use std::sync::Arc;
 
-use super::ToolExecutor;
+use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
+use serde::Deserialize;
+
+use super::{ToolCallExt, ToolExecutor};
+use crate::workspace_fs::{WorkspaceFs, sandbox_error_to_tool_result};
 
 pub struct WriteFileTool {
-    workspace_root: std::path::PathBuf,
+    fs: Arc<dyn WorkspaceFs>,
 }
 
 impl WriteFileTool {
-    pub fn new(workspace_root: std::path::PathBuf) -> Self {
-        Self { workspace_root }
+    pub fn new(fs: Arc<dyn WorkspaceFs>) -> Self {
+        Self { fs }
     }
+}
+
+#[derive(Deserialize)]
+struct Params {
+    path: String,
+    content: String,
 }
 
 #[async_trait::async_trait]
@@ -30,65 +40,18 @@ impl ToolExecutor for WriteFileTool {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolResult {
-        let path = call.input["path"].as_str().unwrap_or("");
-        let content = call.input["content"].as_str().unwrap_or("");
-        let full_path = self.workspace_root.join(path);
-
-        let parent = match full_path.parent() {
-            Some(parent) => parent,
-            None => {
-                return ToolResult {
-                    call_id: call.id.clone(),
-                    success: false,
-                    output: String::new(),
-                    error: Some("Invalid write path".into()),
-                };
-            }
+        let p: Params = match call.extract_params() {
+            Ok(p) => p,
+            Err(e) => return e,
         };
-
-        if let Err(err) = tokio::fs::create_dir_all(parent).await {
-            return ToolResult {
-                call_id: call.id.clone(),
-                success: false,
-                output: String::new(),
-                error: Some(format!("Failed to create parent directories: {err}")),
-            };
-        }
-
-        let canonical_parent = match parent.canonicalize() {
-            Ok(path) => path,
-            Err(err) => {
-                return ToolResult {
-                    call_id: call.id.clone(),
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("Failed to resolve parent path: {err}")),
-                };
-            }
-        };
-
-        if !canonical_parent.starts_with(&self.workspace_root) {
-            return ToolResult {
-                call_id: call.id.clone(),
-                success: false,
-                output: String::new(),
-                error: Some("Path is outside the workspace".into()),
-            };
-        }
-
-        match tokio::fs::write(&full_path, content).await {
+        match self.fs.write_file(&p.path, &p.content).await {
             Ok(()) => ToolResult {
                 call_id: call.id.clone(),
                 success: true,
-                output: format!("Wrote {}", full_path.display()),
+                output: format!("Wrote {}", p.path),
                 error: None,
             },
-            Err(err) => ToolResult {
-                call_id: call.id.clone(),
-                success: false,
-                output: String::new(),
-                error: Some(format!("Failed to write file: {err}")),
-            },
+            Err(e) => sandbox_error_to_tool_result(&call.id, e),
         }
     }
 }

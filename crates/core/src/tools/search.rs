@@ -1,15 +1,16 @@
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::ToolExecutor;
+use super::{ToolCallExt, ToolExecutor};
+use crate::workspace_fs::WorkspaceFs;
 
 /// Code search tool that shells out to ripgrep and returns structured JSON.
 pub struct SearchCodeTool {
-    workspace_root: PathBuf,
+    fs: Arc<dyn WorkspaceFs>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -48,28 +49,49 @@ struct SearchResponse {
 }
 
 impl SearchCodeTool {
-    pub fn new(workspace_root: PathBuf) -> Self {
-        Self { workspace_root }
+    pub fn new(fs: Arc<dyn WorkspaceFs>) -> Self {
+        Self { fs }
     }
 }
 
-fn relative_search_root(workspace_root: &Path, scope: Option<&str>) -> Result<String, String> {
-    let Some(scope) = scope.map(str::trim).filter(|scope| !scope.is_empty()) else {
+#[derive(Deserialize)]
+struct Params {
+    pattern: String,
+    path: Option<String>,
+    glob: Option<String>,
+    #[serde(default)]
+    fixed_strings: bool,
+    #[serde(default = "default_true")]
+    case_sensitive: bool,
+    #[serde(default)]
+    word: bool,
+    #[serde(default)]
+    context_before: usize,
+    #[serde(default)]
+    context_after: usize,
+    #[serde(default = "default_max_results")]
+    max_results: usize,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_max_results() -> usize {
+    100
+}
+
+/// Resolve the search scope to a path relative to workspace root,
+/// validating it stays within the workspace.
+fn relative_search_root(fs: &dyn WorkspaceFs, scope: Option<&str>) -> Result<String, String> {
+    let Some(scope) = scope.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(".".into());
     };
 
-    let canonical_root = workspace_root
-        .canonicalize()
-        .unwrap_or_else(|_| workspace_root.to_path_buf());
-    let candidate = workspace_root.join(scope);
-    let canonical = candidate
-        .canonicalize()
-        .map_err(|err| format!("Failed to resolve search path '{scope}': {err}"))?;
-    if !canonical.starts_with(&canonical_root) {
-        return Err("Search path is outside the workspace".into());
-    }
+    let canonical = fs.resolve(scope).map_err(|e| e.to_string())?;
+    let root = fs.root();
     canonical
-        .strip_prefix(&canonical_root)
+        .strip_prefix(root)
         .map(|path| {
             let rendered = path.display().to_string();
             if rendered.is_empty() {
@@ -163,11 +185,12 @@ impl ToolExecutor for SearchCodeTool {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolResult {
-        let pattern = call.input["pattern"]
-            .as_str()
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let p: Params = match call.extract_params() {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+
+        let pattern = p.pattern.trim().to_string();
         if pattern.is_empty() {
             return ToolResult {
                 call_id: call.id.clone(),
@@ -177,8 +200,7 @@ impl ToolExecutor for SearchCodeTool {
             };
         }
 
-        let scope = call.input["path"].as_str();
-        let search_root = match relative_search_root(&self.workspace_root, scope) {
+        let search_root = match relative_search_root(&*self.fs, p.path.as_deref()) {
             Ok(path) => path,
             Err(err) => {
                 return ToolResult {
@@ -190,37 +212,30 @@ impl ToolExecutor for SearchCodeTool {
             }
         };
 
-        let glob = call.input["glob"].as_str().map(str::to_string);
-        let fixed_strings = call.input["fixed_strings"].as_bool().unwrap_or(false);
-        let case_sensitive = call.input["case_sensitive"].as_bool().unwrap_or(true);
-        let word = call.input["word"].as_bool().unwrap_or(false);
-        let context_before = call.input["context_before"].as_u64().unwrap_or(0) as usize;
-        let context_after = call.input["context_after"].as_u64().unwrap_or(0) as usize;
-        let max_results = call.input["max_results"].as_u64().unwrap_or(100) as usize;
-
         let mut cmd = tokio::process::Command::new("rg");
         cmd.arg("--json")
             .arg("--color=never")
             .arg(pattern.as_str())
             .arg(search_root.as_str())
-            .current_dir(&self.workspace_root);
+            .current_dir(self.fs.root());
 
-        if fixed_strings {
+        if p.fixed_strings {
             cmd.arg("--fixed-strings");
         }
-        if !case_sensitive {
+        if !p.case_sensitive {
             cmd.arg("--ignore-case");
         }
-        if word {
+        if p.word {
             cmd.arg("--word-regexp");
         }
-        if context_before > 0 {
-            cmd.arg("--before-context").arg(context_before.to_string());
+        if p.context_before > 0 {
+            cmd.arg("--before-context")
+                .arg(p.context_before.to_string());
         }
-        if context_after > 0 {
-            cmd.arg("--after-context").arg(context_after.to_string());
+        if p.context_after > 0 {
+            cmd.arg("--after-context").arg(p.context_after.to_string());
         }
-        if let Some(glob) = &glob {
+        if let Some(glob) = &p.glob {
             cmd.arg("--glob").arg(glob);
         }
 
@@ -297,9 +312,9 @@ impl ToolExecutor for SearchCodeTool {
                             pending_after_match_indices.clear();
                         }
                     }
-                    if context_before > 0 {
+                    if p.context_before > 0 {
                         before_context_buffer.push_back(context_line);
-                        while before_context_buffer.len() > context_before {
+                        while before_context_buffer.len() > p.context_before {
                             before_context_buffer.pop_front();
                         }
                     }
@@ -311,7 +326,7 @@ impl ToolExecutor for SearchCodeTool {
                     let before_context = before_context_buffer.iter().cloned().collect::<Vec<_>>();
                     before_context_buffer.clear();
                     pending_after_match_indices.clear();
-                    pending_after_remaining = context_after;
+                    pending_after_remaining = p.context_after;
 
                     let submatches = data
                         .get("submatches")
@@ -320,7 +335,7 @@ impl ToolExecutor for SearchCodeTool {
                         .unwrap_or_default();
                     for submatch in submatches {
                         total_matches += 1;
-                        if matches.len() >= max_results {
+                        if matches.len() >= p.max_results {
                             truncated = true;
                             continue;
                         }
@@ -346,14 +361,14 @@ impl ToolExecutor for SearchCodeTool {
 
         let response = SearchResponse {
             pattern,
-            mode: if fixed_strings { "literal" } else { "regex" },
+            mode: if p.fixed_strings { "literal" } else { "regex" },
             path: search_root,
-            glob,
-            case_sensitive,
-            word,
-            context_before,
-            context_after,
-            max_results,
+            glob: p.glob,
+            case_sensitive: p.case_sensitive,
+            word: p.word,
+            context_before: p.context_before,
+            context_after: p.context_after,
+            max_results: p.max_results,
             total_matches,
             returned_matches: matches.len(),
             truncated,
@@ -380,6 +395,7 @@ impl ToolExecutor for SearchCodeTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace_fs::RealFs;
 
     fn make_call(input: serde_json::Value) -> ToolCall {
         ToolCall {
@@ -400,7 +416,8 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchCodeTool::new(dir.path().to_path_buf());
+        let fs: Arc<dyn WorkspaceFs> = Arc::new(RealFs::new(dir.path().to_path_buf()));
+        let tool = SearchCodeTool::new(fs);
         let result = tool
             .execute(&make_call(serde_json::json!({
                 "pattern": "alpha",
@@ -425,7 +442,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("main.rs"), "fn present() {}\n").unwrap();
 
-        let tool = SearchCodeTool::new(dir.path().to_path_buf());
+        let fs: Arc<dyn WorkspaceFs> = Arc::new(RealFs::new(dir.path().to_path_buf()));
+        let tool = SearchCodeTool::new(fs);
         let result = tool
             .execute(&make_call(serde_json::json!({
                 "pattern": "missing_symbol",
@@ -445,7 +463,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("main.rs"), "fn call() { foo.bar(); }\n").unwrap();
 
-        let tool = SearchCodeTool::new(dir.path().to_path_buf());
+        let fs: Arc<dyn WorkspaceFs> = Arc::new(RealFs::new(dir.path().to_path_buf()));
+        let tool = SearchCodeTool::new(fs);
         let result = tool
             .execute(&make_call(serde_json::json!({
                 "pattern": "foo.bar",

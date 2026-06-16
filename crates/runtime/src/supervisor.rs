@@ -22,6 +22,7 @@ use nca_core::tools::InvokeSkillTool;
 use nca_core::tools::ToolRegistry;
 use nca_core::tools::mcp::load_mcp_tools;
 use nca_core::tools::spawn_subagent::{SpawnRequest, SpawnSubagentTool};
+use nca_core::workspace_fs::RealFs;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -153,10 +154,12 @@ impl Supervisor {
         }
 
         let provider = build_provider(&config)?;
+        let fs: Arc<dyn nca_core::workspace_fs::WorkspaceFs> =
+            Arc::new(RealFs::new(workspace_root.clone()));
         let mut tools = if cfg.safe_mode {
-            ToolRegistry::with_default_readonly_tools(workspace_root.clone(), config.web.clone())
+            ToolRegistry::with_default_readonly_tools(fs.clone(), config.web.clone())
         } else {
-            ToolRegistry::with_default_full_tools(workspace_root.clone(), config.web.clone())
+            ToolRegistry::with_default_full_tools(fs, config.web.clone())
         };
         if !config.mcp.servers.is_empty() && (!cfg.safe_mode || config.mcp.expose_in_safe_mode) {
             match load_mcp_tools(&workspace_root, &config.mcp.servers).await {

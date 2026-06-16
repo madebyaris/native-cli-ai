@@ -1,15 +1,36 @@
-use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
+use std::sync::Arc;
 
-use super::ToolExecutor;
+use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
+use serde::Deserialize;
+
+use super::{ToolCallExt, ToolExecutor};
+use crate::workspace_fs::WorkspaceFs;
 
 pub struct RunValidationTool {
-    workspace_root: std::path::PathBuf,
+    fs: Arc<dyn WorkspaceFs>,
 }
 
 impl RunValidationTool {
-    pub fn new(workspace_root: std::path::PathBuf) -> Self {
-        Self { workspace_root }
+    pub fn new(fs: Arc<dyn WorkspaceFs>) -> Self {
+        Self { fs }
     }
+}
+
+#[derive(Deserialize)]
+struct Params {
+    command: String,
+    #[serde(default = "default_cwd")]
+    cwd: String,
+    #[serde(default = "default_timeout")]
+    timeout_secs: u64,
+}
+
+fn default_cwd() -> String {
+    ".".into()
+}
+
+fn default_timeout() -> u64 {
+    120
 }
 
 #[async_trait::async_trait]
@@ -21,9 +42,18 @@ impl ToolExecutor for RunValidationTool {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string" },
-                    "cwd": { "type": "string" },
-                    "timeout_secs": { "type": "integer" }
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to execute"
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Working directory relative to workspace root (default: '.')"
+                    },
+                    "timeout_secs": {
+                        "type": "integer",
+                        "description": "Timeout in seconds (default: 120)"
+                    }
                 },
                 "required": ["command"]
             }),
@@ -31,50 +61,44 @@ impl ToolExecutor for RunValidationTool {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolResult {
-        let command = call.input["command"].as_str().unwrap_or("").trim();
-        let cwd = call.input["cwd"].as_str().unwrap_or(".");
-        let timeout_secs = call.input["timeout_secs"].as_u64().unwrap_or(120);
+        let p: Params = match call.extract_params() {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
 
-        if !is_safe_validation_command(command) {
-            return ToolResult {
-                call_id: call.id.clone(),
-                success: false,
-                output: String::new(),
-                error: Some("command is not an allowed validation command".into()),
-            };
-        }
-
-        let full_cwd = self.workspace_root.join(cwd);
-        let canonical_cwd = match full_cwd.canonicalize() {
-            Ok(path) if path.starts_with(&self.workspace_root) => path,
-            _ => {
+        // Validate cwd stays within workspace.
+        let cwd_abs = match self.fs.validate_prefix(&p.cwd) {
+            Ok(p) => p,
+            Err(e) => {
                 return ToolResult {
                     call_id: call.id.clone(),
                     success: false,
                     output: String::new(),
-                    error: Some("cwd is outside the workspace".into()),
+                    error: Some(e.to_string()),
                 };
             }
         };
 
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-lc")
-            .arg(command)
-            .current_dir(&canonical_cwd)
+            .arg(&p.command)
+            .current_dir(&cwd_abs)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
-        let output =
-            tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output()).await;
-
-        let output = match output {
-            Ok(Ok(output)) => output,
-            Ok(Err(err)) => {
+        let output = match tokio::time::timeout(
+            std::time::Duration::from_secs(p.timeout_secs),
+            cmd.output(),
+        )
+        .await
+        {
+            Ok(Ok(out)) => out,
+            Ok(Err(e)) => {
                 return ToolResult {
                     call_id: call.id.clone(),
                     success: false,
                     output: String::new(),
-                    error: Some(format!("failed to run validation command: {err}")),
+                    error: Some(format!("Failed to execute command: {e}")),
                 };
             }
             Err(_) => {
@@ -82,14 +106,13 @@ impl ToolExecutor for RunValidationTool {
                     call_id: call.id.clone(),
                     success: false,
                     output: String::new(),
-                    error: Some(format!(
-                        "validation command timed out after {timeout_secs}s"
-                    )),
+                    error: Some(format!("Command timed out after {}s", p.timeout_secs)),
                 };
             }
         };
 
-        let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+        let mut text = String::new();
+        text.push_str(&String::from_utf8_lossy(&output.stdout));
         if !output.stderr.is_empty() {
             if !text.is_empty() {
                 text.push('\n');
@@ -104,28 +127,4 @@ impl ToolExecutor for RunValidationTool {
             error: None,
         }
     }
-}
-
-fn is_safe_validation_command(command: &str) -> bool {
-    const PREFIXES: &[&str] = &[
-        "cargo build",
-        "cargo test",
-        "cargo check",
-        "cargo clippy",
-        "cargo fmt --check",
-        "npm run build",
-        "npm run test",
-        "npm run lint",
-        "pnpm build",
-        "pnpm test",
-        "pnpm lint",
-        "yarn build",
-        "yarn test",
-        "yarn lint",
-        "next build",
-        "pytest",
-        "go test",
-    ];
-
-    PREFIXES.iter().any(|prefix| command.starts_with(prefix))
 }

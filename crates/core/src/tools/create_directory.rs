@@ -1,15 +1,24 @@
-use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
+use std::sync::Arc;
 
-use super::ToolExecutor;
+use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
+use serde::Deserialize;
+
+use super::{ToolCallExt, ToolExecutor};
+use crate::workspace_fs::{WorkspaceFs, sandbox_error_to_tool_result};
 
 pub struct CreateDirectoryTool {
-    workspace_root: std::path::PathBuf,
+    fs: Arc<dyn WorkspaceFs>,
 }
 
 impl CreateDirectoryTool {
-    pub fn new(workspace_root: std::path::PathBuf) -> Self {
-        Self { workspace_root }
+    pub fn new(fs: Arc<dyn WorkspaceFs>) -> Self {
+        Self { fs }
     }
+}
+
+#[derive(Deserialize)]
+struct Params {
+    path: String,
 }
 
 #[async_trait::async_trait]
@@ -29,37 +38,18 @@ impl ToolExecutor for CreateDirectoryTool {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolResult {
-        let path = call.input["path"].as_str().unwrap_or("");
-        let full_path = self.workspace_root.join(path);
-
-        let parent = full_path.parent().unwrap_or(&self.workspace_root);
-        let canonical_parent = match parent.canonicalize() {
-            Ok(path) => path,
-            Err(_) => self.workspace_root.clone(),
+        let p: Params = match call.extract_params() {
+            Ok(p) => p,
+            Err(e) => return e,
         };
-
-        if !canonical_parent.starts_with(&self.workspace_root) {
-            return ToolResult {
-                call_id: call.id.clone(),
-                success: false,
-                output: String::new(),
-                error: Some("Path is outside the workspace".into()),
-            };
-        }
-
-        match tokio::fs::create_dir_all(&full_path).await {
+        match self.fs.create_dir_all(&p.path).await {
             Ok(()) => ToolResult {
                 call_id: call.id.clone(),
                 success: true,
-                output: format!("Created directory {}", full_path.display()),
+                output: format!("Created directory {}", p.path),
                 error: None,
             },
-            Err(err) => ToolResult {
-                call_id: call.id.clone(),
-                success: false,
-                output: String::new(),
-                error: Some(format!("Failed to create directory: {err}")),
-            },
+            Err(e) => sandbox_error_to_tool_result(&call.id, e),
         }
     }
 }

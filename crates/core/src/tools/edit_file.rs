@@ -1,15 +1,28 @@
-use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
+use std::sync::Arc;
 
-use super::ToolExecutor;
+use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
+use serde::Deserialize;
+
+use super::{ToolCallExt, ToolExecutor};
+use crate::workspace_fs::{WorkspaceFs, sandbox_error_to_tool_result};
 
 pub struct EditFileTool {
-    workspace_root: std::path::PathBuf,
+    fs: Arc<dyn WorkspaceFs>,
 }
 
 impl EditFileTool {
-    pub fn new(workspace_root: std::path::PathBuf) -> Self {
-        Self { workspace_root }
+    pub fn new(fs: Arc<dyn WorkspaceFs>) -> Self {
+        Self { fs }
     }
+}
+
+#[derive(Deserialize)]
+struct Params {
+    path: String,
+    old_text: String,
+    new_text: String,
+    #[serde(default)]
+    replace_all: bool,
 }
 
 #[async_trait::async_trait]
@@ -32,41 +45,12 @@ impl ToolExecutor for EditFileTool {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolResult {
-        let path = call.input["path"].as_str().unwrap_or("");
-        let old_text = call.input["old_text"].as_str().unwrap_or("");
-        let new_text = call.input["new_text"].as_str().unwrap_or("");
-        let replace_all = call.input["replace_all"].as_bool().unwrap_or(false);
-
-        let workspace_root = self
-            .workspace_root
-            .canonicalize()
-            .unwrap_or_else(|_| self.workspace_root.clone());
-        let full_path = self.workspace_root.join(path);
-        let canonical = match full_path.canonicalize() {
-            Ok(canonical) if canonical.starts_with(&workspace_root) => canonical,
-            _ => {
-                return ToolResult {
-                    call_id: call.id.clone(),
-                    success: false,
-                    output: String::new(),
-                    error: Some("Path is outside the workspace".into()),
-                };
-            }
+        let p: Params = match call.extract_params() {
+            Ok(p) => p,
+            Err(e) => return e,
         };
 
-        let content = match tokio::fs::read_to_string(&canonical).await {
-            Ok(content) => content,
-            Err(err) => {
-                return ToolResult {
-                    call_id: call.id.clone(),
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("Failed to read file: {err}")),
-                };
-            }
-        };
-
-        if old_text.is_empty() {
+        if p.old_text.is_empty() {
             return ToolResult {
                 call_id: call.id.clone(),
                 success: false,
@@ -75,7 +59,12 @@ impl ToolExecutor for EditFileTool {
             };
         }
 
-        let occurrence_count = content.matches(old_text).count();
+        let content = match self.fs.read_file(&p.path).await {
+            Ok(c) => c,
+            Err(e) => return sandbox_error_to_tool_result(&call.id, e),
+        };
+
+        let occurrence_count = content.matches(&p.old_text).count();
         if occurrence_count == 0 {
             return ToolResult {
                 call_id: call.id.clone(),
@@ -85,8 +74,8 @@ impl ToolExecutor for EditFileTool {
             };
         }
 
-        let updated = if replace_all {
-            content.replace(old_text, new_text)
+        let updated = if p.replace_all {
+            content.replace(&p.old_text, &p.new_text)
         } else if occurrence_count > 1 {
             return ToolResult {
                 call_id: call.id.clone(),
@@ -96,9 +85,9 @@ impl ToolExecutor for EditFileTool {
                     "old_text matched {occurrence_count} occurrences; use replace_all or replace_match for a precise edit"
                 )),
             };
-        } else if let Some(index) = content.find(old_text) {
+        } else if let Some(index) = content.find(&p.old_text) {
             let mut updated = content.clone();
-            updated.replace_range(index..index + old_text.len(), new_text);
+            updated.replace_range(index..index + p.old_text.len(), &p.new_text);
             updated
         } else {
             return ToolResult {
@@ -109,24 +98,19 @@ impl ToolExecutor for EditFileTool {
             };
         };
 
-        match tokio::fs::write(&canonical, updated).await {
+        match self.fs.write_file(&p.path, &updated).await {
             Ok(()) => ToolResult {
                 call_id: call.id.clone(),
                 success: true,
                 output: format!(
-                    "Edited {} (replaced {} occurrence{})",
-                    canonical.display(),
-                    occurrence_count,
-                    if occurrence_count == 1 { "" } else { "s" }
+                    "Edited {path} (replaced {count} occurrence{s})",
+                    path = p.path,
+                    count = occurrence_count,
+                    s = if occurrence_count == 1 { "" } else { "s" }
                 ),
                 error: None,
             },
-            Err(err) => ToolResult {
-                call_id: call.id.clone(),
-                success: false,
-                output: String::new(),
-                error: Some(format!("Failed to write file: {err}")),
-            },
+            Err(e) => sandbox_error_to_tool_result(&call.id, e),
         }
     }
 }
@@ -134,6 +118,7 @@ impl ToolExecutor for EditFileTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace_fs::RealFs;
 
     fn make_call(input: serde_json::Value) -> ToolCall {
         ToolCall {
@@ -148,7 +133,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("main.rs"), "alpha\nalpha\n").unwrap();
 
-        let tool = EditFileTool::new(dir.path().to_path_buf());
+        let fs: Arc<dyn WorkspaceFs> = Arc::new(RealFs::new(dir.path().to_path_buf()));
+        let tool = EditFileTool::new(fs);
         let result = tool
             .execute(&make_call(serde_json::json!({
                 "path": "main.rs",
@@ -166,7 +152,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("main.rs"), "alpha\nalpha\n").unwrap();
 
-        let tool = EditFileTool::new(dir.path().to_path_buf());
+        let fs: Arc<dyn WorkspaceFs> = Arc::new(RealFs::new(dir.path().to_path_buf()));
+        let tool = EditFileTool::new(fs);
         let result = tool
             .execute(&make_call(serde_json::json!({
                 "path": "main.rs",

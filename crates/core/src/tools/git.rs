@@ -1,24 +1,17 @@
+use std::sync::Arc;
+
 use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
 
 use super::ToolExecutor;
+use crate::workspace_fs::WorkspaceFs;
 
 pub struct GitStatusTool {
-    workspace_root: std::path::PathBuf,
+    fs: Arc<dyn WorkspaceFs>,
 }
 
 impl GitStatusTool {
-    pub fn new(workspace_root: std::path::PathBuf) -> Self {
-        Self { workspace_root }
-    }
-}
-
-pub struct GitDiffTool {
-    workspace_root: std::path::PathBuf,
-}
-
-impl GitDiffTool {
-    pub fn new(workspace_root: std::path::PathBuf) -> Self {
-        Self { workspace_root }
+    pub fn new(fs: Arc<dyn WorkspaceFs>) -> Self {
+        Self { fs }
     }
 }
 
@@ -36,12 +29,44 @@ impl ToolExecutor for GitStatusTool {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolResult {
-        run_git(
-            &self.workspace_root,
-            &["status", "--short", "--branch"],
-            call,
-        )
-        .await
+        let output = tokio::process::Command::new("git")
+            .arg("status")
+            .arg("--porcelain=v1")
+            .current_dir(self.fs.root())
+            .output()
+            .await;
+
+        match output {
+            Ok(out) => {
+                let text = String::from_utf8_lossy(&out.stdout).to_string();
+                ToolResult {
+                    call_id: call.id.clone(),
+                    success: true,
+                    output: if text.is_empty() {
+                        "Working tree clean".into()
+                    } else {
+                        text
+                    },
+                    error: None,
+                }
+            }
+            Err(e) => ToolResult {
+                call_id: call.id.clone(),
+                success: false,
+                output: String::new(),
+                error: Some(format!("Failed to run git status: {e}")),
+            },
+        }
+    }
+}
+
+pub struct GitDiffTool {
+    fs: Arc<dyn WorkspaceFs>,
+}
+
+impl GitDiffTool {
+    pub fn new(fs: Arc<dyn WorkspaceFs>) -> Self {
+        Self { fs }
     }
 }
 
@@ -54,7 +79,7 @@ impl ToolExecutor for GitDiffTool {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "staged": { "type": "boolean" }
+                    "staged": { "type": "boolean", "description": "Show staged changes only" }
                 }
             }),
         }
@@ -62,47 +87,34 @@ impl ToolExecutor for GitDiffTool {
 
     async fn execute(&self, call: &ToolCall) -> ToolResult {
         let staged = call.input["staged"].as_bool().unwrap_or(false);
-        let args = if staged {
-            vec!["diff", "--cached", "--no-color"]
-        } else {
-            vec!["diff", "--no-color"]
-        };
-        run_git(&self.workspace_root, &args, call).await
-    }
-}
-
-async fn run_git(
-    workspace_root: &std::path::PathBuf,
-    args: &[&str],
-    call: &ToolCall,
-) -> ToolResult {
-    let output = tokio::process::Command::new("git")
-        .args(args)
-        .current_dir(workspace_root)
-        .output()
-        .await;
-
-    match output {
-        Ok(out) => {
-            let mut text = String::from_utf8_lossy(&out.stdout).to_string();
-            if !out.stderr.is_empty() {
-                if !text.is_empty() {
-                    text.push('\n');
-                }
-                text.push_str(&String::from_utf8_lossy(&out.stderr));
-            }
-            ToolResult {
-                call_id: call.id.clone(),
-                success: out.status.success(),
-                output: text,
-                error: None,
-            }
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.arg("diff");
+        if staged {
+            cmd.arg("--staged");
         }
-        Err(err) => ToolResult {
-            call_id: call.id.clone(),
-            success: false,
-            output: String::new(),
-            error: Some(format!("Failed to run git: {err}")),
-        },
+        cmd.current_dir(self.fs.root());
+
+        let output = cmd.output().await;
+        match output {
+            Ok(out) => {
+                let text = String::from_utf8_lossy(&out.stdout).to_string();
+                ToolResult {
+                    call_id: call.id.clone(),
+                    success: true,
+                    output: if text.is_empty() {
+                        "No diff output".into()
+                    } else {
+                        text
+                    },
+                    error: None,
+                }
+            }
+            Err(e) => ToolResult {
+                call_id: call.id.clone(),
+                success: false,
+                output: String::new(),
+                error: Some(format!("Failed to run git diff: {e}")),
+            },
+        }
     }
 }

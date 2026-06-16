@@ -1,15 +1,25 @@
-use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
+use std::sync::Arc;
 
-use super::ToolExecutor;
+use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
+use serde::Deserialize;
+
+use super::{ToolCallExt, ToolExecutor};
+use crate::workspace_fs::{WorkspaceFs, sandbox_error_to_tool_result};
 
 pub struct RenamePathTool {
-    workspace_root: std::path::PathBuf,
+    fs: Arc<dyn WorkspaceFs>,
 }
 
 impl RenamePathTool {
-    pub fn new(workspace_root: std::path::PathBuf) -> Self {
-        Self { workspace_root }
+    pub fn new(fs: Arc<dyn WorkspaceFs>) -> Self {
+        Self { fs }
     }
+}
+
+#[derive(Deserialize)]
+struct Params {
+    from: String,
+    to: String,
 }
 
 #[async_trait::async_trait]
@@ -30,71 +40,18 @@ impl ToolExecutor for RenamePathTool {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolResult {
-        rename_impl(&self.workspace_root, call, "renamed").await
-    }
-}
-
-pub(super) async fn rename_impl(
-    workspace_root: &std::path::PathBuf,
-    call: &ToolCall,
-    verb: &str,
-) -> ToolResult {
-    let from = call.input["from"].as_str().unwrap_or("");
-    let to = call.input["to"].as_str().unwrap_or("");
-    let from_path = workspace_root.join(from);
-    let to_path = workspace_root.join(to);
-
-    let canonical_from = match from_path.canonicalize() {
-        Ok(path) if path.starts_with(workspace_root) => path,
-        _ => {
-            return ToolResult {
-                call_id: call.id.clone(),
-                success: false,
-                output: String::new(),
-                error: Some("Source path is outside the workspace".into()),
-            };
-        }
-    };
-
-    if let Some(parent) = to_path.parent() {
-        if let Err(err) = tokio::fs::create_dir_all(parent).await {
-            return ToolResult {
-                call_id: call.id.clone(),
-                success: false,
-                output: String::new(),
-                error: Some(format!("Failed to create destination directory: {err}")),
-            };
-        }
-        let canonical_parent = match parent.canonicalize() {
-            Ok(path) if path.starts_with(workspace_root) => path,
-            _ => {
-                return ToolResult {
-                    call_id: call.id.clone(),
-                    success: false,
-                    output: String::new(),
-                    error: Some("Destination path is outside the workspace".into()),
-                };
-            }
+        let p: Params = match call.extract_params() {
+            Ok(p) => p,
+            Err(e) => return e,
         };
-        let _ = canonical_parent;
-    }
-
-    match tokio::fs::rename(&canonical_from, &to_path).await {
-        Ok(()) => ToolResult {
-            call_id: call.id.clone(),
-            success: true,
-            output: format!(
-                "{verb} {} -> {}",
-                canonical_from.display(),
-                to_path.display()
-            ),
-            error: None,
-        },
-        Err(err) => ToolResult {
-            call_id: call.id.clone(),
-            success: false,
-            output: String::new(),
-            error: Some(format!("Failed to rename path: {err}")),
-        },
+        match self.fs.rename(&p.from, &p.to).await {
+            Ok(()) => ToolResult {
+                call_id: call.id.clone(),
+                success: true,
+                output: format!("Renamed {} -> {}", p.from, p.to),
+                error: None,
+            },
+            Err(e) => sandbox_error_to_tool_result(&call.id, e),
+        }
     }
 }

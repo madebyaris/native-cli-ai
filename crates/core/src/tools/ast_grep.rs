@@ -1,17 +1,18 @@
-use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::ToolExecutor;
+use super::{ToolCallExt, ToolExecutor};
+use crate::workspace_fs::WorkspaceFs;
 
 /// AST-aware code search tool backed by ast-grep.
 ///
 /// Unlike `search_code` (ripgrep text search), this matches against the
 /// abstract syntax tree so results are structurally accurate.
 pub struct AstGrepSearchTool {
-    workspace_root: PathBuf,
+    fs: Arc<dyn WorkspaceFs>,
 }
 
 /// AST-aware code search-and-replace tool backed by ast-grep.
@@ -19,7 +20,7 @@ pub struct AstGrepSearchTool {
 /// Dry-run by default: returns the proposed changes without applying them.
 /// Set `apply` to `true` to write changes to disk.
 pub struct AstGrepReplaceTool {
-    workspace_root: PathBuf,
+    fs: Arc<dyn WorkspaceFs>,
 }
 
 // ---------------------------------------------------------------------------
@@ -99,20 +100,16 @@ fn is_supported_lang(lang: &str) -> bool {
 
 /// Build the search root path, resolving relative to workspace and
 /// validating it stays inside the workspace.
-fn resolve_search_root(workspace_root: &Path, path: Option<&str>) -> Result<PathBuf, String> {
+fn resolve_search_root(
+    fs: &dyn WorkspaceFs,
+    path: Option<&str>,
+) -> Result<std::path::PathBuf, String> {
     let root = match path.map(str::trim).filter(|p| !p.is_empty()) {
-        Some(p) => workspace_root.join(p),
-        None => workspace_root.to_path_buf(),
+        Some(p) => fs.root().join(p),
+        None => fs.root().to_path_buf(),
     };
-    let canonical_root = workspace_root
-        .canonicalize()
-        .unwrap_or_else(|_| workspace_root.to_path_buf());
-    let canonical = root
-        .canonicalize()
-        .map_err(|err| format!("Failed to resolve path '{path:?}': {err}"))?;
-    if !canonical.starts_with(&canonical_root) {
-        return Err("Path is outside the workspace".into());
-    }
+    // Use resolve (canonicalize) to validate — requires path to exist.
+    fs.resolve(path.unwrap_or(".")).map_err(|e| e.to_string())?;
     Ok(root)
 }
 
@@ -135,9 +132,25 @@ fn make_call_result(
 // ---------------------------------------------------------------------------
 
 impl AstGrepSearchTool {
-    pub fn new(workspace_root: PathBuf) -> Self {
-        Self { workspace_root }
+    pub fn new(fs: Arc<dyn WorkspaceFs>) -> Self {
+        Self { fs }
     }
+}
+
+#[derive(Deserialize)]
+struct SearchParams {
+    pattern: String,
+    lang: String,
+    path: Option<String>,
+    glob: Option<String>,
+    #[serde(default)]
+    context: usize,
+    #[serde(default = "default_max_results")]
+    max_results: usize,
+}
+
+fn default_max_results() -> usize {
+    100
 }
 
 #[async_trait::async_trait]
@@ -184,55 +197,35 @@ impl ToolExecutor for AstGrepSearchTool {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolResult {
-        let pattern = match call.input["pattern"]
-            .as_str()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            Some(p) => p.to_string(),
-            None => {
-                return make_call_result(
-                    &call.id,
-                    false,
-                    String::new(),
-                    Some("pattern is required".into()),
-                );
-            }
+        let p: SearchParams = match call.extract_params() {
+            Ok(p) => p,
+            Err(e) => return e,
         };
 
-        let lang = match call.input["lang"]
-            .as_str()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            Some(l) if is_supported_lang(l) => l.to_string(),
-            Some(l) => {
-                return make_call_result(
-                    &call.id,
-                    false,
-                    String::new(),
-                    Some(format!("unsupported language '{l}'")),
-                );
-            }
-            None => {
-                return make_call_result(
-                    &call.id,
-                    false,
-                    String::new(),
-                    Some("lang is required".into()),
-                );
-            }
+        let pattern = p.pattern.trim().to_string();
+        if pattern.is_empty() {
+            return make_call_result(
+                &call.id,
+                false,
+                String::new(),
+                Some("pattern is required".into()),
+            );
+        }
+
+        let lang = p.lang.trim().to_string();
+        if !is_supported_lang(&lang) {
+            return make_call_result(
+                &call.id,
+                false,
+                String::new(),
+                Some(format!("unsupported language '{lang}'")),
+            );
+        }
+
+        let search_root = match resolve_search_root(&*self.fs, p.path.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return make_call_result(&call.id, false, String::new(), Some(e)),
         };
-
-        let search_root =
-            match resolve_search_root(&self.workspace_root, call.input["path"].as_str()) {
-                Ok(r) => r,
-                Err(e) => return make_call_result(&call.id, false, String::new(), Some(e)),
-            };
-
-        let context = call.input["context"].as_u64().unwrap_or(0) as usize;
-        let max_results = call.input["max_results"].as_u64().unwrap_or(100) as usize;
-        let glob = call.input["glob"].as_str().map(str::to_string);
 
         let mut cmd = tokio::process::Command::new("ast-grep");
         cmd.arg("run")
@@ -242,12 +235,12 @@ impl ToolExecutor for AstGrepSearchTool {
             .arg(&lang)
             .arg("--json=compact")
             .arg(search_root)
-            .current_dir(&self.workspace_root);
+            .current_dir(self.fs.root());
 
-        if context > 0 {
-            cmd.arg(format!("--context={context}"));
+        if p.context > 0 {
+            cmd.arg(format!("--context={}", p.context));
         }
-        if let Some(g) = &glob {
+        if let Some(g) = &p.glob {
             cmd.arg("--glob").arg(g);
         }
 
@@ -264,7 +257,6 @@ impl ToolExecutor for AstGrepSearchTool {
         };
 
         let code = output.status.code().unwrap_or(-1);
-        // ast-grep exits 0 even with no matches, but may exit non-zero on errors
         let stderr = String::from_utf8_lossy(&output.stderr);
         if code != 0 {
             return make_call_result(
@@ -295,7 +287,6 @@ impl ToolExecutor for AstGrepSearchTool {
             );
         }
 
-        // Parse the JSON array from ast-grep
         let raw_matches: Vec<SgMatch> = match serde_json::from_str(&stdout) {
             Ok(m) => m,
             Err(err) => {
@@ -308,8 +299,8 @@ impl ToolExecutor for AstGrepSearchTool {
             }
         };
 
-        let truncated = raw_matches.len() > max_results;
-        let shown = raw_matches.len().min(max_results);
+        let truncated = raw_matches.len() > p.max_results;
+        let shown = raw_matches.len().min(p.max_results);
 
         let matches_json: Vec<Value> = raw_matches[..shown]
             .iter()
@@ -323,7 +314,6 @@ impl ToolExecutor for AstGrepSearchTool {
                 if let Some(lines) = &m.lines {
                     obj["lines"] = serde_json::json!(lines);
                 }
-                // Expose meta-variables for agent context
                 if !m.meta_variables.single.is_empty() {
                     let singles: serde_json::Map<String, Value> = m
                         .meta_variables
@@ -368,9 +358,20 @@ impl ToolExecutor for AstGrepSearchTool {
 // ---------------------------------------------------------------------------
 
 impl AstGrepReplaceTool {
-    pub fn new(workspace_root: PathBuf) -> Self {
-        Self { workspace_root }
+    pub fn new(fs: Arc<dyn WorkspaceFs>) -> Self {
+        Self { fs }
     }
+}
+
+#[derive(Deserialize)]
+struct ReplaceParams {
+    pattern: String,
+    rewrite: String,
+    lang: String,
+    path: Option<String>,
+    glob: Option<String>,
+    #[serde(default)]
+    apply: bool,
 }
 
 #[async_trait::async_trait]
@@ -416,70 +417,45 @@ impl ToolExecutor for AstGrepReplaceTool {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolResult {
-        let pattern = match call.input["pattern"]
-            .as_str()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            Some(p) => p.to_string(),
-            None => {
-                return make_call_result(
-                    &call.id,
-                    false,
-                    String::new(),
-                    Some("pattern is required".into()),
-                );
-            }
+        let p: ReplaceParams = match call.extract_params() {
+            Ok(p) => p,
+            Err(e) => return e,
         };
 
-        let rewrite = match call.input["rewrite"]
-            .as_str()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            Some(r) => r.to_string(),
-            None => {
-                return make_call_result(
-                    &call.id,
-                    false,
-                    String::new(),
-                    Some("rewrite is required".into()),
-                );
-            }
+        let pattern = p.pattern.trim().to_string();
+        if pattern.is_empty() {
+            return make_call_result(
+                &call.id,
+                false,
+                String::new(),
+                Some("pattern is required".into()),
+            );
+        }
+
+        let rewrite = p.rewrite.trim().to_string();
+        if rewrite.is_empty() {
+            return make_call_result(
+                &call.id,
+                false,
+                String::new(),
+                Some("rewrite is required".into()),
+            );
+        }
+
+        let lang = p.lang.trim().to_string();
+        if !is_supported_lang(&lang) {
+            return make_call_result(
+                &call.id,
+                false,
+                String::new(),
+                Some(format!("unsupported language '{lang}'")),
+            );
+        }
+
+        let search_root = match resolve_search_root(&*self.fs, p.path.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return make_call_result(&call.id, false, String::new(), Some(e)),
         };
-
-        let lang = match call.input["lang"]
-            .as_str()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            Some(l) if is_supported_lang(l) => l.to_string(),
-            Some(l) => {
-                return make_call_result(
-                    &call.id,
-                    false,
-                    String::new(),
-                    Some(format!("unsupported language '{l}'")),
-                );
-            }
-            None => {
-                return make_call_result(
-                    &call.id,
-                    false,
-                    String::new(),
-                    Some("lang is required".into()),
-                );
-            }
-        };
-
-        let search_root =
-            match resolve_search_root(&self.workspace_root, call.input["path"].as_str()) {
-                Ok(r) => r,
-                Err(e) => return make_call_result(&call.id, false, String::new(), Some(e)),
-            };
-
-        let apply = call.input["apply"].as_bool().unwrap_or(false);
-        let glob = call.input["glob"].as_str().map(str::to_string);
 
         let mut cmd = tokio::process::Command::new("ast-grep");
         cmd.arg("run")
@@ -491,13 +467,13 @@ impl ToolExecutor for AstGrepReplaceTool {
             .arg(&lang)
             .arg("--json=compact")
             .arg(search_root)
-            .current_dir(&self.workspace_root);
+            .current_dir(self.fs.root());
 
-        if apply {
+        if p.apply {
             cmd.arg("--update-all");
         }
 
-        if let Some(g) = &glob {
+        if let Some(g) = &p.glob {
             cmd.arg("--glob").arg(g);
         }
 
@@ -536,7 +512,7 @@ impl ToolExecutor for AstGrepReplaceTool {
                 serde_json::to_string_pretty(&serde_json::json!({
                     "pattern": pattern,
                     "lang": lang,
-                    "apply": apply,
+                    "apply": p.apply,
                     "total_matches": 0,
                     "changes": []
                 }))
@@ -574,12 +550,12 @@ impl ToolExecutor for AstGrepReplaceTool {
             "pattern": pattern,
             "rewrite": rewrite,
             "lang": lang,
-            "apply": apply,
+            "apply": p.apply,
             "total_matches": raw_matches.len(),
             "changes": changes,
         });
 
-        let note = if apply {
+        let note = if p.apply {
             String::new()
         } else {
             "Dry-run: no files were modified. Set apply=true to write changes.".to_string()
@@ -601,6 +577,7 @@ impl ToolExecutor for AstGrepReplaceTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace_fs::RealFs;
     use tempfile::TempDir;
 
     fn make_search_call(input: serde_json::Value) -> ToolCall {
@@ -619,7 +596,6 @@ mod tests {
         }
     }
 
-    /// Helper: create a minimal Rust file for testing.
     fn write_rs_file(dir: &TempDir, content: &str) {
         std::fs::write(dir.path().join("main.rs"), content).unwrap();
     }
@@ -629,7 +605,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_rs_file(&dir, "fn hello() {}\nfn world() {}\n");
 
-        let tool = AstGrepSearchTool::new(dir.path().to_path_buf());
+        let fs: Arc<dyn WorkspaceFs> = Arc::new(RealFs::new(dir.path().to_path_buf()));
+        let tool = AstGrepSearchTool::new(fs);
         let result = tool
             .execute(&make_search_call(serde_json::json!({
                 "pattern": "fn $NAME($$$) { $$$ }",
@@ -647,7 +624,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_rs_file(&dir, "fn hello() {}\n");
 
-        let tool = AstGrepSearchTool::new(dir.path().to_path_buf());
+        let fs: Arc<dyn WorkspaceFs> = Arc::new(RealFs::new(dir.path().to_path_buf()));
+        let tool = AstGrepSearchTool::new(fs);
         let result = tool
             .execute(&make_search_call(serde_json::json!({
                 "pattern": "class $NAME { $$$ }",
@@ -667,7 +645,8 @@ mod tests {
         let content = "let x = 1;\nlet y = 2;\n";
         write_rs_file(&dir, content);
 
-        let tool = AstGrepReplaceTool::new(dir.path().to_path_buf());
+        let fs: Arc<dyn WorkspaceFs> = Arc::new(RealFs::new(dir.path().to_path_buf()));
+        let tool = AstGrepReplaceTool::new(fs);
         let result = tool
             .execute(&make_replace_call(serde_json::json!({
                 "pattern": "let $A = $B",
@@ -678,7 +657,6 @@ mod tests {
             .await;
 
         assert!(result.success, "replace failed: {:?}", result.error);
-        // File must be unchanged
         let on_disk = std::fs::read_to_string(dir.path().join("main.rs")).unwrap();
         assert_eq!(on_disk, content);
     }
@@ -688,7 +666,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_rs_file(&dir, "fn hello() {}\n");
 
-        let tool = AstGrepSearchTool::new(dir.path().to_path_buf());
+        let fs: Arc<dyn WorkspaceFs> = Arc::new(RealFs::new(dir.path().to_path_buf()));
+        let tool = AstGrepSearchTool::new(fs);
         let result = tool
             .execute(&make_search_call(serde_json::json!({
                 "pattern": "fn $NAME($$$) { $$$ }",
@@ -706,7 +685,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_rs_file(&dir, "fn hello() {}\n");
 
-        let tool = AstGrepSearchTool::new(dir.path().to_path_buf());
+        let fs: Arc<dyn WorkspaceFs> = Arc::new(RealFs::new(dir.path().to_path_buf()));
+        let tool = AstGrepSearchTool::new(fs);
         let result = tool
             .execute(&make_search_call(serde_json::json!({
                 "pattern": "fn $NAME($$$) { $$$ }"
@@ -714,7 +694,13 @@ mod tests {
             .await;
 
         assert!(!result.success);
-        assert!(result.error.unwrap().contains("lang is required"));
+        // extract_params gives a structured error for missing required fields
+        assert!(
+            result
+                .error
+                .as_ref()
+                .map_or(false, |e| e.contains("lang") || e.contains("missing field"))
+        );
     }
 
     #[tokio::test]
@@ -722,7 +708,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_rs_file(&dir, "fn hello() {}\n");
 
-        let tool = AstGrepSearchTool::new(dir.path().to_path_buf());
+        let fs: Arc<dyn WorkspaceFs> = Arc::new(RealFs::new(dir.path().to_path_buf()));
+        let tool = AstGrepSearchTool::new(fs);
         let result = tool
             .execute(&make_search_call(serde_json::json!({
                 "pattern": "fn $NAME($$$) { $$$ }",
