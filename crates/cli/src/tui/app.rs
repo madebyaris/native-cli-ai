@@ -14,8 +14,8 @@ use crate::tui::state::{
 use crossterm::{
     cursor::{Hide, MoveToColumn, Show},
     event::{
-        DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
-        MouseEventKind, poll, read,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind, poll, read,
     },
     execute,
     terminal::{
@@ -1103,6 +1103,7 @@ pub fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
         let mut out = stdout();
         execute!(out, EnterAlternateScreen)?;
         execute!(out, EnableMouseCapture)?;
+        execute!(out, EnableBracketedPaste)?;
         execute!(out, Hide)?;
         execute!(out, Clear(ClearType::All))?;
         Ok(Terminal::new(CrosstermBackend::new(out))?)
@@ -1117,6 +1118,7 @@ pub fn restore_terminal() {
     let mut out = stdout();
     let _ = execute!(out, Show);
     let _ = execute!(out, DisableMouseCapture);
+    let _ = execute!(out, DisableBracketedPaste);
     let _ = execute!(out, LeaveAlternateScreen);
     let _ = disable_raw_mode();
 }
@@ -1211,6 +1213,355 @@ fn truncate_by_columns_skip(text: &str, skip_cols: usize) -> String {
         }
     }
     result
+}
+
+/// Compute the number of flattened transcript lines a single block contributes.
+/// This is a lightweight pass that avoids allocating any `Line`/`Span` — it only
+/// wraps text and counts lines.
+fn block_line_count(block: &DisplayBlock, width: usize) -> usize {
+    let w = width.max(20);
+    match block {
+        DisplayBlock::User(content) => {
+            // 1 header + 1 blank + N wrapped + 1 blank
+            2 + wrap_text(content, w).len() + 1
+        }
+        DisplayBlock::Assistant(content) => {
+            // 1 header + 1 blank + N wrapped + 1 blank
+            2 + wrap_text(content, w).len() + 1
+        }
+        DisplayBlock::Thinking { content, expanded } => {
+            let all = wrap_text(content, w);
+            let total = all.len();
+            let preview = 3usize;
+            let show = if *expanded || total <= preview {
+                total
+            } else {
+                preview
+            };
+            // 1 header + N content + optional toggle + 1 blank
+            let mut n = 1 + show + 1;
+            if total > preview {
+                n += 1;
+            }
+            n
+        }
+        DisplayBlock::ToolRunning { .. } => 1,
+        DisplayBlock::ApprovalPending(req) => {
+            // Header + blank + description wrapped + blank + input label + input wrapped + help + blank
+            2 + wrap_text(&req.description, w).len()
+                + 1
+                + 1
+                + wrap_preformatted_lines_count(&req.input, w)
+                + 1
+                + 1
+        }
+        DisplayBlock::ApprovalResolved { .. } => 2, // label + blank
+        DisplayBlock::ToolDone {
+            name: _,
+            ok: _,
+            detail: _,
+            full_output,
+            expanded,
+        } => {
+            // 1 summary + content lines + optional toggle + 1 blank
+            let all = wrap_text(full_output, w);
+            let total = all.len();
+            let preview = 3usize;
+            let show = if *expanded || total <= preview {
+                total
+            } else {
+                preview
+            };
+            let mut n = 1 + show;
+            if total > preview {
+                n += 1;
+            }
+            n + 1
+        }
+        DisplayBlock::System(_) => 1,
+        DisplayBlock::Question(q) => {
+            // Header + blank + prompt wrapped + suggested + options + custom hint + tip + blank
+            let mut n = 2 + wrap_text(&q.prompt, w).len() + 1 + q.options.len() + 2;
+            if q.allow_custom {
+                n += 1;
+            }
+            n
+        }
+        DisplayBlock::ErrorLine(_) => 1,
+    }
+}
+
+/// Count total lines from preformatted text split by newlines.
+fn wrap_preformatted_lines_count(text: &str, width: usize) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    let mut n = 0usize;
+    for source_line in text.lines() {
+        if source_line.is_empty() {
+            n += 1; // blank line
+        } else {
+            // Count wraps
+            let mut w = 0usize;
+            let mut has_content = false;
+            for ch in source_line.chars() {
+                let cw = char_width(ch);
+                if w + cw > width {
+                    n += 1;
+                    w = 0;
+                }
+                w += cw;
+                has_content = true;
+            }
+            if has_content {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// Total flattened transcript line count (committed blocks only, no streaming).
+fn blocks_total_line_count(blocks: &[DisplayBlock], width: usize) -> usize {
+    blocks.iter().map(|b| block_line_count(b, width)).sum()
+}
+
+/// Total line count including streaming assistant and reasoning lines.
+fn transcript_line_count(state: &TuiSessionState, width: usize) -> usize {
+    let mut n = blocks_total_line_count(&state.blocks, width);
+    let w = width.max(20);
+
+    // Streaming reasoning block
+    if let Some(reasoning) = &state.streaming_reasoning
+        && !reasoning.is_empty()
+    {
+        let all_rl = wrap_text(reasoning, w);
+        let total_rl = all_rl.len();
+        let preview_rl = 5usize;
+        let show_rl = if state.streaming_reasoning_expanded || total_rl <= preview_rl {
+            total_rl
+        } else {
+            preview_rl
+        };
+        // header + content + optional toggle + blank
+        let mut rl = 1 + show_rl + 1;
+        if total_rl > preview_rl {
+            rl += 1;
+        }
+        n += rl;
+    }
+
+    // Streaming assistant block
+    if let Some(stream) = &state.streaming_assistant
+        && !stream.is_empty()
+    {
+        // header + blank + N wrapped
+        n += 2 + wrap_text(stream, w).len();
+    }
+
+    // Empty state fallback
+    if n == 0 && state.blocks.is_empty() {
+        n = 4; // ready line + blank + hints + blank
+    }
+
+    n
+}
+
+/// Build scrollable transcript lines + optional mouse/click targets per line.
+/// Only constructs lines in the `[start, end)` range (0-indexed, exclusive end).
+/// If `start >= end`, returns empty vectors.
+/// Falls back to building all lines if range covers everything (optimisation skip).
+fn transcript_lines_window(
+    state: &TuiSessionState,
+    width: u16,
+    start: usize,
+    end: usize,
+) -> (Vec<Line<'static>>, Vec<LineAnswerHit>) {
+    let w = width.max(20) as usize;
+    let total = transcript_line_count(state, w);
+    if start >= end || start >= total {
+        return (Vec::new(), Vec::new());
+    }
+    // If the window covers everything, just build all (avoids offset overhead).
+    if start == 0 && end >= total {
+        return transcript_lines_and_hits(state, width);
+    }
+
+    // Build all lines then slice — this is still O(total) but we avoid the
+    // double-build in PageUp/PageDown handlers. The real win is that callers
+    // that only need `.len()` now use `transcript_line_count()` instead.
+    // TODO: true per-block virtualization (only build lines for blocks that
+    // overlap [start, end)) — blocked on needing block-level start offsets.
+    let (all_lines, all_hits) = transcript_lines_and_hits(state, width);
+    (
+        all_lines
+            .into_iter()
+            .skip(start)
+            .take(end - start)
+            .collect(),
+        all_hits.into_iter().skip(start).take(end - start).collect(),
+    )
+}
+
+/// Apply text-selection highlighting to visible transcript lines.
+/// `line_offset` is the global line index of `lines[0]`.
+/// If `sel` is `None`, returns the lines unchanged (moves out of the input).
+fn apply_selection_highlight(
+    lines: Vec<Line<'static>>,
+    line_offset: usize,
+    sel: Option<((usize, usize), (usize, usize))>,
+) -> Vec<Line<'static>> {
+    let Some(sel) = sel else {
+        return lines;
+    };
+    let ((sl, sc), (el, ec)) = sel;
+    // Normalise so (lo_line, lo_col) <= (hi_line, hi_col).
+    let (lo_line, lo_col, hi_line, hi_col) = if sl < el || (sl == el && sc <= ec) {
+        (sl, sc, el, ec)
+    } else {
+        (el, ec, sl, sc)
+    };
+
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let global = line_offset + i;
+            // Quick reject: outside the selection range entirely.
+            if global < lo_line || global > hi_line {
+                return line;
+            }
+            let line_width: usize = line.spans.iter().map(|s| s.width()).sum();
+            let sel_start_col = if global == lo_line {
+                lo_col.min(line_width)
+            } else {
+                0
+            };
+            let sel_end_col = if global == hi_line {
+                hi_col.min(line_width)
+            } else {
+                line_width
+            };
+            if sel_start_col >= sel_end_col {
+                return line;
+            }
+
+            let mut highlighted_spans: Vec<Span<'static>> = Vec::new();
+            let mut col_acc: usize = 0;
+            for sp in line.spans {
+                let span_width = sp.width();
+                let span_start = col_acc;
+                let span_end = col_acc + span_width;
+
+                if span_end <= sel_start_col || span_start >= sel_end_col {
+                    highlighted_spans.push(sp);
+                } else if span_start >= sel_start_col && span_end <= sel_end_col {
+                    highlighted_spans.push(Span::styled(
+                        sp.content,
+                        sp.style.bg(theme::USER).fg(Color::Black),
+                    ));
+                } else {
+                    // Partial overlap — split the span.
+                    let content = sp.content.as_ref();
+                    if span_start < sel_start_col && span_end > sel_end_col {
+                        // Three-way split: left(outside) | middle(inside) | right(outside)
+                        let mut tmp_col = span_start;
+                        let left_chars = content
+                            .chars()
+                            .take_while(|c| {
+                                let w = char_width(*c);
+                                if tmp_col < sel_start_col {
+                                    tmp_col += w;
+                                    true
+                                } else {
+                                    false
+                                }
+                            })
+                            .count();
+                        highlighted_spans.push(Span::styled(
+                            content.chars().take(left_chars).collect::<String>(),
+                            sp.style,
+                        ));
+                        let mid_chars = content
+                            .chars()
+                            .skip(left_chars)
+                            .take_while(|c| {
+                                let w = char_width(*c);
+                                if tmp_col < sel_end_col {
+                                    tmp_col += w;
+                                    true
+                                } else {
+                                    false
+                                }
+                            })
+                            .count();
+                        let mid: String =
+                            content.chars().skip(left_chars).take(mid_chars).collect();
+                        if !mid.is_empty() {
+                            highlighted_spans
+                                .push(Span::styled(mid, sp.style.bg(theme::USER).fg(Color::Black)));
+                        }
+                        let right: String = content.chars().skip(left_chars + mid_chars).collect();
+                        if !right.is_empty() {
+                            highlighted_spans.push(Span::styled(right, sp.style));
+                        }
+                    } else if span_start < sel_start_col {
+                        // Selection starts mid-span.
+                        let mut tmp_col = span_start;
+                        let left_chars = content
+                            .chars()
+                            .take_while(|c| {
+                                let w = char_width(*c);
+                                if tmp_col < sel_start_col {
+                                    tmp_col += w;
+                                    true
+                                } else {
+                                    false
+                                }
+                            })
+                            .count();
+                        highlighted_spans.push(Span::styled(
+                            content.chars().take(left_chars).collect::<String>(),
+                            sp.style,
+                        ));
+                        let remaining: String = content.chars().skip(left_chars).collect();
+                        highlighted_spans.push(Span::styled(
+                            remaining,
+                            sp.style.bg(theme::USER).fg(Color::Black),
+                        ));
+                    } else {
+                        // Selection ends mid-span.
+                        let mut tmp_col = span_start;
+                        let inside_chars = content
+                            .chars()
+                            .take_while(|c| {
+                                let w = char_width(*c);
+                                if tmp_col < sel_end_col {
+                                    tmp_col += w;
+                                    true
+                                } else {
+                                    false
+                                }
+                            })
+                            .count();
+                        let inside: String = content.chars().take(inside_chars).collect();
+                        let outside: String = content.chars().skip(inside_chars).collect();
+                        if !inside.is_empty() {
+                            highlighted_spans.push(Span::styled(
+                                inside,
+                                sp.style.bg(theme::USER).fg(Color::Black),
+                            ));
+                        }
+                        if !outside.is_empty() {
+                            highlighted_spans.push(Span::styled(outside, sp.style));
+                        }
+                    }
+                }
+                col_acc += span_width;
+            }
+            Line::from(highlighted_spans)
+        })
+        .collect()
 }
 
 /// Build scrollable transcript lines + optional mouse/click targets per line.
@@ -1966,8 +2317,7 @@ pub fn run_blocking(
 
                 let transcript_h = tr.height.saturating_sub(2) as usize;
                 let inner_w = tr.width.saturating_sub(2);
-                let (lines, _hits) = transcript_lines_and_hits(&g, inner_w);
-                let total = lines.len();
+                let total = transcript_line_count(&g, inner_w as usize);
                 let max_scroll = total.saturating_sub(transcript_h);
                 if g.transcript_follow_tail {
                     g.scroll_lines = max_scroll;
@@ -1977,168 +2327,8 @@ pub fn run_blocking(
                 let start = g.scroll_lines;
                 let end = (start + transcript_h).min(total);
                 let sel = g.transcript_selection; // ((line, col), (line, col)) in global coords
-                let visible: Vec<Line> = if start < end {
-                    lines[start..end]
-                        .iter()
-                        .enumerate()
-                        .map(|(i, line)| {
-                            let global = start + i;
-                            let in_selection = sel
-                                .map(|((sl, sc), (el, ec))| {
-                                    if global < sl || global > el {
-                                        false
-                                    } else if global == sl && global == el {
-                                        // Single line selection: column range matters.
-                                        let lo = sc.min(ec);
-                                        let hi = sc.max(ec);
-                                        lo <= hi // always true, but column check for spans
-                                    } else {
-                                        true
-                                    }
-                                })
-                                .unwrap_or(false);
-                            if in_selection {
-                                let ((sl, sc), (el, ec)) = sel.unwrap();
-                                let (lo_line, lo_col) = if sl < el || (sl == el && sc <= ec) {
-                                    (sl, sc)
-                                } else {
-                                    (el, ec)
-                                };
-                                let (hi_line, hi_col) = if sl < el || (sl == el && sc <= ec) {
-                                    (el, ec)
-                                } else {
-                                    (sl, sc)
-                                };
-                                // Clamp columns to line width.
-                                let line_width: usize = line.spans.iter().map(|s| s.width()).sum();
-                                let sel_start_col = if global == lo_line { lo_col.min(line_width) } else { 0 };
-                                let sel_end_col = if global == hi_line { hi_col.min(line_width) } else { line_width };
-
-                                // Empty column range → no visible highlight on this line.
-                                if sel_start_col >= sel_end_col {
-                                    return line.clone();
-                                }
-
-                                // Build highlighted spans with partial selection support.
-                                let mut highlighted_spans: Vec<Span<'static>> = Vec::new();
-                                let mut col_acc: usize = 0; // running column accumulator (NOT mutated inside closures)
-                                for sp in &line.spans {
-                                    let span_width = sp.width();
-                                    let span_start = col_acc;
-                                    let span_end = col_acc + span_width;
-
-                                    if span_end <= sel_start_col || span_start >= sel_end_col {
-                                        // Span is entirely outside selection.
-                                        highlighted_spans.push(sp.clone());
-                                    } else if span_start >= sel_start_col && span_end <= sel_end_col {
-                                        // Span is entirely inside selection.
-                                        highlighted_spans.push(Span::styled(
-                                            sp.content.clone(),
-                                            sp.style.bg(theme::USER).fg(Color::Black),
-                                        ));
-                                    } else {
-                                        // Span partially overlaps selection — split it.
-                                        let content = sp.content.as_ref();
-                                        if span_start < sel_start_col && span_end > sel_end_col {
-                                            // Selection starts AND ends mid-span: three-way split.
-                                            // left (outside) | middle (inside) | right (outside)
-                                            let mut tmp_col = span_start;
-                                            let left_chars = content.chars().take_while(|c| {
-                                                let w = char_width(*c);
-                                                if tmp_col < sel_start_col {
-                                                    tmp_col += w;
-                                                    true
-                                                } else {
-                                                    false
-                                                }
-                                            }).count();
-                                            highlighted_spans.push(Span::styled(
-                                                content.chars().take(left_chars).collect::<String>(),
-                                                sp.style,
-                                            ));
-                                            let mid_chars = content.chars().skip(left_chars).take_while(|c| {
-                                                let w = char_width(*c);
-                                                if tmp_col < sel_end_col {
-                                                    tmp_col += w;
-                                                    true
-                                                } else {
-                                                    false
-                                                }
-                                            }).count();
-                                            let mid: String = content.chars().skip(left_chars).take(mid_chars).collect();
-                                            if !mid.is_empty() {
-                                                highlighted_spans.push(Span::styled(
-                                                    mid,
-                                                    sp.style.bg(theme::USER).fg(Color::Black),
-                                                ));
-                                            }
-                                            let right: String = content.chars().skip(left_chars + mid_chars).collect();
-                                            if !right.is_empty() {
-                                                highlighted_spans.push(Span::styled(
-                                                    right,
-                                                    sp.style,
-                                                ));
-                                            }
-                                        } else if span_start < sel_start_col {
-                                            // Selection starts mid-span, extends to span end.
-                                            let mut tmp_col = span_start;
-                                            let left_chars = content.chars().take_while(|c| {
-                                                let w = char_width(*c);
-                                                if tmp_col < sel_start_col {
-                                                    tmp_col += w;
-                                                    true
-                                                } else {
-                                                    false
-                                                }
-                                            }).count();
-                                            highlighted_spans.push(Span::styled(
-                                                content.chars().take(left_chars).collect::<String>(),
-                                                sp.style,
-                                            ));
-                                            let remaining: String = content.chars().skip(left_chars).collect();
-                                            highlighted_spans.push(Span::styled(
-                                                remaining,
-                                                sp.style.bg(theme::USER).fg(Color::Black),
-                                            ));
-                                        } else {
-                                            // Selection ends mid-span: left=inside, right=outside.
-                                            let mut tmp_col = span_start;
-                                            let inside_chars = content.chars().take_while(|c| {
-                                                let w = char_width(*c);
-                                                if tmp_col < sel_end_col {
-                                                    tmp_col += w;
-                                                    true
-                                                } else {
-                                                    false
-                                                }
-                                            }).count();
-                                            let inside: String = content.chars().take(inside_chars).collect();
-                                            let outside: String = content.chars().skip(inside_chars).collect();
-                                            if !inside.is_empty() {
-                                                highlighted_spans.push(Span::styled(
-                                                    inside,
-                                                    sp.style.bg(theme::USER).fg(Color::Black),
-                                                ));
-                                            }
-                                            if !outside.is_empty() {
-                                                highlighted_spans.push(Span::styled(
-                                                    outside,
-                                                    sp.style,
-                                                ));
-                                            }
-                                        }
-                                    }
-                                    col_acc += span_width;
-                                }
-                                Line::from(highlighted_spans)
-                            } else {
-                                line.clone()
-                            }
-                        })
-                        .collect()
-                } else {
-                    vec![]
-                };
+                let (visible_lines, _visible_hits) = transcript_lines_window(&g, inner_w, start, end);
+                let visible = apply_selection_highlight(visible_lines, start, sel);
 
                 let title = format!(
                     " transcript — {} lines (↑↓ wheel · End bottom) ",
@@ -3457,8 +3647,7 @@ pub fn run_blocking(
 
                     if rect_contains(tr, m.column, m.row) {
                         let inner_w = tr.width.saturating_sub(2);
-                        let (lines, hits) = transcript_lines_and_hits(&g, inner_w);
-                        let total = lines.len();
+                        let total = transcript_line_count(&g, inner_w as usize);
                         let th = tr.height.saturating_sub(2) as usize;
                         let max_scroll = total.saturating_sub(th);
                         // Clamp scroll offset to keep gline in bounds even when the
@@ -3476,6 +3665,10 @@ pub fn run_blocking(
                             None
                         };
                         let gline = row_in_area.filter(|r| *r < th).map(|r| g.scroll_lines + r);
+                        // Build only the visible window for hit-testing.
+                        let vis_start = g.scroll_lines;
+                        let vis_end = (vis_start + th).min(total);
+                        let (_, hits) = transcript_lines_window(&g, inner_w, vis_start, vis_end);
                         // Column within the text area (0-indexed, excluding border).
                         let gcol = m.column.saturating_sub(tr.x).saturating_sub(1) as usize;
 
@@ -3498,8 +3691,9 @@ pub fn run_blocking(
                             MouseEventKind::Down(MouseButton::Left) => {
                                 if let Some(gl) = gline {
                                     // Handle transcript hit: toggle thinking or answer question.
-                                    if gl < hits.len() {
-                                        match &hits[gl] {
+                                    let local_idx = gl.saturating_sub(vis_start);
+                                    if local_idx < hits.len() {
+                                        match &hits[local_idx] {
                                             Some(TranscriptHit::ToggleThinking(block_idx)) => {
                                                 if let Some(DisplayBlock::Thinking {
                                                     expanded,
@@ -3621,8 +3815,10 @@ pub fn run_blocking(
                                     let (sl, sc) = sel_start;
                                     let (el, ec) = sel_end;
                                     if sl < el || (sl == el && sc != ec) {
+                                        // Fetch full lines for clipboard copy.
+                                        let all_lines = transcript_lines(&g, inner_w);
                                         let text =
-                                            plain_text_from_lines(&lines, sel_start, sel_end);
+                                            plain_text_from_lines(&all_lines, sel_start, sel_end);
                                         let n = text.trim_end_matches('\n').chars().count();
                                         match crate::image_attach::copy_text_to_clipboard(&text) {
                                             Ok(()) => {
@@ -3690,6 +3886,27 @@ pub fn run_blocking(
                     {
                         let _ = cmd_tx.send(TuiCmd::OpenBranchPicker);
                     }
+                }
+                Event::Paste(text)
+                    if !g.command_palette_open
+                        && !g.info_modal_open
+                        && !g.model_picker_open
+                        && !g.connect_modal_open
+                        && !g.api_key_modal_open
+                        && !g.branch_picker_open
+                        && !g.permission_picker_open
+                        && !g.agent_picker_open
+                        && !g.session_picker_open =>
+                {
+                    // Batch-insert pasted text (may contain newlines) into composer buffer.
+                    // This is gated by EnableBracketedPaste so terminals send the bracketed
+                    // paste escape sequence instead of individual Enter keypresses.
+                    g.history_reset();
+                    let idx = g.cursor_char_idx;
+                    let mut cs: Vec<char> = g.input_buffer.chars().collect();
+                    cs.splice(idx..idx, text.chars());
+                    g.input_buffer = cs.into_iter().collect();
+                    g.cursor_char_idx += text.chars().count();
                 }
                 Event::Key(key) => {
                     if g.command_palette_open {
@@ -4520,8 +4737,10 @@ pub fn run_blocking(
                                         sh,
                                         input_area_content_rows(&g.input_buffer, main_area.width),
                                     );
-                                    let total =
-                                        transcript_lines(&g, tr.width.saturating_sub(2)).len();
+                                    let total = transcript_line_count(
+                                        &g,
+                                        tr.width.saturating_sub(2) as usize,
+                                    );
                                     let th = tr.height.saturating_sub(2) as usize;
                                     let max_scroll = total.saturating_sub(th);
                                     g.transcript_follow_tail = true;
@@ -4598,7 +4817,8 @@ pub fn run_blocking(
                                     sh,
                                     input_area_content_rows(&g.input_buffer, main_area.width),
                                 );
-                                let total = transcript_lines(&g, tr.width.saturating_sub(2)).len();
+                                let total =
+                                    transcript_line_count(&g, tr.width.saturating_sub(2) as usize);
                                 let th = tr.height.saturating_sub(2) as usize;
                                 let max_scroll = total.saturating_sub(th);
                                 let page = th.saturating_sub(1).max(1);
@@ -4625,7 +4845,8 @@ pub fn run_blocking(
                                     sh,
                                     input_area_content_rows(&g.input_buffer, main_area.width),
                                 );
-                                let total = transcript_lines(&g, tr.width.saturating_sub(2)).len();
+                                let total =
+                                    transcript_line_count(&g, tr.width.saturating_sub(2) as usize);
                                 let th = tr.height.saturating_sub(2) as usize;
                                 let max_scroll = total.saturating_sub(th);
                                 let page = th.saturating_sub(1).max(1);

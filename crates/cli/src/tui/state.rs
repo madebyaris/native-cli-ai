@@ -766,11 +766,9 @@ impl TuiSessionState {
             }
             AgentEvent::Error { message } => {
                 self.blocks.push(DisplayBlock::ErrorLine(message.clone()));
-                if message.to_ascii_lowercase().contains("run cancelled") {
-                    self.set_busy_state(BusyState::Idle);
-                } else {
-                    self.set_busy_state(BusyState::Error);
-                }
+                // All error events signal the current turn has ended — transition
+                // to Idle so the composer is ready for the next user input.
+                self.set_busy_state(BusyState::Idle);
             }
             AgentEvent::Checkpoint { .. } => {}
             AgentEvent::ChildSessionSpawned {
