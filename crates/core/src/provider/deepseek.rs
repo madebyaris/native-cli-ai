@@ -1,151 +1,21 @@
-//! DeepSeek provider with cache-first prefix stability design.
-//!
-//! ## Token-saving strategies (from DeepSeek-Reasonix)
-//!
-//! ### 1. Reasoning content stripping
-//! `reasoning_content` (thinking chain) is a **response-only signal** from DeepSeek's
-//! reasoning models. Re-uploading it in subsequent requests:
-//! - Costs ~500 extra billable prompt-input tokens per turn
-//! - Breaks the prefix cache (see below)
-//!
-//! Empirically verified: multi-turn tool-call sessions work fine without it.
-//!
-//! ### 2. Cache-first prefix stability
-//! DeepSeek caches request prefixes at 64-token block granularity. Cached tokens
-//! cost ~1/50 of normal input. To maximize cache hits, the prefix (system prompt +
-//! tools + all prior turns) must remain **byte-stable** across turns.
-//!
-//! NCA's architecture already supports this: the system prompt is assembled once at
-//! session start via `build_system_prompt()` and set via `set_system_prompt()`.
-//! Each turn only **appends** new messages. The prefix never mutates.
-//!
-//! This provider's `prepare_messages_for_request` enforces both invariants:
-//! - Strips `reasoning_content` from all assistant messages (saves tokens + protects cache)
-//! - Validates the system prompt is still present and untouched (cache integrity)
-
-use std::path::Path;
-
-use nca_common::config::{DeepSeekConfig, NcaConfig};
-use nca_common::message::Message;
-use nca_common::tool::ToolDefinition;
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
-
-use super::openai_compat::{map_provider_error, openai_request_body, spawn_openai_stream};
-use super::{Provider, ProviderError, StreamChunk};
-
-pub struct DeepSeekProvider {
-    client: reqwest::Client,
-    config: DeepSeekConfig,
-    max_tokens: u32,
-}
-
-impl DeepSeekProvider {
-    pub fn from_config(config: &NcaConfig) -> Result<Self, ProviderError> {
-        let deepseek = config.provider.deepseek.clone();
-        let api_key = deepseek.resolve_api_key().ok_or_else(|| {
-            ProviderError::Configuration(format!(
-                "missing DeepSeek API key; set {} or provide `provider.deepseek.api_key` in config",
-                deepseek.api_key_env
-            ))
-        })?;
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|err| {
-                ProviderError::Configuration(format!(
-                    "failed to build DeepSeek authorization header: {err}"
-                ))
-            })?,
-        );
-
-        let client = reqwest::Client::builder()
-            .default_headers(headers)
-            .build()
-            .map_err(|err| {
-                ProviderError::Configuration(format!("failed to build HTTP client: {err}"))
-            })?;
-
-        Ok(Self {
-            client,
-            config: deepseek,
-            max_tokens: config.model.max_tokens,
-        })
-    }
-
-    fn endpoint(&self) -> String {
-        format!(
-            "{}/chat/completions",
-            self.config.base_url.trim_end_matches('/')
-        )
-    }
-}
-
-#[async_trait::async_trait]
-impl Provider for DeepSeekProvider {
-    /// Cache-first: strip reasoning_content to save ~500 tokens/turn and keep
-    /// the prefix byte-stable (reasoning changes each turn, so including it
-    /// would invalidate the entire cached prefix for all prior turns).
-    async fn prepare_messages_for_request(
-        &self,
-        messages: &mut Vec<Message>,
-        _workspace_root: &Path,
-    ) -> Result<(), ProviderError> {
-        // Strip reasoning_content from all assistant messages.
-        // This is response-only data; re-uploading is billable prompt input.
-        for msg in messages.iter_mut() {
-            msg.reasoning_content = None;
-        }
-        Ok(())
-    }
-
-    async fn chat(
-        &self,
-        messages: &[Message],
-        tools: &[ToolDefinition],
-        model: &str,
-        workspace_root: &Path,
-    ) -> Result<tokio::sync::mpsc::Receiver<StreamChunk>, ProviderError> {
-        let model = if model.is_empty() {
-            self.config.model.clone()
-        } else {
-            model.to_string()
-        };
-
-        let body = openai_request_body(
-            messages,
-            tools,
-            &model,
-            self.max_tokens,
-            self.config.temperature,
-            workspace_root,
-        )?;
-
-        let response = self
-            .client
-            .post(self.endpoint())
-            .json(&body)
-            .send()
-            .await
-            .map_err(|err| ProviderError::RequestFailed(err.to_string()))?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body_text = response.text().await.unwrap_or_default();
-            return Err(map_provider_error(status, body_text));
-        }
-
-        Ok(spawn_openai_stream(response, "deepseek"))
-    }
-}
+//! Tests for the DeepSeek provider (now served by `OpenAiCompatProvider` with strip_reasoning).
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::provider::openai_compat::{CompatProfile, OpenAiCompatProvider};
     use crate::provider::test_support::{collect_chunks, spawn_sse_server};
+    use crate::provider::{Provider, StreamChunk};
+    use nca_common::config::NcaConfig;
     use nca_common::message::Message;
     use nca_common::tool::ToolDefinition;
     use serde_json::json;
+    use std::path::Path;
+
+    const DEEPSEEK_PROFILE: CompatProfile = CompatProfile {
+        name: "deepseek",
+        endpoint_suffix: "chat/completions",
+        strip_reasoning: true,
+    };
 
     #[tokio::test]
     async fn deepseek_provider_streams_text_tool_and_usage() {
@@ -172,7 +42,13 @@ mod tests {
         config.provider.deepseek.api_key = Some("deepseek-test-key".into());
         config.provider.deepseek.base_url = base_url;
 
-        let provider = DeepSeekProvider::from_config(&config).expect("provider");
+        let provider = OpenAiCompatProvider::from_config(
+            &config.provider.deepseek,
+            config.model.max_tokens,
+            DEEPSEEK_PROFILE,
+            reqwest::header::HeaderMap::new(),
+        )
+        .expect("provider");
         let stream = provider
             .chat(
                 &[Message::user("hello")],
@@ -187,7 +63,7 @@ mod tests {
                     }),
                 }],
                 "",
-                std::path::Path::new("."),
+                Path::new("."),
             )
             .await
             .expect("chat stream");
@@ -212,7 +88,13 @@ mod tests {
     async fn prepare_strips_reasoning_content() {
         let mut config = NcaConfig::default();
         config.provider.deepseek.api_key = Some("test".into());
-        let provider = DeepSeekProvider::from_config(&config).expect("provider");
+        let provider = OpenAiCompatProvider::from_config(
+            &config.provider.deepseek,
+            config.model.max_tokens,
+            DEEPSEEK_PROFILE,
+            reqwest::header::HeaderMap::new(),
+        )
+        .expect("provider");
 
         let mut messages = vec![
             Message::user("hello"),

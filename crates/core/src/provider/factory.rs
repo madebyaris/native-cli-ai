@@ -1,22 +1,88 @@
 use nca_common::config::{NcaConfig, ProviderKind};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use super::anthropic::AnthropicProvider;
-use super::deepseek::DeepSeekProvider;
 use super::minimax::MiniMaxProvider;
-use super::openai::OpenAiProvider;
-use super::openrouter::OpenRouterProvider;
-use super::zhipuai::ZhipuAIProvider;
+use super::openai_compat::{CompatProfile, OpenAiCompatProvider};
 use super::{Provider, ProviderError};
+
+const OPENAI_PROFILE: CompatProfile = CompatProfile {
+    name: "OpenAI",
+    endpoint_suffix: "v1/chat/completions",
+    strip_reasoning: false,
+};
+
+const OPENROUTER_PROFILE: CompatProfile = CompatProfile {
+    name: "OpenRouter",
+    endpoint_suffix: "v1/chat/completions",
+    strip_reasoning: false,
+};
+
+const ZHIPUAI_PROFILE: CompatProfile = CompatProfile {
+    name: "ZhipuAI",
+    endpoint_suffix: "chat/completions",
+    strip_reasoning: false,
+};
+
+const DEEPSEEK_PROFILE: CompatProfile = CompatProfile {
+    name: "DeepSeek",
+    endpoint_suffix: "chat/completions",
+    strip_reasoning: true,
+};
 
 /// Build the configured provider for the current workspace.
 pub fn build_provider(config: &NcaConfig) -> Result<Box<dyn Provider>, ProviderError> {
     match config.provider.default {
         ProviderKind::MiniMax => Ok(Box::new(MiniMaxProvider::from_config(config)?)),
-        ProviderKind::OpenRouter => Ok(Box::new(OpenRouterProvider::from_config(config)?)),
+        ProviderKind::OpenRouter => {
+            let mut extra = HeaderMap::new();
+            if let Some(url) = &config.provider.openrouter.site_url {
+                let _ = extra.insert(
+                    HeaderName::from_static("http-referer"),
+                    HeaderValue::from_str(url).unwrap(),
+                );
+            }
+            if let Some(name) = &config.provider.openrouter.app_name {
+                let _ = extra.insert(
+                    HeaderName::from_static("x-title"),
+                    HeaderValue::from_str(name).unwrap(),
+                );
+            }
+            Ok(Box::new(OpenAiCompatProvider::from_config(
+                &config.provider.openrouter,
+                config.model.max_tokens,
+                OPENROUTER_PROFILE,
+                extra,
+            )?))
+        }
         ProviderKind::Anthropic => Ok(Box::new(AnthropicProvider::from_config(config)?)),
-        ProviderKind::OpenAi => Ok(Box::new(OpenAiProvider::from_config(config)?)),
-        ProviderKind::ZhipuAI => Ok(Box::new(ZhipuAIProvider::from_config(config)?)),
-        ProviderKind::DeepSeek => Ok(Box::new(DeepSeekProvider::from_config(config)?)),
+        ProviderKind::OpenAi => {
+            let extra = HeaderMap::new();
+            Ok(Box::new(OpenAiCompatProvider::from_config(
+                &config.provider.openai,
+                config.model.max_tokens,
+                OPENAI_PROFILE,
+                extra,
+            )?))
+        }
+        ProviderKind::ZhipuAI => {
+            let extra = HeaderMap::new();
+            Ok(Box::new(OpenAiCompatProvider::from_config(
+                &config.provider.zhipuai,
+                config.model.max_tokens,
+                ZHIPUAI_PROFILE,
+                extra,
+            )?))
+        }
+        ProviderKind::DeepSeek => {
+            let extra = HeaderMap::new();
+            Ok(Box::new(OpenAiCompatProvider::from_config(
+                &config.provider.deepseek,
+                config.model.max_tokens,
+                DEEPSEEK_PROFILE,
+                extra,
+            )?))
+        }
     }
 }
 

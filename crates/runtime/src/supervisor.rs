@@ -997,19 +997,11 @@ fn map_child_event_for_parent_broadcast(
 pub fn spawn_event_fanout(
     mut event_rx: mpsc::Receiver<AgentEvent>,
     log_path: PathBuf,
-    ipc_handle: Option<IpcHandle>,
+    ipc_tx: Option<tokio::sync::broadcast::Sender<String>>,
     on_event: Option<EventFanoutCallback>,
     parent_forward: Option<(String, mpsc::Sender<AgentEvent>)>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let (event_tx, _command_rx) = match ipc_handle {
-            Some(h) => {
-                let (etx, crx) = h.into_parts();
-                (Some(etx), Some(crx))
-            }
-            None => (None, None),
-        };
-
         let mut log_file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -1026,7 +1018,7 @@ pub fn spawn_event_fanout(
                 let _ = ptx.send(fwd).await;
             }
             let envelope = EventEnvelope::new(event_id, event);
-            if let Some(ref tx) = event_tx {
+            if let Some(ref tx) = ipc_tx {
                 let line = serde_json::to_string(&envelope).unwrap_or_default();
                 let _ = tx.send(line);
             }

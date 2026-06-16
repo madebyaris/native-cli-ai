@@ -1,3 +1,6 @@
+use super::{Provider, ProviderError, StreamChunk};
+
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
@@ -5,9 +8,6 @@ use futures_util::StreamExt;
 use nca_common::message::{ContentPart, Message, MessageContent, Role};
 use nca_common::tool::{ToolCall, ToolDefinition};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
-
-use super::{ProviderError, StreamChunk};
 
 pub fn openai_request_body(
     messages: &[Message],
@@ -341,6 +341,141 @@ fn to_openai_messages(
     }
 
     Ok(out)
+}
+
+/// Static profile describing the unique aspects of an OpenAI-compatible provider.
+pub struct CompatProfile {
+    /// Human-readable provider name (for error messages and stream labels).
+    pub name: &'static str,
+    /// Provider-specific endpoint suffix appended to base_url.
+    pub endpoint_suffix: &'static str,
+    /// Whether prepare_messages_for_request should strip reasoning_content.
+    pub strip_reasoning: bool,
+}
+
+/// Generic OpenAI-compatible provider parameterized by a CompatProfile.
+pub struct OpenAiCompatProvider {
+    client: reqwest::Client,
+    name: &'static str,
+    model: String,
+    max_tokens: u32,
+    temperature: f32,
+    base_url: String,
+    endpoint_suffix: &'static str,
+    strip_reasoning: bool,
+}
+
+impl OpenAiCompatProvider {
+    pub fn from_config(
+        compat: &dyn nca_common::config::OpenAiCompatConfig,
+        max_tokens: u32,
+        profile: CompatProfile,
+        extra_headers: reqwest::header::HeaderMap,
+    ) -> Result<Self, ProviderError> {
+        let api_key = compat.resolve_api_key().ok_or_else(|| {
+            ProviderError::Configuration(format!(
+                "missing {} API key; set {} or provide in config",
+                profile.name,
+                compat.api_key_env()
+            ))
+        })?;
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(
+                |err| {
+                    ProviderError::Configuration(format!(
+                        "failed to build {} authorization header: {err}",
+                        profile.name
+                    ))
+                },
+            )?,
+        );
+        // Merge any extra headers (e.g. OpenRouter's http-referer, x-title).
+        headers.extend(extra_headers);
+
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .map_err(|err| {
+                ProviderError::Configuration(format!("failed to build HTTP client: {err}"))
+            })?;
+
+        Ok(Self {
+            client,
+            name: profile.name,
+            model: compat.model().to_string(),
+            max_tokens,
+            temperature: compat.temperature(),
+            base_url: compat.base_url().to_string(),
+            endpoint_suffix: profile.endpoint_suffix,
+            strip_reasoning: profile.strip_reasoning,
+        })
+    }
+
+    fn endpoint(&self) -> String {
+        format!(
+            "{}/{}",
+            self.base_url.trim_end_matches('/'),
+            self.endpoint_suffix
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for OpenAiCompatProvider {
+    async fn prepare_messages_for_request(
+        &self,
+        messages: &mut Vec<Message>,
+        _workspace_root: &Path,
+    ) -> Result<(), ProviderError> {
+        if self.strip_reasoning {
+            for msg in messages.iter_mut() {
+                msg.reasoning_content = None;
+            }
+        }
+        Ok(())
+    }
+
+    async fn chat(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        model: &str,
+        workspace_root: &Path,
+    ) -> Result<tokio::sync::mpsc::Receiver<StreamChunk>, ProviderError> {
+        let model = if model.is_empty() {
+            self.model.clone()
+        } else {
+            model.to_string()
+        };
+
+        let body = openai_request_body(
+            messages,
+            tools,
+            &model,
+            self.max_tokens,
+            self.temperature,
+            workspace_root,
+        )?;
+
+        let response = self
+            .client
+            .post(self.endpoint())
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| ProviderError::RequestFailed(err.to_string()))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(map_provider_error(status, body_text));
+        }
+
+        Ok(spawn_openai_stream(response, self.name))
+    }
 }
 
 #[cfg(test)]

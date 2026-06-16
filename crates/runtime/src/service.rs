@@ -1,9 +1,9 @@
 use crate::supervisor::{
     SessionControlCommand, Supervisor, SupervisorConfig, spawn_command_consumer_with_store,
-    spawn_subagent_consumer,
+    spawn_event_fanout, spawn_subagent_consumer,
 };
 use nca_common::config::NcaConfig;
-use nca_common::event::{AgentEvent, EndReason, EventEnvelope};
+use nca_common::event::EndReason;
 use nca_common::session::OrchestrationContext;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -142,8 +142,13 @@ async fn run_service_session_with_startup(
         command_rx = Some(crx);
     }
 
-    let fanout_task =
-        spawn_service_event_fanout(event_rx, info.event_log_path.clone(), event_tx_ipc);
+    let fanout_task = spawn_event_fanout(
+        event_rx,
+        info.event_log_path.clone(),
+        event_tx_ipc,
+        None,
+        None,
+    );
 
     let subagent_task = if let Some(spawn_rx) = handle.take_spawn_rx() {
         Some(spawn_subagent_consumer(
@@ -246,39 +251,4 @@ async fn run_service_session_with_startup(
         task.abort();
     }
     Ok(())
-}
-
-fn spawn_service_event_fanout(
-    mut event_rx: tokio::sync::mpsc::Receiver<AgentEvent>,
-    log_path: PathBuf,
-    event_tx_ipc: Option<tokio::sync::broadcast::Sender<String>>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        use tokio::fs::OpenOptions;
-        use tokio::io::AsyncWriteExt;
-
-        let mut log_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .await
-            .ok();
-
-        let mut event_id: u64 = 0;
-        while let Some(event) = event_rx.recv().await {
-            event_id += 1;
-            let envelope = EventEnvelope::new(event_id, event);
-            if let Some(ref tx) = event_tx_ipc {
-                let line = serde_json::to_string(&envelope).unwrap_or_default();
-                let _ = tx.send(line);
-            }
-
-            if let Some(file) = log_file.as_mut()
-                && let Ok(line) = serde_json::to_string(&envelope)
-            {
-                let _ = file.write_all(line.as_bytes()).await;
-                let _ = file.write_all(b"\n").await;
-            }
-        }
-    })
 }

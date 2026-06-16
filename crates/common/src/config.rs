@@ -1089,6 +1089,88 @@ impl DeepSeekConfig {
     }
 }
 
+/// Common interface for OpenAI-compatible provider configs.
+/// Shared by OpenAiConfig, OpenRouterConfig, ZhipuAIConfig, DeepSeekConfig.
+pub trait OpenAiCompatConfig {
+    fn resolve_api_key(&self) -> Option<String>;
+    fn api_key_env(&self) -> &str;
+    fn base_url(&self) -> &str;
+    fn model(&self) -> &str;
+    fn temperature(&self) -> f32;
+}
+
+impl OpenAiCompatConfig for OpenAiConfig {
+    fn resolve_api_key(&self) -> Option<String> {
+        self.resolve_api_key()
+    }
+    fn api_key_env(&self) -> &str {
+        &self.api_key_env
+    }
+    fn base_url(&self) -> &str {
+        &self.base_url
+    }
+    fn model(&self) -> &str {
+        &self.model
+    }
+    fn temperature(&self) -> f32 {
+        self.temperature
+    }
+}
+
+impl OpenAiCompatConfig for OpenRouterConfig {
+    fn resolve_api_key(&self) -> Option<String> {
+        self.resolve_api_key()
+    }
+    fn api_key_env(&self) -> &str {
+        &self.api_key_env
+    }
+    fn base_url(&self) -> &str {
+        &self.base_url
+    }
+    fn model(&self) -> &str {
+        &self.model
+    }
+    fn temperature(&self) -> f32 {
+        self.temperature
+    }
+}
+
+impl OpenAiCompatConfig for ZhipuAIConfig {
+    fn resolve_api_key(&self) -> Option<String> {
+        self.resolve_api_key()
+    }
+    fn api_key_env(&self) -> &str {
+        &self.api_key_env
+    }
+    fn base_url(&self) -> &str {
+        &self.base_url
+    }
+    fn model(&self) -> &str {
+        &self.model
+    }
+    fn temperature(&self) -> f32 {
+        self.temperature
+    }
+}
+
+impl OpenAiCompatConfig for DeepSeekConfig {
+    fn resolve_api_key(&self) -> Option<String> {
+        self.resolve_api_key()
+    }
+    fn api_key_env(&self) -> &str {
+        &self.api_key_env
+    }
+    fn base_url(&self) -> &str {
+        &self.base_url
+    }
+    fn model(&self) -> &str {
+        &self.model
+    }
+    fn temperature(&self) -> f32 {
+        self.temperature
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
     /// Active model name �� always derived from `provider.active_model()`, never persisted.
