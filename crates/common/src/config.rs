@@ -310,7 +310,7 @@ impl NcaConfig {
             "openai" | "gpt" | "gpt4o" | "gpt4omini" => Some(ProviderKind::OpenAi),
             "claude" | "claude-sonnet" => Some(ProviderKind::Anthropic),
             "openrouter" => Some(ProviderKind::OpenRouter),
-            "zhipuai" | "glm" | "glm5" => Some(ProviderKind::ZhipuAI),
+            "zhipuai" | "glm" | "glm5" | "glm-5.2" => Some(ProviderKind::ZhipuAI),
             "deepseek" | "ds" | "deepseek-v4" | "dsv4" | "dsv4p" | "deepseek-v3" | "dsv3"
             | "deepseek-r1" | "dsr1" => Some(ProviderKind::DeepSeek),
             _ => None,
@@ -767,7 +767,7 @@ impl ProviderKind {
             "openai" | "open-ai" | "gpt" => Some(Self::OpenAi),
             "anthropic" | "claude" => Some(Self::Anthropic),
             "openrouter" | "open-router" => Some(Self::OpenRouter),
-            "zhipuai" | "zhipu" | "glm" | "glm-5" => Some(Self::ZhipuAI),
+            "zhipuai" | "zhipu" | "glm" | "glm-5" | "glm-5.2" => Some(Self::ZhipuAI),
             "deepseek" => Some(Self::DeepSeek),
             _ => None,
         }
@@ -1014,7 +1014,7 @@ impl Default for ZhipuAIConfig {
             api_key_env: "ZHIPUAI_API_KEY".into(),
             api_key: None,
             base_url: "https://open.bigmodel.cn/api/coding/paas/v4".into(),
-            model: "glm-5-turbo".into(),
+            model: "glm-5.2".into(),
             temperature: 0.7,
         }
     }
@@ -1264,6 +1264,11 @@ impl Default for SessionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HarnessConfig {
     pub built_in_enabled: bool,
+    /// Path to a global instructions file (e.g. `~/.nca/AGENTS.md`).
+    /// Loaded before the workspace `AGENTS.md`, shared across all projects.
+    /// Supports `~` expansion to `$HOME`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global_instructions_path: Option<PathBuf>,
     pub project_instructions_path: PathBuf,
     pub local_instructions_path: PathBuf,
     pub skill_directories: Vec<PathBuf>,
@@ -1423,6 +1428,7 @@ impl Default for HarnessConfig {
     fn default() -> Self {
         Self {
             built_in_enabled: true,
+            global_instructions_path: None,
             project_instructions_path: PathBuf::from(".ncarc"),
             local_instructions_path: PathBuf::from(".nca/instructions.md"),
             skill_directories: default_skill_directories(),
@@ -1441,9 +1447,19 @@ impl HarnessConfig {
         if let Some(path) = partial.local_instructions_path {
             self.local_instructions_path = path;
         }
+        if let Some(global_instructions_path) = partial.global_instructions_path {
+            self.global_instructions_path = Some(global_instructions_path);
+        }
         if let Some(skill_directories) = partial.skill_directories {
             self.skill_directories = skill_directories;
         }
+    }
+
+    /// Expand `~` at the start of the path to `$HOME`.
+    /// Returns the path unchanged if `~` expansion is not applicable.
+    pub fn resolve_global_instructions_path(&self) -> Option<PathBuf> {
+        let raw = self.global_instructions_path.as_ref()?;
+        Some(expand_tilde(raw))
     }
 }
 
@@ -1685,6 +1701,7 @@ struct PartialSessionConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 struct PartialHarnessConfig {
     built_in_enabled: Option<bool>,
+    global_instructions_path: Option<PathBuf>,
     project_instructions_path: Option<PathBuf>,
     local_instructions_path: Option<PathBuf>,
     skill_directories: Option<Vec<PathBuf>>,
@@ -1756,9 +1773,10 @@ fn default_model_aliases() -> BTreeMap<String, String> {
         ("claude".into(), "claude-3-7-sonnet-latest".into()),
         ("claude-sonnet".into(), "claude-3-7-sonnet-latest".into()),
         ("openrouter".into(), "openai/gpt-4o-mini".into()),
-        ("zhipuai".into(), "glm-5-turbo".into()),
-        ("glm".into(), "glm-5-turbo".into()),
-        ("glm5".into(), "glm-5-turbo".into()),
+        ("zhipuai".into(), "glm-5.2".into()),
+        ("glm".into(), "glm-5.2".into()),
+        ("glm5".into(), "glm-5.2".into()),
+        ("glm-5.2".into(), "glm-5.2".into()),
         ("deepseek".into(), "deepseek-v4-flash".into()),
         ("ds".into(), "deepseek-v4-flash".into()),
         ("deepseek-v4".into(), "deepseek-v4-flash".into()),
@@ -1785,6 +1803,18 @@ fn default_skill_directories() -> Vec<PathBuf> {
         PathBuf::from(".nca/skills"),
         PathBuf::from(".claude/skills"),
     ]
+}
+
+/// Expand a leading `~` to `$HOME`. Returns the path unchanged if no `~` prefix
+/// or if `$HOME` is not set.
+fn expand_tilde(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix("~/")
+        && let Ok(home) = env::var("HOME")
+    {
+        return PathBuf::from(format!("{home}/{rest}"));
+    }
+    path.to_path_buf()
 }
 
 #[cfg(test)]
@@ -1818,7 +1848,7 @@ mod tests {
     #[test]
     fn apply_model_override_switches_provider_for_cross_provider_alias() {
         // Regression: selecting "glm" while DeepSeek is active must switch to
-        // ZhipuAI instead of setting DeepSeek's model to glm-5-turbo.
+        // ZhipuAI instead of setting DeepSeek's model to glm-5.2.
         let mut config = NcaConfig::default();
         config.provider.default = ProviderKind::DeepSeek;
         config.sync_default_model_from_provider();
@@ -1827,8 +1857,8 @@ mod tests {
         config.apply_model_override("glm");
 
         assert_eq!(config.provider.default, ProviderKind::ZhipuAI);
-        assert_eq!(config.provider.zhipuai.model, "glm-5-turbo");
-        assert_eq!(config.model.default_model, "glm-5-turbo");
+        assert_eq!(config.provider.zhipuai.model, "glm-5.2");
+        assert_eq!(config.model.default_model, "glm-5.2");
         // DeepSeek model must NOT have been polluted
         assert_eq!(config.provider.deepseek.model, "deepseek-v4-flash");
     }
@@ -2345,7 +2375,7 @@ blocking = false
 default = "deepseek"
 
 [model]
-default_model = "glm-5-turbo"
+default_model = "glm-5.2"
 "#;
         let partial: PartialNcaConfig = toml::from_str(toml_str).expect("parse");
         let mut config = NcaConfig::default();
@@ -2353,10 +2383,10 @@ default_model = "glm-5-turbo"
 
         // Provider must be deepseek (explicit in config)
         assert_eq!(config.provider.default, ProviderKind::DeepSeek);
-        // DeepSeek model must remain the deepseek default — NOT polluted by glm-5-turbo
+        // DeepSeek model must remain the deepseek default — NOT polluted by glm-5.2
         assert_eq!(config.provider.deepseek.model, "deepseek-v4-flash");
         // ZhipuAI model must remain the zhipuai default
-        assert_eq!(config.provider.zhipuai.model, "glm-5-turbo");
+        assert_eq!(config.provider.zhipuai.model, "glm-5.2");
         // In-memory default_model is derived from the active provider
         assert_eq!(config.model.default_model, "deepseek-v4-flash");
     }
@@ -2390,5 +2420,46 @@ default_model = "glm-5-turbo"
         } else {
             panic!("expected table");
         }
+    }
+
+    #[test]
+    fn global_instructions_path_roundtrips_through_toml() {
+        let toml_str = r#"
+[harness]
+global_instructions_path = "~/.nca/AGENTS.md"
+"#;
+        let partial: PartialNcaConfig = toml::from_str(toml_str).unwrap();
+        let mut config = NcaConfig::default();
+        config.merge(partial);
+        assert_eq!(
+            config.harness.global_instructions_path.as_deref(),
+            Some(std::path::Path::new("~/.nca/AGENTS.md")),
+        );
+    }
+
+    #[test]
+    fn global_instructions_path_absent_by_default() {
+        let config = NcaConfig::default();
+        assert!(config.harness.global_instructions_path.is_none());
+        assert!(config.harness.resolve_global_instructions_path().is_none());
+    }
+
+    #[test]
+    fn expand_tilde_expands_home() {
+        let _guard = EnvGuard::set(&[("HOME", Some("/test/home"))]);
+        let result = expand_tilde(std::path::Path::new("~/.nca/AGENTS.md"));
+        assert_eq!(
+            result,
+            std::path::PathBuf::from("/test/home/.nca/AGENTS.md")
+        );
+    }
+
+    #[test]
+    fn expand_tilde_leaves_non_tilde_unchanged() {
+        let _guard = EnvGuard::set(&[("HOME", Some("/test/home"))]);
+        let result = expand_tilde(std::path::Path::new("/absolute/path"));
+        assert_eq!(result, std::path::PathBuf::from("/absolute/path"));
+        let result2 = expand_tilde(std::path::Path::new("relative/path"));
+        assert_eq!(result2, std::path::PathBuf::from("relative/path"));
     }
 }

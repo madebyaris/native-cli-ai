@@ -99,11 +99,12 @@ MCP servers are loaded via `rmcp` crate (v1.7, features: `client`, `transport-as
 Built in `core::harness::build_system_prompt`:
 1. Built-in harness prompt
 2. Permission-mode guidance
-3. `AGENTS.md` (full file as instructions)
-4. `.ncarc` (committed project instructions, if present)
-5. `.nca/instructions.md` (local instructions)
-6. Discovered skills summary
-7. Orchestration context (`NCA_ORCH_*` env vars)
+3. Global Instructions (`~/.nca/AGENTS.md`, user-level)
+4. `AGENTS.md` (workspace repo-level instructions)
+5. `.ncarc` (committed project instructions, if present)
+6. `.nca/instructions.md` (local instructions)
+7. Discovered skills summary
+8. Orchestration context (`NCA_ORCH_*` env vars)
 
 ## Key File Map
 

@@ -67,6 +67,14 @@ pub fn build_system_prompt(
         }
     }
 
+    // Global instructions (e.g. ~/.nca/AGENTS.md) — shared across all projects.
+    if let Some(global_path) = config.harness.resolve_global_instructions_path()
+        && let Some(text) = read_if_exists(&global_path)
+        && !text.trim().is_empty()
+    {
+        sections.push(format!("Global Instructions:\n{}", text.trim()));
+    }
+
     if let Some(text) = read_if_exists(&workspace_root.join("AGENTS.md"))
         && !text.trim().is_empty()
     {
@@ -220,13 +228,25 @@ mod tests {
 
     #[test]
     fn layers_sections_in_stable_order() {
-        let config = NcaConfig {
+        let tmp_home = tempfile::tempdir().expect("tempdir");
+        let global_path = tmp_home.path().join(".nca/AGENTS.md");
+        std::fs::create_dir_all(global_path.parent().unwrap()).expect("create global dir");
+        std::fs::write(&global_path, "global rule").expect("write global AGENTS.md");
+
+        let mut config = NcaConfig {
             permissions: nca_common::config::PermissionConfig {
                 mode: PermissionMode::Plan,
                 ..Default::default()
             },
+            harness: nca_common::config::HarnessConfig {
+                global_instructions_path: Some(global_path.clone()),
+                ..Default::default()
+            },
             ..Default::default()
         };
+        // Resolve ~ manually since HOME is not the tmp_home
+        config.harness.global_instructions_path = Some(global_path);
+
         let temp = tempdir().expect("tempdir");
         fs::create_dir_all(temp.path().join(".nca/skills/review")).expect("create skills dir");
         fs::write(temp.path().join("AGENTS.md"), "agent rule").expect("write AGENTS.md");
@@ -256,6 +276,9 @@ mod tests {
         let permission_idx = prompt
             .find("Permission Mode: plan")
             .expect("permission section");
+        let global_idx = prompt
+            .find("Global Instructions:\nglobal rule")
+            .expect("global instructions");
         let agents_idx = prompt
             .find("AGENTS.md Instructions:\nagent rule")
             .expect("agents instructions");
@@ -271,7 +294,8 @@ mod tests {
             .expect("orchestration section");
 
         assert!(identity_idx < permission_idx);
-        assert!(permission_idx < agents_idx);
+        assert!(permission_idx < global_idx);
+        assert!(global_idx < agents_idx);
         assert!(agents_idx < project_idx);
         assert!(project_idx < local_idx);
         assert!(local_idx < skills_idx);

@@ -108,6 +108,12 @@ pub const MODEL_CONTEXT_LIMITS: &[ModelContextLimits] = &[
         context_window: 32_000,
         max_output_tokens: 8192,
     },
+    // ZhipuAI GLM-5.2 (1M context, 128K output)
+    ModelContextLimits {
+        pattern: "glm-5.2",
+        context_window: 1_000_000,
+        max_output_tokens: 131_072,
+    },
     // ZhipuAI GLM-5 Turbo (coding plan)
     ModelContextLimits {
         pattern: "glm-5-turbo",
