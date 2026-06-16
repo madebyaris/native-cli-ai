@@ -66,14 +66,18 @@ Infrastructure modules in the same directory:
 
 - **Rust-native only.** No JavaScript, Node.js, Electron, Tauri, or webview frameworks in any crate.
 - **All I/O is async** via tokio. Never call blocking I/O on the async runtime; use `spawn_blocking` if unavoidable.
-- **Error handling:** library crates use `thiserror`. Application code (`cli`) may use `anyhow`. Never `.unwrap()` in library code.
+- **Error handling:** library crates use `thiserror`. Application code (`cli`) may use `anyhow`. Never `.unwrap()` in library code. Narrow exception: `.expect()` is allowed only in application startup code for reading required config (e.g. `main.rs`).
 - **Visibility:** default to `pub(crate)`, promote to `pub` only when another crate needs it. All public types and traits must have doc comments.
 - **Tests:** inline `#[cfg(test)] mod tests` in source files. Integration tests in `crates/cli/tests/`. Use `tempfile` for filesystem tests. Never depend on network access in tests—mock the `Provider` trait. `core` has a `tiny_http` dev-dependency for mock HTTP servers in tests. `cli` uses `insta` for TUI snapshot tests.
+- **Channels:** prefer `tokio::sync::mpsc`. Use `tokio::sync::broadcast` only when multiple independent consumers need the same stream.
+- **Tool execution:** shell commands must go through `runtime::pty` (PTY with timeout). Never use bare `std::process::Command` for user-visible execution. File write tools must canonicalize paths and verify they are within the workspace root.
+- **Tool-use streaming:** incoming tool-use blocks are buffered until the closing tag is received, then executed as a batch (not streamed incrementally).
 - **IPC:** newline-delimited JSON over Unix domain sockets. `AgentEvent` enum is the shared event bus.
 - **Sessions:** `<workspace>/.nca/sessions/<id>.json` (state) + `<id>.events.jsonl` (event log). IPC socket at `$XDG_RUNTIME_DIR/nca/` (fallback `/tmp/nca/`).
 - **Config resolution:** compiled defaults → `~/.nca/config.toml` → `<workspace>/.nca/config.local.toml` → env vars → CLI flags.
 - **Conventional Commits** for commit messages (type(scope): description).
 - **Do not edit `for-test/`** — it is gitignored and used for transient test artifacts.
+- **Doc sync (same commit):** adding/removing deps → update `docs/tech-stack.md`; changing crate boundaries → update `docs/architecture.md`; changing MVP scope → update `docs/prd.md`.
 
 ## Context & Cost Guardrails
 
@@ -85,6 +89,13 @@ The system has several size guards to prevent context window overflow:
 - Skills index capped at 4000 chars in `harness.rs`.
 - `reasoning_content` from DeepSeek is stripped before re-upload (response-only signal, ~500 tokens saved per turn).
 - Cost tracker includes cache token accounting (cache_read priced at 1/50 of normal input).
+
+## TUI & IPC Performance
+
+- Ratatui rendering must use `is_dirty()` guards to skip frames when nothing changed — without this, idle CPU stays at 7%+ instead of target <1%.
+- IPC channels must be bounded (buffer=100) to prevent unbounded message accumulation.
+- Use `Vec::with_capacity` when size is known at allocation time.
+- Bash PTY does not inherit environment variables; only an explicit whitelist passes through.
 
 ## System Dependencies
 
