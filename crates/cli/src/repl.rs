@@ -6,10 +6,13 @@ use crate::prompt::NcaPrompt;
 use crate::runner::{SessionRuntime, dispatch_question_answer, dispatch_tool_approval};
 use crate::slash_commands::SLASH_COMMANDS;
 use crate::tui::app::ApprovalAnswer;
+use crate::tui::elm::feedback::TuiFeedbackMsg;
+use crate::tui::elm::msg::Msg;
+use crate::tui::elm::run::run_nca_model;
 use crate::tui::{
     DisplayBlock, ModelPickerAction, ModelPickerEntry, TuiCmd, TuiSessionState, git_create_branch,
     git_current_branch, git_list_branches, git_switch_branch, replay_event_log_into_state,
-    run_blocking, spawn_tui_bridge,
+    spawn_tui_bridge,
 };
 use nca_common::config::{PermissionMode, ProviderKind};
 use nca_common::event::{BusyState, EndReason, QuestionSelection};
@@ -1603,10 +1606,10 @@ impl Repl {
         let model = self.runtime.model().to_string();
         let perm = format!("{:?}", self.runtime.permission_mode());
         let tui_state: Arc<Mutex<TuiSessionState>> = Arc::new(Mutex::new(TuiSessionState::new(
-            session_id,
-            model,
+            session_id.clone(),
+            model.clone(),
             self.current_agent_label.clone(),
-            perm,
+            perm.clone(),
             self.runtime.workspace_root().to_path_buf(),
         )));
 
@@ -1628,6 +1631,19 @@ impl Repl {
         let ipc = self.runtime.take_ipc_handle();
         let approval = self.runtime.take_ipc_approval_pending();
         let question = self.runtime.question_pending();
+
+        // Elm feedback channel: bridge → NcaModel for rendering.
+        let (feedback_tx, feedback_rx) = tokio::sync::mpsc::unbounded_channel::<TuiFeedbackMsg>();
+
+        // Shared handles for cmd_rx loop (read active question / staged images from Elm side).
+        let active_question_id: Arc<std::sync::Mutex<Option<String>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let active_question_payload: Arc<
+            std::sync::Mutex<Option<nca_common::event::InteractiveQuestionPayload>>,
+        > = Arc::new(std::sync::Mutex::new(None));
+        let staged_images: Arc<std::sync::Mutex<Vec<nca_common::message::ImageAttachment>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+
         let _bridge = spawn_tui_bridge(
             rx,
             log_path,
@@ -1635,6 +1651,7 @@ impl Repl {
             approval.clone(),
             question.clone(),
             tui_state.clone(),
+            Some(feedback_tx),
         );
 
         let _spawn_task = {
@@ -1700,148 +1717,50 @@ impl Repl {
         let approval_for_tui = approval_tx.clone();
         drop(approval_tx);
 
-        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<TuiCmd>();
-        let st = tui_state.clone();
-        let banner = self.run_mode;
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Msg>();
         let cancel_flag = self.runtime.cancel_handle();
+
+        // Elm NcaModel params
+        let skill_dirs = vec![std::path::PathBuf::from(".nca/skills")];
+        let params = crate::tui::elm::run::NcaModelParams {
+            session_id: session_id.clone(),
+            model: model.clone(),
+            agent_label: self.current_agent_label.clone(),
+            permission_mode: perm.clone(),
+            workspace_root: self.runtime.workspace_root().to_path_buf(),
+            skill_dirs,
+        };
+
         let ui = tokio::task::spawn_blocking(move || {
-            run_blocking(
-                st,
+            run_nca_model(
+                feedback_rx,
                 cmd_tx,
                 Some(answer_for_tui),
                 Some(approval_for_tui),
-                banner,
                 Some(cancel_flag),
+                Arc::clone(&active_question_id),
+                Arc::clone(&active_question_payload),
+                Arc::clone(&staged_images),
+                params,
             )
         });
 
         loop {
-            let cmd = cmd_rx.recv().await;
-            let Some(cmd) = cmd else { break };
-            match cmd {
-                TuiCmd::Exit => {
-                    if let Ok(mut g) = tui_state.lock() {
-                        g.should_exit = true;
-                    }
-                    break;
-                }
-                TuiCmd::CycleAgent => {
-                    let next = self.agent_profile.next();
-                    self.agent_profile = next;
-                    self.current_agent_label = format!("@{}", next.label());
-                    if next == AgentProfile::Plan {
-                        self.runtime.set_permission_mode(PermissionMode::Plan);
-                    } else {
-                        self.runtime.set_permission_mode(PermissionMode::Default);
-                    }
-                    if let Ok(mut g) = tui_state.lock() {
-                        g.set_agent_profile(&self.current_agent_label);
-                        g.set_permission_mode(&format!("{:?}", self.runtime.permission_mode()));
-                    }
-                }
-                TuiCmd::CancelTurn => {
-                    self.runtime.request_cancel();
-                }
-                TuiCmd::OpenBranchPicker => {
-                    let workspace = self.runtime.workspace_root();
-                    let branches = git_list_branches(workspace);
-                    let current = git_current_branch(workspace).unwrap_or_default();
-                    if let Ok(mut g) = tui_state.lock() {
-                        g.open_branch_picker(branches, &current);
-                        g.set_current_branch(&current);
-                    }
-                }
-                TuiCmd::SwitchBranch(name) => {
-                    let workspace = self.runtime.workspace_root();
-                    if git_switch_branch(workspace, &name) {
+            let msg = cmd_rx.recv().await;
+            let Some(msg) = msg else { break };
+            match msg {
+                Msg::Cmd(cmd) => match cmd {
+                    TuiCmd::Exit => {
                         if let Ok(mut g) = tui_state.lock() {
-                            g.set_current_branch(&name);
-                            g.blocks.push(DisplayBlock::System(format!(
-                                "Switched to branch: {}",
-                                name
-                            )));
+                            g.should_exit = true;
                         }
-                    } else if let Ok(mut g) = tui_state.lock() {
-                        g.push_error(format!("Failed to switch to branch: {}", name));
+                        break;
                     }
-                }
-                TuiCmd::CreateBranch(name) => {
-                    let workspace = self.runtime.workspace_root();
-                    if git_create_branch(workspace, &name) {
-                        if let Ok(mut g) = tui_state.lock() {
-                            g.set_current_branch(&name);
-                            g.blocks.push(DisplayBlock::System(format!(
-                                "Created and switched to branch: {}",
-                                name
-                            )));
-                        }
-                    } else if let Ok(mut g) = tui_state.lock() {
-                        g.push_error(format!("Failed to create branch: {}", name));
-                    }
-                }
-                TuiCmd::ApplyDefaultProvider(p) => {
-                    self.apply_provider_in_session(p, ReplOutput::Tui(&tui_state))
-                        .await?;
-                }
-                TuiCmd::PromptApiKey(p, connect_after_save) => {
-                    if let Ok(mut g) = tui_state.lock() {
-                        g.open_api_key_modal(
-                            p,
-                            self.runtime.config().provider.api_key_present_for(p),
-                            connect_after_save,
-                        );
-                    }
-                }
-                TuiCmd::ApplyModel(model_name) => {
-                    let mut cfg = self.runtime.config().clone();
-                    cfg.apply_model_override(&model_name);
-                    cfg.model.track_recent_model(
-                        &self.runtime.config().model.resolve_alias(&model_name),
-                    );
-                    match self.runtime.apply_nca_config(cfg) {
-                        Ok(()) => {
-                            if let Err(e) = self
-                                .runtime
-                                .config()
-                                .save_workspace_file(self.runtime.workspace_root())
-                            {
-                                if let Ok(mut g) = tui_state.lock() {
-                                    g.push_error(format!("[model] workspace save failed: {e}"));
-                                }
-                            } else if let Ok(mut g) = tui_state.lock() {
-                                g.model = self.runtime.model().to_string();
-                                g.blocks.push(DisplayBlock::System(format!(
-                                    "[model] switched to {} (saved)",
-                                    self.runtime.model()
-                                )));
-                            }
-                        }
-                        Err(e) => {
-                            if let Ok(mut g) = tui_state.lock() {
-                                g.push_error(format!("[model] {e}"));
-                            }
-                        }
-                    }
-                }
-                TuiCmd::ApplyModelProvider(p) => {
-                    self.apply_provider_in_session(p, ReplOutput::Tui(&tui_state))
-                        .await?;
-                }
-                TuiCmd::ApplyPermission(idx) => {
-                    let mode = PermissionMode::from_index(idx);
-                    self.runtime.set_permission_mode(mode);
-                    if let Ok(mut g) = tui_state.lock() {
-                        g.set_permission_mode(&format!("{mode:?}"));
-                        g.blocks.push(DisplayBlock::System(format!(
-                            "permission mode set to {mode:?}"
-                        )));
-                    }
-                }
-                TuiCmd::SwitchAgent(idx) => {
-                    if let Some(&profile) = AgentProfile::ALL.get(idx) {
-                        self.agent_profile = profile;
-                        self.current_agent_label = format!("@{}", profile.label());
-                        if profile == AgentProfile::Plan {
+                    TuiCmd::CycleAgent => {
+                        let next = self.agent_profile.next();
+                        self.agent_profile = next;
+                        self.current_agent_label = format!("@{}", next.label());
+                        if next == AgentProfile::Plan {
                             self.runtime.set_permission_mode(PermissionMode::Plan);
                         } else {
                             self.runtime.set_permission_mode(PermissionMode::Default);
@@ -1849,356 +1768,465 @@ impl Repl {
                         if let Ok(mut g) = tui_state.lock() {
                             g.set_agent_profile(&self.current_agent_label);
                             g.set_permission_mode(&format!("{:?}", self.runtime.permission_mode()));
+                        }
+                    }
+                    TuiCmd::CancelTurn => {
+                        self.runtime.request_cancel();
+                    }
+                    TuiCmd::OpenBranchPicker => {
+                        let workspace = self.runtime.workspace_root();
+                        let branches = git_list_branches(workspace);
+                        let current = git_current_branch(workspace).unwrap_or_default();
+                        if let Ok(mut g) = tui_state.lock() {
+                            g.open_branch_picker(branches, &current);
+                            g.set_current_branch(&current);
+                        }
+                    }
+                    TuiCmd::SwitchBranch(name) => {
+                        let workspace = self.runtime.workspace_root();
+                        if git_switch_branch(workspace, &name) {
+                            if let Ok(mut g) = tui_state.lock() {
+                                g.set_current_branch(&name);
+                                g.blocks.push(DisplayBlock::System(format!(
+                                    "Switched to branch: {}",
+                                    name
+                                )));
+                            }
+                        } else if let Ok(mut g) = tui_state.lock() {
+                            g.push_error(format!("Failed to switch to branch: {}", name));
+                        }
+                    }
+                    TuiCmd::CreateBranch(name) => {
+                        let workspace = self.runtime.workspace_root();
+                        if git_create_branch(workspace, &name) {
+                            if let Ok(mut g) = tui_state.lock() {
+                                g.set_current_branch(&name);
+                                g.blocks.push(DisplayBlock::System(format!(
+                                    "Created and switched to branch: {}",
+                                    name
+                                )));
+                            }
+                        } else if let Ok(mut g) = tui_state.lock() {
+                            g.push_error(format!("Failed to create branch: {}", name));
+                        }
+                    }
+                    TuiCmd::ApplyDefaultProvider(p) => {
+                        self.apply_provider_in_session(p, ReplOutput::Tui(&tui_state))
+                            .await?;
+                    }
+                    TuiCmd::PromptApiKey(p, connect_after_save) => {
+                        if let Ok(mut g) = tui_state.lock() {
+                            g.open_api_key_modal(
+                                p,
+                                self.runtime.config().provider.api_key_present_for(p),
+                                connect_after_save,
+                            );
+                        }
+                    }
+                    TuiCmd::ApplyModel(model_name) => {
+                        let mut cfg = self.runtime.config().clone();
+                        cfg.apply_model_override(&model_name);
+                        cfg.model.track_recent_model(
+                            &self.runtime.config().model.resolve_alias(&model_name),
+                        );
+                        match self.runtime.apply_nca_config(cfg) {
+                            Ok(()) => {
+                                if let Err(e) = self
+                                    .runtime
+                                    .config()
+                                    .save_workspace_file(self.runtime.workspace_root())
+                                {
+                                    if let Ok(mut g) = tui_state.lock() {
+                                        g.push_error(format!("[model] workspace save failed: {e}"));
+                                    }
+                                } else if let Ok(mut g) = tui_state.lock() {
+                                    g.model = self.runtime.model().to_string();
+                                    g.blocks.push(DisplayBlock::System(format!(
+                                        "[model] switched to {} (saved)",
+                                        self.runtime.model()
+                                    )));
+                                }
+                            }
+                            Err(e) => {
+                                if let Ok(mut g) = tui_state.lock() {
+                                    g.push_error(format!("[model] {e}"));
+                                }
+                            }
+                        }
+                    }
+                    TuiCmd::ApplyModelProvider(p) => {
+                        self.apply_provider_in_session(p, ReplOutput::Tui(&tui_state))
+                            .await?;
+                    }
+                    TuiCmd::ApplyPermission(idx) => {
+                        let mode = PermissionMode::from_index(idx);
+                        self.runtime.set_permission_mode(mode);
+                        if let Ok(mut g) = tui_state.lock() {
+                            g.set_permission_mode(&format!("{mode:?}"));
                             g.blocks.push(DisplayBlock::System(format!(
-                                "switched to @{}",
-                                profile.label()
+                                "permission mode set to {mode:?}"
                             )));
                         }
                     }
-                }
-                TuiCmd::OpenEditor => {
-                    self.handle_command("/editor", ReplOutput::Tui(&tui_state))
-                        .await?;
-                }
-                TuiCmd::NewSession => {
-                    self.handle_command("/new", ReplOutput::Tui(&tui_state))
-                        .await?;
-                }
-                TuiCmd::RunCompact => {
-                    self.handle_command("/compact", ReplOutput::Tui(&tui_state))
-                        .await?;
-                }
-                TuiCmd::OpenModelPicker => {
-                    self.handle_command("/models", ReplOutput::Tui(&tui_state))
-                        .await?;
-                }
-                TuiCmd::OpenStatus => {
-                    self.handle_command("/status", ReplOutput::Tui(&tui_state))
-                        .await?;
-                }
-                TuiCmd::OpenHelp => {
-                    self.handle_command("/help", ReplOutput::Tui(&tui_state))
-                        .await?;
-                }
-                TuiCmd::OpenAgentPicker => {
-                    let current_idx = AgentProfile::ALL
-                        .iter()
-                        .position(|p| *p == self.agent_profile)
-                        .unwrap_or(0);
-                    if let Ok(mut g) = tui_state.lock() {
-                        g.open_agent_picker(current_idx);
-                    }
-                }
-                TuiCmd::OpenPermissionPicker => {
-                    let current_idx = self.runtime.permission_mode().index();
-                    if let Ok(mut g) = tui_state.lock() {
-                        g.open_permission_picker(current_idx);
-                    }
-                }
-                TuiCmd::OpenSessions => {
-                    self.handle_command("/sessions", ReplOutput::Tui(&tui_state))
-                        .await?;
-                }
-                TuiCmd::ResumeSession(session_id) => {
-                    let current = self.runtime.session_id().to_string();
-                    if session_id == current {
-                        if let Ok(mut g) = tui_state.lock() {
-                            g.blocks
-                                .push(DisplayBlock::System("Already on this session.".into()));
-                        }
-                    } else {
-                        match self.runtime.switch_to(&session_id).await {
-                            Ok(()) => {
-                                // Reset TUI transcript and replay the target session's event log.
-                                if let Ok(mut g) = tui_state.lock() {
-                                    g.blocks.clear();
-                                    g.streaming_assistant = None;
-                                    g.scroll_lines = 0;
-                                    g.transcript_follow_tail = true;
-                                    g.session_id = self.runtime.session_id().to_string();
-                                    g.model = self.runtime.model().to_string();
-                                    g.input_tokens = 0;
-                                    g.output_tokens = 0;
-                                    g.cost_usd = 0.0;
-                                    g.started = std::time::Instant::now();
-                                }
-                                let log_path = self.runtime.event_log_path();
-                                replay_event_log_into_state(&log_path, &tui_state).await;
-                                // After replay, sync token counts from the restored snapshot.
-                                let snap = self.runtime.snapshot();
-                                if let Ok(mut g) = tui_state.lock() {
-                                    g.input_tokens = snap.total_input_tokens;
-                                    g.output_tokens = snap.total_output_tokens;
-                                    g.cost_usd = snap.estimated_cost_usd;
-                                    g.blocks.push(DisplayBlock::System(format!(
-                                        "Switched to session {session_id}"
-                                    )));
-                                }
+                    TuiCmd::SwitchAgent(idx) => {
+                        if let Some(&profile) = AgentProfile::ALL.get(idx) {
+                            self.agent_profile = profile;
+                            self.current_agent_label = format!("@{}", profile.label());
+                            if profile == AgentProfile::Plan {
+                                self.runtime.set_permission_mode(PermissionMode::Plan);
+                            } else {
+                                self.runtime.set_permission_mode(PermissionMode::Default);
                             }
-                            Err(err) => {
-                                if let Ok(mut g) = tui_state.lock() {
-                                    g.blocks.push(DisplayBlock::System(format!(
-                                        "[!] Failed to switch to session {session_id}: {err}"
-                                    )));
-                                }
-                            }
-                        }
-                    }
-                }
-                TuiCmd::CycleModel(forward) => {
-                    let recent = &self.runtime.config().model.recent_models;
-                    if recent.len() >= 2 {
-                        let current = self.runtime.model().to_string();
-                        let pos = recent.iter().position(|m| m == &current).unwrap_or(0);
-                        let next_pos = if forward {
-                            (pos + 1) % recent.len()
-                        } else {
-                            pos.checked_sub(1).unwrap_or(recent.len() - 1)
-                        };
-                        let next_model = recent[next_pos].clone();
-                        let mut cfg = self.runtime.config().clone();
-                        cfg.apply_model_override(&next_model);
-                        if let Ok(()) = self.runtime.apply_nca_config(cfg) {
-                            let _ = self
-                                .runtime
-                                .config()
-                                .save_workspace_file(self.runtime.workspace_root());
                             if let Ok(mut g) = tui_state.lock() {
-                                g.model = self.runtime.model().to_string();
+                                g.set_agent_profile(&self.current_agent_label);
+                                g.set_permission_mode(&format!(
+                                    "{:?}",
+                                    self.runtime.permission_mode()
+                                ));
                                 g.blocks.push(DisplayBlock::System(format!(
-                                    "[F2] switched to {}",
-                                    self.runtime.model()
+                                    "switched to @{}",
+                                    profile.label()
                                 )));
                             }
                         }
-                    } else if let Ok(mut g) = tui_state.lock() {
-                        g.blocks.push(DisplayBlock::System(
-                            "[F2] no recent models to cycle (need 2+ in model.recent_models)"
-                                .into(),
-                        ));
                     }
-                }
-                TuiCmd::ValidateApiKey(provider, api_key) => {
-                    // Set validating state
-                    if let Ok(mut g) = tui_state.lock() {
-                        g.validation_status =
-                            Some(crate::tui::state::OnboardingValidation::Validating);
+                    TuiCmd::OpenEditor => {
+                        self.handle_command("/editor", ReplOutput::Tui(&tui_state))
+                            .await?;
                     }
-                    // Look up base_url from config
-                    let base_url = self
-                        .runtime
-                        .config()
-                        .provider
-                        .base_url_for(provider)
-                        .to_string();
-                    // Run async validation
-                    let result = nca_core::provider::validate::validate_api_key(
-                        provider, &api_key, &base_url,
-                    )
-                    .await;
-                    if let Ok(mut g) = tui_state.lock() {
-                        match &result {
-                            nca_core::provider::validate::ValidationResult::Valid => {
-                                // Save key and complete onboarding
-                                g.validation_status =
-                                    Some(crate::tui::state::OnboardingValidation::Valid);
-                                g.close_api_key_modal();
-                                g.close_connect_modal();
-                                g.onboarding_mode = false;
-                            }
-                            nca_core::provider::validate::ValidationResult::InvalidKey(msg) => {
-                                g.validation_status = Some(
-                                    crate::tui::state::OnboardingValidation::Failed(msg.clone()),
-                                );
-                            }
-                            nca_core::provider::validate::ValidationResult::NetworkError(msg) => {
-                                g.validation_status = Some(
-                                    crate::tui::state::OnboardingValidation::Failed(msg.clone()),
-                                );
-                            }
-                        }
+                    TuiCmd::NewSession => {
+                        self.handle_command("/new", ReplOutput::Tui(&tui_state))
+                            .await?;
                     }
-                    // If validation succeeded, save key + complete onboarding
-                    if matches!(
-                        result,
-                        nca_core::provider::validate::ValidationResult::Valid
-                    ) {
-                        // Apply key + switch provider in one step
-                        let mut cfg = self.runtime.config().clone();
-                        cfg.set_provider_api_key(provider, &api_key);
-                        cfg.set_default_provider(provider);
-                        if let Err(e) = self.runtime.apply_nca_config(cfg) {
-                            tracing::warn!("onboarding: provider apply failed: {e}");
-                            if let Ok(mut g) = tui_state.lock() {
-                                g.validation_status =
-                                    Some(crate::tui::state::OnboardingValidation::Failed(format!(
-                                        "Failed to apply provider: {e}"
-                                    )));
-                                g.onboarding_mode = true;
-                            }
-                            continue;
-                        }
-                        // Sync TUI model display
+                    TuiCmd::RunCompact => {
+                        self.handle_command("/compact", ReplOutput::Tui(&tui_state))
+                            .await?;
+                    }
+                    TuiCmd::OpenModelPicker => {
+                        self.handle_command("/models", ReplOutput::Tui(&tui_state))
+                            .await?;
+                    }
+                    TuiCmd::OpenStatus => {
+                        self.handle_command("/status", ReplOutput::Tui(&tui_state))
+                            .await?;
+                    }
+                    TuiCmd::OpenHelp => {
+                        self.handle_command("/help", ReplOutput::Tui(&tui_state))
+                            .await?;
+                    }
+                    TuiCmd::OpenAgentPicker => {
+                        let current_idx = AgentProfile::ALL
+                            .iter()
+                            .position(|p| *p == self.agent_profile)
+                            .unwrap_or(0);
                         if let Ok(mut g) = tui_state.lock() {
-                            g.model = self.runtime.model().to_string();
+                            g.open_agent_picker(current_idx);
                         }
-                        // Persist onboarding flag to global config only (not workspace)
-                        let mut cfg = self.runtime.config().clone();
-                        cfg.ui.onboarding_completed = true;
-                        if let Err(e) = cfg.save_global() {
-                            tracing::warn!("onboarding: global config save failed: {e}");
-                        }
-                        let _ = self.runtime.apply_nca_config(cfg);
                     }
-                }
-                TuiCmd::CompleteOnboarding => {
-                    let mut cfg = self.runtime.config().clone();
-                    cfg.ui.onboarding_completed = true;
-                    if let Err(e) = cfg.save_global() {
-                        tracing::warn!("onboarding flag save failed: {e}");
+                    TuiCmd::OpenSessions => {
+                        self.handle_command("/sessions", ReplOutput::Tui(&tui_state))
+                            .await?;
                     }
-                    if let Err(e) = self.runtime.apply_nca_config(cfg) {
-                        tracing::warn!("onboarding config apply failed: {e}");
-                    }
-                }
-                TuiCmd::QuestionAnswer(selection) => {
-                    let qid = if let Ok(g) = tui_state.lock() {
-                        g.active_question.as_ref().map(|q| q.question_id.clone())
-                    } else {
-                        None
-                    };
-                    if let Some(qid) = qid
-                        && !self.runtime.submit_question_answer(&qid, selection)
-                        && let Ok(mut g) = tui_state.lock()
-                    {
-                        g.push_error(
-                            "failed to submit answer (expired or already answered)".into(),
-                        );
-                    }
-                }
-                TuiCmd::Submit(line) => {
-                    let line = line.trim().to_string();
-                    let api_key_modal_state = tui_state.lock().ok().and_then(|g| {
-                        g.api_key_modal_open.then_some((
-                            g.api_key_target_provider,
-                            g.api_key_input.clone(),
-                            g.api_key_connect_after_save,
-                        ))
-                    });
-                    if let Some((Some(p), key_input, connect_after_save)) = api_key_modal_state {
-                        let typed = if line.starts_with('/') {
-                            ""
-                        } else {
-                            key_input.trim()
-                        };
-                        let had_existing = self.runtime.config().provider.api_key_present_for(p);
-                        if line.starts_with('/') {
+                    TuiCmd::ResumeSession(session_id) => {
+                        let current = self.runtime.session_id().to_string();
+                        if session_id == current {
                             if let Ok(mut g) = tui_state.lock() {
-                                g.close_api_key_modal();
+                                g.blocks
+                                    .push(DisplayBlock::System("Already on this session.".into()));
                             }
-                        } else if typed.is_empty() {
-                            if had_existing {
+                        } else {
+                            match self.runtime.switch_to(&session_id).await {
+                                Ok(()) => {
+                                    // Reset TUI transcript and replay the target session's event log.
+                                    if let Ok(mut g) = tui_state.lock() {
+                                        g.blocks.clear();
+                                        g.streaming_assistant = None;
+                                        g.scroll_lines = 0;
+                                        g.transcript_follow_tail = true;
+                                        g.session_id = self.runtime.session_id().to_string();
+                                        g.model = self.runtime.model().to_string();
+                                        g.input_tokens = 0;
+                                        g.output_tokens = 0;
+                                        g.cost_usd = 0.0;
+                                        g.started = std::time::Instant::now();
+                                    }
+                                    let log_path = self.runtime.event_log_path();
+                                    replay_event_log_into_state(&log_path, &tui_state).await;
+                                    // After replay, sync token counts from the restored snapshot.
+                                    let snap = self.runtime.snapshot();
+                                    if let Ok(mut g) = tui_state.lock() {
+                                        g.input_tokens = snap.total_input_tokens;
+                                        g.output_tokens = snap.total_output_tokens;
+                                        g.cost_usd = snap.estimated_cost_usd;
+                                        g.blocks.push(DisplayBlock::System(format!(
+                                            "Switched to session {session_id}"
+                                        )));
+                                    }
+                                }
+                                Err(err) => {
+                                    if let Ok(mut g) = tui_state.lock() {
+                                        g.blocks.push(DisplayBlock::System(format!(
+                                            "[!] Failed to switch to session {session_id}: {err}"
+                                        )));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    TuiCmd::CycleModel(forward) => {
+                        let recent = &self.runtime.config().model.recent_models;
+                        if recent.len() >= 2 {
+                            let current = self.runtime.model().to_string();
+                            let pos = recent.iter().position(|m| m == &current).unwrap_or(0);
+                            let next_pos = if forward {
+                                (pos + 1) % recent.len()
+                            } else {
+                                pos.checked_sub(1).unwrap_or(recent.len() - 1)
+                            };
+                            let next_model = recent[next_pos].clone();
+                            let mut cfg = self.runtime.config().clone();
+                            cfg.apply_model_override(&next_model);
+                            if let Ok(()) = self.runtime.apply_nca_config(cfg) {
+                                let _ = self
+                                    .runtime
+                                    .config()
+                                    .save_workspace_file(self.runtime.workspace_root());
+                                if let Ok(mut g) = tui_state.lock() {
+                                    g.model = self.runtime.model().to_string();
+                                    g.blocks.push(DisplayBlock::System(format!(
+                                        "[F2] switched to {}",
+                                        self.runtime.model()
+                                    )));
+                                }
+                            }
+                        } else if let Ok(mut g) = tui_state.lock() {
+                            g.blocks.push(DisplayBlock::System(
+                                "[F2] no recent models to cycle (need 2+ in model.recent_models)"
+                                    .into(),
+                            ));
+                        }
+                    }
+                    TuiCmd::ValidateApiKey(provider, api_key) => {
+                        // Set validating state
+                        if let Ok(mut g) = tui_state.lock() {
+                            g.validation_status =
+                                Some(crate::tui::state::OnboardingValidation::Validating);
+                        }
+                        // Look up base_url from config
+                        let base_url = self
+                            .runtime
+                            .config()
+                            .provider
+                            .base_url_for(provider)
+                            .to_string();
+                        // Run async validation
+                        let result = nca_core::provider::validate::validate_api_key(
+                            provider, &api_key, &base_url,
+                        )
+                        .await;
+                        if let Ok(mut g) = tui_state.lock() {
+                            match &result {
+                                nca_core::provider::validate::ValidationResult::Valid => {
+                                    // Save key and complete onboarding
+                                    g.validation_status =
+                                        Some(crate::tui::state::OnboardingValidation::Valid);
+                                    g.close_api_key_modal();
+                                    g.close_connect_modal();
+                                    g.onboarding_mode = false;
+                                }
+                                nca_core::provider::validate::ValidationResult::InvalidKey(msg) => {
+                                    g.validation_status =
+                                        Some(crate::tui::state::OnboardingValidation::Failed(
+                                            msg.clone(),
+                                        ));
+                                }
+                                nca_core::provider::validate::ValidationResult::NetworkError(
+                                    msg,
+                                ) => {
+                                    g.validation_status =
+                                        Some(crate::tui::state::OnboardingValidation::Failed(
+                                            msg.clone(),
+                                        ));
+                                }
+                            }
+                        }
+                        // If validation succeeded, save key + complete onboarding
+                        if matches!(
+                            result,
+                            nca_core::provider::validate::ValidationResult::Valid
+                        ) {
+                            // Apply key + switch provider in one step
+                            let mut cfg = self.runtime.config().clone();
+                            cfg.set_provider_api_key(provider, &api_key);
+                            cfg.set_default_provider(provider);
+                            if let Err(e) = self.runtime.apply_nca_config(cfg) {
+                                tracing::warn!("onboarding: provider apply failed: {e}");
+                                if let Ok(mut g) = tui_state.lock() {
+                                    g.validation_status =
+                                        Some(crate::tui::state::OnboardingValidation::Failed(
+                                            format!("Failed to apply provider: {e}"),
+                                        ));
+                                    g.onboarding_mode = true;
+                                }
+                                continue;
+                            }
+                            // Sync TUI model display
+                            if let Ok(mut g) = tui_state.lock() {
+                                g.model = self.runtime.model().to_string();
+                            }
+                            // Persist onboarding flag to global config only (not workspace)
+                            let mut cfg = self.runtime.config().clone();
+                            cfg.ui.onboarding_completed = true;
+                            if let Err(e) = cfg.save_global() {
+                                tracing::warn!("onboarding: global config save failed: {e}");
+                            }
+                            let _ = self.runtime.apply_nca_config(cfg);
+                        }
+                    }
+                    TuiCmd::QuestionAnswer(selection) => {
+                        let qid = if let Ok(g) = tui_state.lock() {
+                            g.active_question.as_ref().map(|q| q.question_id.clone())
+                        } else {
+                            None
+                        };
+                        if let Some(qid) = qid
+                            && !self.runtime.submit_question_answer(&qid, selection)
+                            && let Ok(mut g) = tui_state.lock()
+                        {
+                            g.push_error(
+                                "failed to submit answer (expired or already answered)".into(),
+                            );
+                        }
+                    }
+                    TuiCmd::Submit(line) => {
+                        let line = line.trim().to_string();
+                        let api_key_modal_state = tui_state.lock().ok().and_then(|g| {
+                            g.api_key_modal_open.then_some((
+                                g.api_key_target_provider,
+                                g.api_key_input.clone(),
+                                g.api_key_connect_after_save,
+                            ))
+                        });
+                        if let Some((Some(p), key_input, connect_after_save)) = api_key_modal_state
+                        {
+                            let typed = if line.starts_with('/') {
+                                ""
+                            } else {
+                                key_input.trim()
+                            };
+                            let had_existing =
+                                self.runtime.config().provider.api_key_present_for(p);
+                            if line.starts_with('/') {
                                 if let Ok(mut g) = tui_state.lock() {
                                     g.close_api_key_modal();
-                                    g.blocks.push(DisplayBlock::System(format!(
-                                        "[apikey] keeping existing key for {}",
+                                }
+                            } else if typed.is_empty() {
+                                if had_existing {
+                                    if let Ok(mut g) = tui_state.lock() {
+                                        g.close_api_key_modal();
+                                        g.blocks.push(DisplayBlock::System(format!(
+                                            "[apikey] keeping existing key for {}",
+                                            p.display_name()
+                                        )));
+                                    }
+                                    if connect_after_save {
+                                        self.apply_provider_in_session(
+                                            p,
+                                            ReplOutput::Tui(&tui_state),
+                                        )
+                                        .await?;
+                                    }
+                                } else if let Ok(mut g) = tui_state.lock() {
+                                    g.push_error(format!(
+                                        "[apikey] paste a key for {} or Esc to cancel",
                                         p.display_name()
-                                    )));
+                                    ));
+                                }
+                                continue;
+                            } else {
+                                self.save_provider_api_key(p, typed, ReplOutput::Tui(&tui_state))
+                                    .await?;
+                                if let Ok(mut g) = tui_state.lock() {
+                                    g.close_api_key_modal();
                                 }
                                 if connect_after_save {
                                     self.apply_provider_in_session(p, ReplOutput::Tui(&tui_state))
                                         .await?;
                                 }
-                            } else if let Ok(mut g) = tui_state.lock() {
-                                g.push_error(format!(
-                                    "[apikey] paste a key for {} or Esc to cancel",
-                                    p.display_name()
+                                continue;
+                            }
+                        }
+                        if line.is_empty() {
+                            if let Ok(mut g) = tui_state.lock()
+                                && g.pending_api_key_provider.take().is_some()
+                            {
+                                g.blocks.push(DisplayBlock::System(
+                                    "[apikey] entry cancelled (empty line)".into(),
                                 ));
                             }
                             continue;
-                        } else {
-                            self.save_provider_api_key(p, typed, ReplOutput::Tui(&tui_state))
-                                .await?;
-                            if let Ok(mut g) = tui_state.lock() {
-                                g.close_api_key_modal();
-                            }
-                            if connect_after_save {
-                                self.apply_provider_in_session(p, ReplOutput::Tui(&tui_state))
-                                    .await?;
-                            }
-                            continue;
                         }
-                    }
-                    if line.is_empty() {
-                        if let Ok(mut g) = tui_state.lock()
-                            && g.pending_api_key_provider.take().is_some()
+                        if let Some(p) = tui_state
+                            .lock()
+                            .ok()
+                            .and_then(|g| g.pending_api_key_provider)
                         {
-                            g.blocks.push(DisplayBlock::System(
-                                "[apikey] entry cancelled (empty line)".into(),
-                            ));
-                        }
-                        continue;
-                    }
-                    if let Some(p) = tui_state
-                        .lock()
-                        .ok()
-                        .and_then(|g| g.pending_api_key_provider)
-                    {
-                        if !line.starts_with('/') {
-                            let mut cfg = self.runtime.config().clone();
-                            cfg.set_provider_api_key(p, &line);
-                            match self.runtime.apply_nca_config(cfg) {
-                                Ok(()) => {
-                                    if let Err(e) = self
-                                        .runtime
-                                        .config()
-                                        .save_workspace_file(self.runtime.workspace_root())
-                                    {
-                                        if let Ok(mut g) = tui_state.lock() {
-                                            g.push_error(format!(
-                                                "[apikey] applied but save failed: {e}"
-                                            ));
+                            if !line.starts_with('/') {
+                                let mut cfg = self.runtime.config().clone();
+                                cfg.set_provider_api_key(p, &line);
+                                match self.runtime.apply_nca_config(cfg) {
+                                    Ok(()) => {
+                                        if let Err(e) = self
+                                            .runtime
+                                            .config()
+                                            .save_workspace_file(self.runtime.workspace_root())
+                                        {
+                                            if let Ok(mut g) = tui_state.lock() {
+                                                g.push_error(format!(
+                                                    "[apikey] applied but save failed: {e}"
+                                                ));
+                                            }
+                                        } else if let Ok(mut g) = tui_state.lock() {
+                                            g.pending_api_key_provider = None;
+                                            g.blocks.push(DisplayBlock::System(format!(
+                                                "[apikey] saved for {}",
+                                                p.display_name()
+                                            )));
                                         }
-                                    } else if let Ok(mut g) = tui_state.lock() {
-                                        g.pending_api_key_provider = None;
-                                        g.blocks.push(DisplayBlock::System(format!(
-                                            "[apikey] saved for {}",
-                                            p.display_name()
-                                        )));
+                                    }
+                                    Err(e) => {
+                                        if let Ok(mut g) = tui_state.lock() {
+                                            g.push_error(format!("[apikey] {e}"));
+                                        }
                                     }
                                 }
-                                Err(e) => {
-                                    if let Ok(mut g) = tui_state.lock() {
-                                        g.push_error(format!("[apikey] {e}"));
-                                    }
+                                continue;
+                            }
+                            if let Ok(mut g) = tui_state.lock() {
+                                g.pending_api_key_provider = None;
+                            }
+                        }
+                        if line.starts_with('!') {
+                            let shell_cmd = line.trim_start_matches('!').trim();
+                            self.run_bash_tui(shell_cmd, &tui_state).await;
+                            continue;
+                        }
+                        if line.starts_with('/') {
+                            if !self
+                                .handle_command(&line, ReplOutput::Tui(&tui_state))
+                                .await?
+                            {
+                                if let Ok(mut g) = tui_state.lock() {
+                                    g.should_exit = true;
                                 }
+                                break;
                             }
                             continue;
                         }
-                        if let Ok(mut g) = tui_state.lock() {
-                            g.pending_api_key_provider = None;
-                        }
-                    }
-                    if line.starts_with('!') {
-                        let shell_cmd = line.trim_start_matches('!').trim();
-                        self.run_bash_tui(shell_cmd, &tui_state).await;
-                        continue;
-                    }
-                    if line.starts_with('/') {
-                        if !self
-                            .handle_command(&line, ReplOutput::Tui(&tui_state))
-                            .await?
-                        {
-                            if let Ok(mut g) = tui_state.lock() {
-                                g.should_exit = true;
-                            }
-                            break;
-                        }
-                        continue;
-                    }
-                    let expanded =
-                        match expand_at_file_mentions_default(&line, self.runtime.workspace_root())
-                        {
+                        let expanded = match expand_at_file_mentions_default(
+                            &line,
+                            self.runtime.workspace_root(),
+                        ) {
                             Ok(s) => s,
                             Err(e) => {
                                 if let Ok(mut g) = tui_state.lock() {
@@ -2207,31 +2235,36 @@ impl Repl {
                                 continue;
                             }
                         };
-                    if let Ok(mut g) = tui_state.lock() {
-                        g.set_busy(true);
+                        if let Ok(mut g) = tui_state.lock() {
+                            g.set_busy(true);
+                        }
+                        let attachments = if let Ok(mut g) = tui_state.lock() {
+                            std::mem::take(&mut g.staged_image_attachments)
+                        } else {
+                            Vec::new()
+                        };
+                        let turn = if attachments.is_empty() {
+                            self.runtime.run_turn(&expanded).await
+                        } else {
+                            self.runtime
+                                .run_turn_with_images(&expanded, attachments)
+                                .await
+                        };
+                        if let Err(e) = turn
+                            && let Ok(mut g) = tui_state.lock()
+                        {
+                            g.push_error(e.to_string());
+                        }
+                        if let Ok(mut g) = tui_state.lock() {
+                            g.set_busy(false);
+                            g.set_busy_state(BusyState::Idle);
+                        }
                     }
-                    let attachments = if let Ok(mut g) = tui_state.lock() {
-                        std::mem::take(&mut g.staged_image_attachments)
-                    } else {
-                        Vec::new()
-                    };
-                    let turn = if attachments.is_empty() {
-                        self.runtime.run_turn(&expanded).await
-                    } else {
-                        self.runtime
-                            .run_turn_with_images(&expanded, attachments)
-                            .await
-                    };
-                    if let Err(e) = turn
-                        && let Ok(mut g) = tui_state.lock()
-                    {
-                        g.push_error(e.to_string());
-                    }
-                    if let Ok(mut g) = tui_state.lock() {
-                        g.set_busy(false);
-                        g.set_busy_state(BusyState::Idle);
-                    }
+                },
+                Msg::Quit => {
+                    break;
                 }
+                _ => {}
             }
         }
 

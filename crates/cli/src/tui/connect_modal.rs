@@ -118,16 +118,19 @@ pub fn selectable_row_indices(rows: &[ConnectRow]) -> Vec<usize> {
 }
 
 /// Which `rows` index is highlighted given selection index among selectables only.
+#[allow(dead_code)]
 pub fn row_index_for_selection(rows: &[ConnectRow], selection: usize) -> Option<usize> {
     let idxs = selectable_row_indices(rows);
     idxs.get(selection).copied()
 }
 
+#[allow(dead_code)]
 pub fn clamp_selection(selection: usize, rows: &[ConnectRow]) -> usize {
     let n = selectable_row_indices(rows).len();
     if n == 0 { 0 } else { selection.min(n - 1) }
 }
 
+#[allow(dead_code)]
 pub fn provider_at_selection(rows: &[ConnectRow], selection: usize) -> Option<ProviderKind> {
     let i = row_index_for_selection(rows, selection)?;
     match rows.get(i)? {

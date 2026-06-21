@@ -103,9 +103,7 @@ pub enum TuiCmd {
     OpenHelp,
     /// Open agent picker.
     OpenAgentPicker,
-    /// Open permission picker (reserved for future shortcut).
-    #[allow(dead_code)]
-    OpenPermissionPicker,
+
     /// Open sessions picker/info.
     OpenSessions,
     /// Cycle to the next recent model (F2 forward, Shift+F2 backward).
@@ -113,9 +111,7 @@ pub enum TuiCmd {
     /// Validate an API key for onboarding (provider, api_key).
     /// The repl handler looks up base_url from config.
     ValidateApiKey(ProviderKind, String),
-    /// Mark onboarding as complete and persist the flag.
-    #[allow(dead_code)]
-    CompleteOnboarding,
+
     /// Resume a different session by ID.
     ResumeSession(String),
 }
@@ -139,7 +135,7 @@ mod theme {
 }
 
 const SLASH_PANEL_MAX_ROWS: usize = 8;
-const MOUSE_SCROLL_LINES: usize = 3;
+const MOUSE_SCROLL_LINES: usize = 6;
 const SIDEBAR_WIDTH: u16 = 32;
 const SIDEBAR_MIN_TOTAL_WIDTH: u16 = 110;
 const COMMAND_PALETTE_WIDTH: u16 = 48;
@@ -1278,7 +1274,7 @@ fn block_line_count(block: &DisplayBlock, width: usize) -> usize {
             }
             n + 1
         }
-        DisplayBlock::System(_) => 1,
+        DisplayBlock::System(s) => wrap_text(s, w).len(),
         DisplayBlock::Question(q) => {
             // Header + blank + prompt wrapped + suggested + options + custom hint + tip + blank
             let mut n = 2 + wrap_text(&q.prompt, w).len() + 1 + q.options.len() + 2;
@@ -1619,13 +1615,14 @@ fn transcript_lines_and_hits(
                 push_transcript_line(&mut lines, &mut hits, Line::default(), None);
             }
             DisplayBlock::ToolRunning { name, .. } => {
+                let name_budget = w.saturating_sub(5); // " ⚡ " + " …"
                 push_transcript_line(
                     &mut lines,
                     &mut hits,
                     Line::from(vec![
                         Span::styled(" ⚡ ", Style::default().fg(theme::TOOL)),
                         Span::styled(
-                            format!("{name} "),
+                            format!("{} ", truncate_to_width(name, name_budget)),
                             Style::default()
                                 .fg(theme::TOOL)
                                 .add_modifier(Modifier::BOLD),
@@ -1650,12 +1647,17 @@ fn transcript_lines_and_hits(
                         Style::default().fg(Color::Black).bg(theme::ERROR),
                     )
                 };
+                let label_width = display_width(label);
+                let tool_budget = w.saturating_sub(label_width + 1); // +1 for " "
                 push_transcript_line(
                     &mut lines,
                     &mut hits,
                     Line::from(vec![
                         Span::styled(label, style.add_modifier(Modifier::BOLD)),
-                        Span::styled(format!(" {tool}"), Style::default().fg(theme::TEXT)),
+                        Span::styled(
+                            format!(" {}", truncate_to_width(tool, tool_budget)),
+                            Style::default().fg(theme::TEXT),
+                        ),
                     ]),
                     None,
                 );
@@ -1673,7 +1675,9 @@ fn transcript_lines_and_hits(
                 } else {
                     ("✗", Style::default().fg(theme::ERROR))
                 };
-                // Summary line (always shown)
+                // Summary line (always shown) — truncate detail to fit width
+                let prefix_width = 3 + name.chars().count() + 3; // " icon " + name + " — "
+                let detail_budget = w.saturating_sub(prefix_width);
                 push_transcript_line(
                     &mut lines,
                     &mut hits,
@@ -1686,7 +1690,7 @@ fn transcript_lines_and_hits(
                                 .add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
-                            format!(" — {}", truncate_chars(detail, 100)),
+                            format!(" — {}", truncate_to_width(detail, detail_budget)),
                             Style::default().fg(theme::MUTED),
                         ),
                     ]),
@@ -1737,15 +1741,14 @@ fn transcript_lines_and_hits(
                 push_transcript_line(&mut lines, &mut hits, Line::default(), None);
             }
             DisplayBlock::System(s) => {
-                push_transcript_line(
-                    &mut lines,
-                    &mut hits,
-                    Line::from(Span::styled(
-                        format!(" ‣ {s}"),
-                        Style::default().fg(theme::WARN),
-                    )),
-                    None,
-                );
+                for text_line in wrap_text(s, w) {
+                    push_transcript_line(
+                        &mut lines,
+                        &mut hits,
+                        Line::from(Span::styled(text_line, Style::default().fg(theme::WARN))),
+                        None,
+                    );
+                }
             }
             DisplayBlock::Question(q) => {
                 push_transcript_line(
@@ -1777,30 +1780,47 @@ fn transcript_lines_and_hits(
                 push_transcript_line(
                     &mut lines,
                     &mut hits,
-                    Line::from(vec![
-                        Span::styled(
-                            format!("  [0] suggested: {} ", q.suggested_answer),
-                            Style::default()
-                                .fg(theme::SUCCESS)
-                                .add_modifier(Modifier::UNDERLINED),
-                        ),
-                        Span::styled("(click)", Style::default().fg(theme::MUTED)),
-                    ]),
+                    Line::from(vec![Span::styled(
+                        {
+                            let prefix = "  [0] suggested: ".to_string();
+                            let suffix = " (click)".to_string();
+                            let budget =
+                                w.saturating_sub(display_width(&prefix) + display_width(&suffix));
+                            format!(
+                                "{}{} {} ",
+                                prefix,
+                                truncate_to_width(&q.suggested_answer, budget),
+                                suffix
+                            )
+                        },
+                        Style::default()
+                            .fg(theme::SUCCESS)
+                            .add_modifier(Modifier::UNDERLINED),
+                    )]),
                     Some(TranscriptHit::Question(QuestionSelection::Suggested)),
                 );
                 for (i, o) in q.options.iter().enumerate() {
                     push_transcript_line(
                         &mut lines,
                         &mut hits,
-                        Line::from(vec![
-                            Span::styled(
-                                format!("  [{}] ({}) {} ", i + 1, o.id, o.label),
-                                Style::default()
-                                    .fg(theme::TEXT)
-                                    .add_modifier(Modifier::UNDERLINED),
-                            ),
-                            Span::styled("(click)", Style::default().fg(theme::MUTED)),
-                        ]),
+                        Line::from(vec![Span::styled(
+                            {
+                                let prefix = format!("  [{}] ({}) ", i + 1, o.id);
+                                let suffix = " (click)".to_string();
+                                let budget = w.saturating_sub(
+                                    display_width(&prefix) + display_width(&suffix),
+                                );
+                                format!(
+                                    "{}{} {} ",
+                                    prefix,
+                                    truncate_to_width(&o.label, budget),
+                                    suffix
+                                )
+                            },
+                            Style::default()
+                                .fg(theme::TEXT)
+                                .add_modifier(Modifier::UNDERLINED),
+                        )]),
                         Some(TranscriptHit::Question(QuestionSelection::Option {
                             option_id: o.id.clone(),
                         })),
@@ -1811,7 +1831,7 @@ fn transcript_lines_and_hits(
                         &mut lines,
                         &mut hits,
                         Line::from(Span::styled(
-                            "  [c] type your own answer below, then Enter",
+                            truncate_to_width("  [c] type your own answer below, then Enter", w),
                             Style::default().fg(theme::MUTED),
                         )),
                         None,
@@ -1821,7 +1841,10 @@ fn transcript_lines_and_hits(
                     &mut lines,
                     &mut hits,
                     Line::from(Span::styled(
-                        "  Tip: /auto-answer or Enter on empty = suggested · click an option above",
+                        truncate_to_width(
+                            "  Tip: /auto-answer or Enter on empty = suggested · click an option above",
+                            w,
+                        ),
                         Style::default().fg(theme::MUTED),
                     )),
                     None,
@@ -1881,11 +1904,12 @@ fn transcript_lines_and_hits(
                 push_transcript_line(&mut lines, &mut hits, Line::default(), None);
             }
             DisplayBlock::ErrorLine(s) => {
+                let budget = w.saturating_sub(3); // " ✗ "
                 push_transcript_line(
                     &mut lines,
                     &mut hits,
                     Line::from(Span::styled(
-                        format!(" ✗ {s}"),
+                        format!(" ✗ {}", truncate_to_width(s, budget)),
                         Style::default().fg(theme::ERROR),
                     )),
                     None,
@@ -1996,15 +2020,40 @@ fn transcript_lines(state: &TuiSessionState, width: u16) -> Vec<Line<'static>> {
     transcript_lines_and_hits(state, width).0
 }
 
-fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        format!(
-            "{}…",
-            s.chars().take(max.saturating_sub(1)).collect::<String>()
-        )
+/// Compute the display width (columns) of a string, accounting for CJK and tab.
+fn display_width(s: &str) -> usize {
+    s.chars()
+        .map(|c| {
+            if c == '\t' {
+                4
+            } else {
+                unicode_width::UnicodeWidthChar::width(c).unwrap_or(1)
+            }
+        })
+        .sum()
+}
+
+/// Truncate `s` so that its display width fits within `max_cols`.
+fn truncate_to_width(s: &str, max_cols: usize) -> String {
+    if display_width(s) <= max_cols {
+        return s.to_string();
     }
+    let mut result = String::new();
+    let mut w = 0usize;
+    for c in s.chars() {
+        let cw = if c == '\t' {
+            4
+        } else {
+            unicode_width::UnicodeWidthChar::width(c).unwrap_or(1)
+        };
+        if w + cw > max_cols.saturating_sub(1) {
+            result.push('…');
+            break;
+        }
+        result.push(c);
+        w += cw;
+    }
+    result
 }
 
 fn wrap_text(s: &str, width: usize) -> Vec<String> {
@@ -2123,7 +2172,11 @@ fn render_approval_block(
                 Style::default().fg(Color::Black).bg(theme::WARN).bold(),
             ),
             Span::styled(
-                format!(" approval required: {}", req.tool),
+                {
+                    let prefix = " approval required: ".to_string();
+                    let budget = width.saturating_sub(3 + display_width(&prefix));
+                    format!("{prefix}{}", truncate_to_width(&req.tool, budget))
+                },
                 Style::default()
                     .fg(theme::WARN)
                     .add_modifier(Modifier::BOLD),
@@ -2163,7 +2216,10 @@ fn render_approval_block(
         lines,
         hits,
         Line::from(Span::styled(
-            " Reply: y/n · Ctrl+Y approve · Ctrl+N deny · Ctrl+U always allow · /approve · /deny",
+            truncate_to_width(
+                " Reply: y/n · Ctrl+Y approve · Ctrl+N deny · Ctrl+U always allow · /approve · /deny",
+                width,
+            ),
             Style::default().fg(theme::MUTED),
         )),
         None,
@@ -2289,6 +2345,11 @@ pub fn run_blocking(
         ));
     }
 
+    // Dirty tracking: skip terminal.draw() when nothing changed.
+    // Local events (keyboard/mouse) set needs_render; bridge events bump generation.
+    let mut needs_render = true;
+    let mut last_generation = 0u64;
+
     loop {
         {
             let mut g = state.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
@@ -2296,17 +2357,28 @@ pub fn run_blocking(
                 break;
             }
 
-            let slash_filtered = filter_slash_entries(&slash_entries, &g.input_buffer);
-            let at_matches =
-                at_completion_matches(&workspace_files, &g.input_buffer, g.cursor_char_idx);
-            let chrome_h = composer_chrome_height(
-                &slash_entries,
-                &workspace_files,
-                &g.input_buffer,
-                g.cursor_char_idx,
-            );
+            // Detect bridge-driven state changes.
+            if g.generation != last_generation {
+                needs_render = true;
+                last_generation = g.generation;
+            }
 
-            terminal.draw(|frame| {
+            // Skip rendering when nothing changed and no animation needs updating.
+            let animated_busy = g.busy && g.current_busy_state != BusyState::Idle;
+            if !needs_render && !animated_busy {
+                drop(g);
+            } else {
+                let slash_filtered = filter_slash_entries(&slash_entries, &g.input_buffer);
+                let at_matches =
+                    at_completion_matches(&workspace_files, &g.input_buffer, g.cursor_char_idx);
+                let chrome_h = composer_chrome_height(
+                    &slash_entries,
+                    &workspace_files,
+                    &g.input_buffer,
+                    g.cursor_char_idx,
+                );
+
+                terminal.draw(|frame| {
                 let area = frame.area();
                 let (main_area, sidebar_opt) = layout_with_sidebar(area);
                 // Compute dynamic input area size based on buffer content.
@@ -2341,7 +2413,6 @@ pub fn run_blocking(
                             .border_style(Style::default().fg(theme::BORDER))
                             .title(Span::styled(title, Style::default().fg(theme::MUTED))),
                     )
-                    .wrap(Wrap { trim: false })
                     .style(Style::default().bg(theme::BG));
 
                 frame.render_widget(main, tr);
@@ -3567,10 +3638,13 @@ pub fn run_blocking(
                     frame.render_widget(popup, popup_area);
                 }
             })?;
+                needs_render = false;
+            } // else: needs_render check
         }
 
         if poll(Duration::from_millis(40))? {
             let ev = read()?;
+            needs_render = true;
             let mut g = state.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
 
             match ev {
@@ -4911,10 +4985,8 @@ pub fn run_blocking(
 mod approval_parse_tests {
     use super::{
         TuiCmd, apply_selected_at_completion, branch_picker_enter_command,
-        build_composer_visual_rows, completed_at_mention_range_before_cursor, composer_input_rows,
-        composer_line, composer_text_lines, cursor_visual_row_idx, delete_completed_at_mention,
-        escape_cancels_active_turn, filtered_branch_indices, input_area_content_rows,
-        parse_approval_verdict, wrap_char_counts,
+        completed_at_mention_range_before_cursor, composer_line, delete_completed_at_mention,
+        escape_cancels_active_turn, filtered_branch_indices, parse_approval_verdict,
     };
     use crate::tui::state::TuiSessionState;
     use nca_common::event::BusyState;

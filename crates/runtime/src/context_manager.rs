@@ -133,15 +133,13 @@ impl ContextManager {
         }
     }
 
-    /// Find the system message(s) in the message list.
+    /// Count system messages at the start of the list.
     /// System messages should always be preserved.
-    fn find_system_messages(messages: &[Message]) -> Vec<usize> {
+    fn count_system_messages(messages: &[Message]) -> usize {
         messages
             .iter()
-            .enumerate()
-            .filter(|(_, m)| m.role == Role::System)
-            .map(|(i, _)| i)
-            .collect()
+            .take_while(|m| m.role == Role::System)
+            .count()
     }
 
     /// Adjust a cutoff index so it never lands inside a tool_use/tool_result group.
@@ -173,10 +171,7 @@ impl ContextManager {
     /// 1. Always keep all system messages (at start)
     /// 2. Keep recent messages up to max_retained_messages
     /// 3. Mark older messages for summarization
-    pub fn get_compaction_plan(&self, messages: &[Message]) -> CompactionPlan {
-        let system_indices: Vec<usize> = Self::find_system_messages(messages);
-        let system_count = system_indices.len();
-
+    pub fn get_compaction_plan(&self, messages: &[Message], system_count: usize) -> CompactionPlan {
         // Calculate how many non-system messages we can keep
         let non_system_count = messages.len().saturating_sub(system_count);
         let keep_non_system = non_system_count.saturating_sub(self.config.max_retained_messages);
@@ -209,11 +204,11 @@ impl ContextManager {
     /// Get messages that should be summarized.
     /// These are the older messages that will be replaced by a summary.
     pub fn get_messages_to_summarize(&self, messages: &[Message]) -> Vec<Message> {
-        let plan = self.get_compaction_plan(messages);
+        let system_count = Self::count_system_messages(messages);
+        let plan = self.get_compaction_plan(messages, system_count);
 
         if let Some(range) = plan.summarize_range {
             // Skip system messages, get the middle-old messages
-            let system_count = Self::find_system_messages(messages).len();
             let start = (range.start).max(system_count);
 
             messages[start..range.end].to_vec()
@@ -225,8 +220,8 @@ impl ContextManager {
     /// Apply a summary to the context, replacing old messages.
     /// Returns the new message list with the summary inserted.
     pub fn apply_summary(&self, messages: &[Message], summary: &str) -> Vec<Message> {
-        let plan = self.get_compaction_plan(messages);
-        let system_count = Self::find_system_messages(messages).len();
+        let system_count = Self::count_system_messages(messages);
+        let plan = self.get_compaction_plan(messages, system_count);
 
         // If there's nothing to summarize, just return the original messages
         let Some(range) = plan.summarize_range else {
@@ -272,7 +267,7 @@ impl ContextManager {
         max_messages: Option<usize>,
     ) -> Vec<Message> {
         let max = max_messages.unwrap_or(self.config.max_retained_messages);
-        let system_count = Self::find_system_messages(messages).len();
+        let system_count = Self::count_system_messages(messages);
 
         if messages.len() <= max {
             return messages.to_vec();

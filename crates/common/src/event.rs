@@ -203,7 +203,7 @@ pub enum QuestionSelection {
     Suggested,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum EndReason {
     UserExit,
     Completed,

@@ -1,6 +1,7 @@
 //! Event fanout: session log, IPC, and TUI state (no stdout streaming).
 
 use crate::ipc_pending::{ApprovalPendingMap, QuestionPendingMap};
+use crate::tui::elm::feedback::TuiFeedbackMsg;
 use crate::tui::state::TuiSessionState;
 use nca_common::event::{AgentEvent, EventEnvelope};
 use nca_runtime::ipc::IpcHandle;
@@ -20,6 +21,7 @@ pub fn spawn_tui_bridge(
     approval_pending: Option<ApprovalPendingMap>,
     question_pending: Option<QuestionPendingMap>,
     state: Arc<Mutex<TuiSessionState>>,
+    feedback_tx: Option<tokio::sync::mpsc::UnboundedSender<TuiFeedbackMsg>>,
 ) -> tokio::task::JoinHandle<()> {
     let (event_tx_ipc, command_rx) = match ipc_handle {
         Some(h) => {
@@ -62,6 +64,11 @@ pub fn spawn_tui_bridge(
 
             if let Ok(mut g) = state.lock() {
                 g.apply_event(&event);
+            }
+
+            // Forward event to Elm TUI (NcaModel) when feedback channel is present.
+            if let Some(ref ft) = feedback_tx {
+                let _ = ft.send(TuiFeedbackMsg::Agent(event));
             }
         }
     })

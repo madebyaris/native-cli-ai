@@ -12,6 +12,7 @@
 
 use async_trait::async_trait;
 use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
 
 /// Errors produced by workspace filesystem operations.
 #[derive(Debug, thiserror::Error)]
@@ -114,7 +115,7 @@ pub trait WorkspaceFs: Send + Sync {
 /// Production filesystem adapter that enforces workspace-sandbox boundaries.
 pub struct RealFs {
     root: PathBuf,
-    canonical_root: PathBuf,
+    canonical_cache: OnceLock<PathBuf>,
 }
 
 impl RealFs {
@@ -124,11 +125,19 @@ impl RealFs {
     /// directory doesn't exist yet), the raw path is used for prefix checks and
     /// canonicalization is retried on each `resolve` call.
     pub fn new(root: PathBuf) -> Self {
-        let canonical_root = root.canonicalize().unwrap_or_else(|_| root.clone());
+        let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
         Self {
             root,
-            canonical_root,
+            canonical_cache: OnceLock::from(canonical),
         }
+    }
+
+    /// Return the cached canonical workspace root.
+    fn cached_canonical_root(&self) -> &Path {
+        self.canonical_cache
+            .get()
+            .map(|p| p.as_path())
+            .unwrap_or(&self.root)
     }
 }
 
@@ -148,7 +157,7 @@ impl WorkspaceFs for RealFs {
         let root = self
             .root
             .canonicalize()
-            .unwrap_or(self.canonical_root.clone());
+            .unwrap_or_else(|_| self.cached_canonical_root().to_path_buf());
         if canonical.starts_with(&root) {
             Ok(canonical)
         } else {
@@ -161,11 +170,7 @@ impl WorkspaceFs for RealFs {
     fn validate_prefix(&self, path: &str) -> Result<PathBuf, SandboxError> {
         let full = self.root.join(path);
         let normalized = logical_normalize(&full);
-        let root = self
-            .root
-            .canonicalize()
-            .unwrap_or(self.canonical_root.clone());
-        if normalized.starts_with(&root) {
+        if normalized.starts_with(self.cached_canonical_root()) {
             Ok(normalized)
         } else {
             Err(SandboxError::OutsideWorkspace {
@@ -203,7 +208,7 @@ impl WorkspaceFs for RealFs {
         let root = self
             .root
             .canonicalize()
-            .unwrap_or(self.canonical_root.clone());
+            .unwrap_or_else(|_| self.cached_canonical_root().to_path_buf());
         if !canonical_parent.starts_with(&root) {
             return Err(SandboxError::OutsideWorkspace {
                 path: path.to_string(),
@@ -251,7 +256,7 @@ impl WorkspaceFs for RealFs {
         let root = self
             .root
             .canonicalize()
-            .unwrap_or(self.canonical_root.clone());
+            .unwrap_or_else(|_| self.cached_canonical_root().to_path_buf());
         if !canonical.starts_with(&root) {
             return Err(SandboxError::OutsideWorkspace {
                 path: path.to_string(),
@@ -304,7 +309,7 @@ impl WorkspaceFs for RealFs {
             let root = self
                 .root
                 .canonicalize()
-                .unwrap_or(self.canonical_root.clone());
+                .unwrap_or_else(|_| self.cached_canonical_root().to_path_buf());
             if !canonical_parent.starts_with(&root) {
                 return Err(SandboxError::OutsideWorkspace {
                     path: to.to_string(),
@@ -338,7 +343,7 @@ impl WorkspaceFs for RealFs {
             let root = self
                 .root
                 .canonicalize()
-                .unwrap_or(self.canonical_root.clone());
+                .unwrap_or_else(|_| self.cached_canonical_root().to_path_buf());
             if !canonical_parent.starts_with(&root) {
                 return Err(SandboxError::OutsideWorkspace {
                     path: to.to_string(),

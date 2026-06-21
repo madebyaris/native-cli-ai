@@ -69,6 +69,7 @@ pub enum OnboardingValidation {
     Failed(String),
 }
 
+#[allow(dead_code)]
 pub struct TuiSessionState {
     pub blocks: Vec<DisplayBlock>,
     /// In-progress assistant text (shown below committed blocks until finalized).
@@ -83,6 +84,9 @@ pub struct TuiSessionState {
     pub scroll_lines: usize,
     /// When true, transcript stays pinned to the bottom as new output arrives.
     pub transcript_follow_tail: bool,
+    /// Monotonically increasing counter, bumped by `apply_event` and local mutations.
+    /// Used by the render loop to detect bridge-driven state changes.
+    pub generation: u64,
     pub session_id: String,
     /// Workspace root for resolving attachment paths and clipboard import.
     pub workspace_root: PathBuf,
@@ -218,6 +222,7 @@ pub struct ModelPickerEntry {
     pub is_header: bool,
 }
 
+#[allow(dead_code)]
 impl TuiSessionState {
     pub fn new(
         session_id: String,
@@ -235,6 +240,7 @@ impl TuiSessionState {
             cursor_char_idx: 0,
             scroll_lines: 0,
             transcript_follow_tail: true,
+            generation: 0,
             session_id,
             workspace_root,
             workspace_display: String::new(),
@@ -576,6 +582,7 @@ impl TuiSessionState {
     }
 
     pub fn apply_event(&mut self, e: &AgentEvent) {
+        self.generation = self.generation.wrapping_add(1);
         match e {
             AgentEvent::SessionStarted {
                 session_id,
@@ -658,7 +665,7 @@ impl TuiSessionState {
                         name,
                         ok,
                         detail,
-                        full_output: full_output.clone(),
+                        full_output,
                         expanded: false,
                     };
                 } else {
@@ -666,7 +673,7 @@ impl TuiSessionState {
                         name: "?".into(),
                         ok,
                         detail,
-                        full_output: full_output.clone(),
+                        full_output,
                         expanded: false,
                     });
                 }
@@ -741,7 +748,14 @@ impl TuiSessionState {
                 question_id,
                 selection,
             } => {
-                self.active_question = None;
+                // Only clear if the resolved question matches the active one.
+                let matches = self
+                    .active_question
+                    .as_ref()
+                    .is_some_and(|q| q.question_id == *question_id);
+                if matches {
+                    self.active_question = None;
+                }
                 self.blocks.push(DisplayBlock::System(format!(
                     "Answered question {question_id}: {selection:?}"
                 )));

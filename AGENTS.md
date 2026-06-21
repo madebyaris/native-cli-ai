@@ -90,9 +90,23 @@ The system has several size guards to prevent context window overflow:
 - `reasoning_content` from DeepSeek is stripped before re-upload (response-only signal, ~500 tokens saved per turn).
 - Cost tracker includes cache token accounting (cache_read priced at 1/50 of normal input).
 
+## TUI Architecture
+
+The TUI runs a **dual-write bridge** (`tui/bridge.rs`) that fans out each `AgentEvent` to:
+1. `TuiSessionState` (legacy mutable state in `state.rs`) — still used by the `cmd_rx` loop in `repl.rs` for synchronous reads.
+2. `TuiFeedbackMsg` channel → `NcaModel` (Elm architecture in `tui/elm/`) — the actual renderer.
+
+The Elm TUI (`tui/elm/model.rs::NcaModel`) runs inside `spawn_blocking` on a dedicated thread with its own tick/update/view loop. It owns all rendering, input handling, and component state. The legacy `app.rs::run_blocking()` is no longer called.
+
+**Question-answer bypass:** While `run_turn` blocks on `ask_question`'s oneshot channel, the main `cmd_rx` loop never receives `TuiCmd::Submit` or `QuestionAnswer`. Answers must flow through the `question_answer_tx` side channel (set up in `repl.rs:1676`). The Elm composer routes Enter keypresses through this channel when `active_question` is set.
+
+**Dead-code suppression:** `tui/mod.rs` has `#[allow(dead_code)]` on `pub mod app` and `tui/elm/mod.rs` has `#![allow(dead_code, unused_imports)]`. The legacy `app.rs` and Elm components contain many unused items during the migration. Do not remove `#[allow]` annotations without verifying the item is truly dead.
+
+**Shared state between Elm and runtime:** Uses `Arc<StdMutex<...>>` (not tokio::Mutex) because Elm runs on a blocking thread. Key shared handles: `active_question_id`, `active_question_payload`, `staged_images`.
+
 ## TUI & IPC Performance
 
-- Ratatui rendering must use `is_dirty()` guards to skip frames when nothing changed — without this, idle CPU stays at 7%+ instead of target <1%.
+- Ratatui rendering must use `is_dirty()` guards to skip frames when nothing changed — without this, idle CPU stays at 7%+ instead of target <1%. The Elm architecture has a `redraw` guard and `BlockLineCache` for incremental rendering.
 - IPC channels must be bounded (buffer=100) to prevent unbounded message accumulation.
 - Use `Vec::with_capacity` when size is known at allocation time.
 - Bash PTY does not inherit environment variables; only an explicit whitelist passes through.
@@ -128,8 +142,14 @@ Built in `core::harness::build_system_prompt`:
 | `crates/core/src/skills.rs` | Skill discovery and resolution |
 | `crates/runtime/src/` | Supervisor, IPC server, session persistence, PTY, worktrees |
 | `crates/cli/src/main.rs` | Binary entrypoint |
-| `crates/cli/src/tui/` | Full-screen TUI implementation |
-| `crates/cli/src/repl.rs` | Line-oriented REPL (reedline-based) |
+| `crates/cli/src/repl.rs` | Line-oriented REPL (reedline-based), Elm TUI wiring (`run_with_tui`) |
+| `crates/cli/src/tui/bridge.rs` | Dual-write event fanout: state + Elm feedback channel |
+| `crates/cli/src/tui/elm/model.rs` | `NcaModel` (Elm architecture), `SideEffectChannels`, tick/update/view loop |
+| `crates/cli/src/tui/elm/run.rs` | `run_nca_model()` entrypoint, `NcaModelParams` |
+| `crates/cli/src/tui/elm/msg.rs` | `Msg` enum (Elm messages including `QuestionSubmit`, `QuestionAnswer`) |
+| `crates/cli/src/tui/elm/feedback.rs` | `TuiFeedbackMsg` enum, shared state handles |
+| `crates/cli/src/tui/app.rs` | Legacy TUI (dead code with `#[allow(dead_code)]`), exports `TuiCmd`, `ApprovalAnswer`, theme |
+| `crates/cli/src/tui/state.rs` | `TuiSessionState`, `DisplayBlock`, event application |
 | `crates/common/src/config.rs` | Config schema and resolution chain |
 
 ## Release & Distribution

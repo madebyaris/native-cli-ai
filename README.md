@@ -150,9 +150,9 @@ The main interface is designed to feel like a serious terminal tool, not a toy o
 | `nca doctor` | Check provider readiness, skills, and memory/config paths. |
 | `nca config` | Print effective config and resolved paths. |
 | `nca memory list\|add` | Inspect or append workspace memory notes. |
-| `nca skills` | List discovered skills with their source (`AGENTS.md`, filesystem, or user directory). |
+| `nca skills` | List discovered skills with their source (`AGENTS.md`, filesystem, or user directory). Subcommands: `list`, `add`, `remove`, `update`. |
 | `nca mcp` | List configured MCP servers. |
-| `nca completion <shell>` | Generate shell completions. |
+| `nca completion <shell>` | Generate shell completions (bash, zsh, fish, PowerShell, elvish). |
 | `nca index build\|show` | Build or inspect a cached CLI index under `~/.nca/workspaces/<workspace-id>/`. |
 | `nca autoresearch once <program.md>` | Run a metric-driven research program and print parsed output. |
 

@@ -242,7 +242,7 @@ async fn run_service_session_with_startup(
         }
     }
 
-    supervisor.finish(reason.clone()).await;
+    supervisor.finish(reason).await;
     fanout_task.abort();
     if let Some(task) = command_task {
         task.abort();
