@@ -2,11 +2,9 @@
 
 use crate::ipc_pending::{ApprovalPendingMap, QuestionPendingMap};
 use crate::tui::elm::feedback::TuiFeedbackMsg;
-use crate::tui::state::TuiSessionState;
 use nca_common::event::{AgentEvent, EventEnvelope};
 use nca_runtime::ipc::IpcHandle;
 use nca_runtime::supervisor;
-use std::sync::{Arc, Mutex};
 use tokio::{fs::OpenOptions, io::AsyncWriteExt};
 
 struct IpcFanout {
@@ -20,8 +18,7 @@ pub fn spawn_tui_bridge(
     ipc_handle: Option<IpcHandle>,
     approval_pending: Option<ApprovalPendingMap>,
     question_pending: Option<QuestionPendingMap>,
-    state: Arc<Mutex<TuiSessionState>>,
-    feedback_tx: Option<tokio::sync::mpsc::UnboundedSender<TuiFeedbackMsg>>,
+    feedback_tx: tokio::sync::mpsc::UnboundedSender<TuiFeedbackMsg>,
 ) -> tokio::task::JoinHandle<()> {
     let (event_tx_ipc, command_rx) = match ipc_handle {
         Some(h) => {
@@ -62,14 +59,7 @@ pub fn spawn_tui_bridge(
                 let _ = file.write_all(b"\n").await;
             }
 
-            if let Ok(mut g) = state.lock() {
-                g.apply_event(&event);
-            }
-
-            // Forward event to Elm TUI (NcaModel) when feedback channel is present.
-            if let Some(ref ft) = feedback_tx {
-                let _ = ft.send(TuiFeedbackMsg::Agent(event));
-            }
+            let _ = feedback_tx.send(TuiFeedbackMsg::Agent(event));
         }
     })
 }

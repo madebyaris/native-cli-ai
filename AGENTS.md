@@ -96,11 +96,11 @@ The TUI runs a **dual-write bridge** (`tui/bridge.rs`) that fans out each `Agent
 1. `TuiSessionState` (legacy mutable state in `state.rs`) — still used by the `cmd_rx` loop in `repl.rs` for synchronous reads.
 2. `TuiFeedbackMsg` channel → `NcaModel` (Elm architecture in `tui/elm/`) — the actual renderer.
 
-The Elm TUI (`tui/elm/model.rs::NcaModel`) runs inside `spawn_blocking` on a dedicated thread with its own tick/update/view loop. It owns all rendering, input handling, and component state. The legacy `app.rs::run_blocking()` is no longer called.
+The Elm TUI (`tui/elm/model.rs::NcaModel`) runs inside `spawn_blocking` on a dedicated thread with its own tick/update/view loop. It owns all rendering, input handling, and component state. All events flow through `TuiFeedbackChannel` → `TuiFeedbackMsg` channel → `NcaModel::apply_event`. The legacy `app.rs::run_blocking()` and `TuiSessionState` dual-write are no longer used.
 
-**Question-answer bypass:** While `run_turn` blocks on `ask_question`'s oneshot channel, the main `cmd_rx` loop never receives `TuiCmd::Submit` or `QuestionAnswer`. Answers must flow through the `question_answer_tx` side channel (set up in `repl.rs:1676`). The Elm composer routes Enter keypresses through this channel when `active_question` is set.
+**Question-answer bypass:** While `run_turn` blocks on `ask_question`'s oneshot channel, the main `cmd_rx` loop never receives `TuiCmd::Submit` or `QuestionAnswer`. Answers must flow through the `question_answer_tx` side channel (set up in `repl.rs`). The Elm composer routes Enter keypresses through this channel when `active_question` is set.
 
-**Dead-code suppression:** `tui/mod.rs` has `#[allow(dead_code)]` on `pub mod app` and `tui/elm/mod.rs` has `#![allow(dead_code, unused_imports)]`. The legacy `app.rs` and Elm components contain many unused items during the migration. Do not remove `#[allow]` annotations without verifying the item is truly dead.
+**Dead-code suppression:** `tui/mod.rs` has `#[allow(dead_code)]` on `pub mod app`. The legacy `app.rs` contains many unused items during the migration. Do not remove `#[allow]` annotations without verifying the item is truly dead. `TuiSessionState` in `state.rs` is retained only for tests and the legacy `replay_event_log_into_state` helper.
 
 **Shared state between Elm and runtime:** Uses `Arc<StdMutex<...>>` (not tokio::Mutex) because Elm runs on a blocking thread. Key shared handles: `active_question_id`, `active_question_payload`, `staged_images`.
 

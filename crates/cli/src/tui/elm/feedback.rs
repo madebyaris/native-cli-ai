@@ -89,7 +89,6 @@ pub enum TuiFeedbackMsg {
     SetValidationStatus {
         status: Option<OnboardingValidation>,
     },
-    /// Set the pending API key provider (used by Submit branch).
     SetPendingApiKeyProvider {
         provider: Option<ProviderKind>,
     },
@@ -114,8 +113,7 @@ pub enum TuiFeedbackMsg {
 
 /// Trait that decouples repl.rs from TUI internal state.
 ///
-/// Implemented by `TuiFeedbackChannel` (channel-based) for the new Elm architecture,
-/// and also by the legacy `Arc<Mutex<TuiSessionState>>` wrapper during migration.
+/// The primary implementation is `TuiFeedbackChannel` (channel-based).
 pub trait TuiFeedback: Send + Sync {
     // ── Write operations (one-way to TUI) ──
     fn push_agent_event(&self, event: AgentEvent);

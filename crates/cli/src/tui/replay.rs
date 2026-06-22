@@ -1,10 +1,9 @@
-//! Replay persisted `*.events.jsonl` into `TuiSessionState` so resume shows prior transcript.
+//! Replay persisted `*.events.jsonl` into TUI state or Elm feedback channel.
 
-use crate::tui::state::TuiSessionState;
+use crate::tui::elm::feedback::TuiFeedbackMsg;
 use nca_common::event::{AgentEvent, EventEnvelope};
 use serde_json::Value;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 
 fn parse_json_values_on_line(line: &str) -> Vec<Value> {
     let trimmed = line.trim();
@@ -40,10 +39,15 @@ fn should_skip_on_replay(ev: &AgentEvent) -> bool {
     )
 }
 
-/// Load historical events from disk into TUI state (used on resume / reopen same log).
-pub async fn replay_event_log_into_state(log_path: &Path, state: &Arc<Mutex<TuiSessionState>>) {
+/// Replay persisted events from disk into the Elm feedback channel.
+/// Events are buffered in the channel and consumed by NcaModel when it starts.
+/// Returns the number of events applied.
+pub async fn replay_events_to_feedback(
+    log_path: &Path,
+    tx: &tokio::sync::mpsc::UnboundedSender<TuiFeedbackMsg>,
+) -> u64 {
     let Ok(raw) = tokio::fs::read_to_string(log_path).await else {
-        return;
+        return 0;
     };
 
     let mut applied = 0u64;
@@ -55,19 +59,18 @@ pub async fn replay_event_log_into_state(log_path: &Path, state: &Arc<Mutex<TuiS
             if should_skip_on_replay(&ev) {
                 continue;
             }
-            if let Ok(mut g) = state.lock() {
-                g.apply_event(&ev);
-                applied += 1;
-            }
+            let _ = tx.send(TuiFeedbackMsg::Agent(ev));
+            applied += 1;
         }
     }
 
-    if let Ok(mut g) = state.lock() {
-        g.streaming_assistant = None;
-        g.clear_replayed_interaction_state();
-    }
+    // Cleanup: reset transient state that may have been left mid-interaction.
+    let _ = tx.send(TuiFeedbackMsg::SetStreamingAssistant(None));
+    let _ = tx.send(TuiFeedbackMsg::SetActiveApproval(None));
+    let _ = tx.send(TuiFeedbackMsg::SetActiveQuestion(None));
 
-    tracing::debug!(path = %log_path.display(), events_applied = applied, "replayed event log into TUI");
+    tracing::debug!(path = %log_path.display(), events_applied = applied, "replayed event log into feedback channel");
+    applied
 }
 
 #[cfg(test)]
