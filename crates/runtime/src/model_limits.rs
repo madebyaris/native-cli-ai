@@ -117,8 +117,8 @@ pub const MODEL_CONTEXT_LIMITS: &[ModelContextLimits] = &[
     // ZhipuAI GLM-5 Turbo (coding plan)
     ModelContextLimits {
         pattern: "glm-5-turbo",
-        context_window: 128_000,
-        max_output_tokens: 16_384,
+        context_window: 200_000,
+        max_output_tokens: 128_000,
     },
     // Gemini 1.5 Pro
     ModelContextLimits {

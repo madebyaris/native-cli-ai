@@ -318,6 +318,15 @@ impl Supervisor {
         session_id: &str,
         approval_handler: Option<Arc<dyn ApprovalHandler>>,
     ) -> Result<Self, ProviderError> {
+        // Load the original session state BEFORE create() overwrites the file.
+        // create() calls save() with an empty message list, which would destroy
+        // the conversation history if we loaded after.
+        let store = SessionStore::new(workspace_root.join(&config.session.history_dir));
+        let loaded = store
+            .load(session_id)
+            .await
+            .map_err(|e| ProviderError::Other(e.to_string()))?;
+
         let mut sup = Self::create(SupervisorConfig {
             config: config.clone(),
             workspace_root: workspace_root.to_path_buf(),
@@ -328,12 +337,6 @@ impl Supervisor {
             orchestration_context: None,
         })
         .await?;
-
-        let store = SessionStore::new(workspace_root.join(&config.session.history_dir));
-        let loaded = store
-            .load(session_id)
-            .await
-            .map_err(|e| ProviderError::Other(e.to_string()))?;
 
         sup.session_id = loaded.meta.id.clone();
         sup.workspace_root = loaded.meta.workspace.clone();
@@ -440,7 +443,7 @@ impl Supervisor {
     async fn make_context_manager(config: &NcaConfig, model: &str) -> ContextManager {
         let model_limits = model_limits_api::resolve_model_limits(config, model).await;
         let context_window = if config.memory.context.auto_detect_context_window {
-            tracing::info!(
+            tracing::debug!(
                 "Context window target for {}: {} tokens",
                 model,
                 model_limits.context_window
