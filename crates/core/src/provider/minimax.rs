@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Duration;
 
 use nca_common::config::{MiniMaxConfig, NcaConfig};
 use nca_common::message::Message;
@@ -52,6 +53,8 @@ impl MiniMaxProvider {
 
         let client = reqwest::Client::builder()
             .default_headers(headers)
+            .timeout(Duration::from_secs(120))
+            .connect_timeout(Duration::from_secs(30))
             .build()
             .map_err(|err| {
                 ProviderError::Configuration(format!("failed to build HTTP client: {err}"))
