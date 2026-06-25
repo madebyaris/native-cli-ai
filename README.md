@@ -170,7 +170,7 @@ Useful interactive behaviors:
 - `! <cmd>` runs a shell command.
 - `@ <query>` searches files (fuzzy file mention completions).
 - `/...` runs slash commands.
-- `Tab` cycles agent profiles such as `build`, `plan`, `review`, `fix`, and `test`.
+- `Tab` cycles agent profiles (`build` → `plan` → `review` → `fix` → `test`) when the input is empty, or completes the selected slash command without running it.
 - `Ctrl+C` or `/stop` cancels the current running turn.
 - `/auto-answer` accepts the suggested answer for a pending `ask_question`.
 

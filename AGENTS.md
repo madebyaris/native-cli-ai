@@ -19,15 +19,9 @@ cargo build --release && cp target/release/nca /usr/local/bin/
 
 # Dev run (debug)
 cargo run -p nca-cli
-
-# Check formatting (non-destructive)
-cargo fmt -- --check
-
-# Lint with clippy
-cargo clippy --workspace -- -D warnings
 ```
 
-No pre-commit hooks are installed (despite `cargo-husky` appearing in cli dev-dependencies). CI runs on push to all branches and PRs to all branches.
+A pre-commit hook (auto-installed by `cargo-husky` on first `cargo test`) runs `cargo test`, `cargo clippy -- -D warnings`, and `cargo fmt -- --check` before every commit — so commits are slow and will fail if any of those fail. To bypass locally use `git commit --no-verify` (CI still enforces the same checks). CI runs on push to all branches and PRs to all branches.
 
 No `rust-toolchain.toml` or `rustfmt.toml` — CI pins stable channel via `dtolnay/rust-toolchain@stable`; formatting and linting use Rust defaults.
 
