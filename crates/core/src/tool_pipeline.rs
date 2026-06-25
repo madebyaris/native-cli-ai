@@ -5,14 +5,17 @@
 //! returns ordered results. This isolates the "check → approve → execute" flow
 //! from the streaming/parser logic in AgentLoop.
 
-use crate::approval::{ApprovalPolicy, ApprovalVerdict};
-use crate::hooks::{HookEventKind, HookRunner};
-use crate::tools::ToolRegistry;
-use futures_util::future::join_all;
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
+
 use nca_common::event::AgentEvent;
 use nca_common::tool::{PermissionTier, ToolCall, ToolResult};
 use serde_json::json;
-use std::sync::atomic::AtomicBool;
+use tokio::time::MissedTickBehavior;
+
+use crate::approval::{ApprovalPolicy, ApprovalVerdict};
+use crate::hooks::{HookEventKind, HookRunner};
+use crate::tools::ToolRegistry;
 
 /// Outcome of running the tool pipeline on a batch of tool calls.
 pub struct PipelineResult {
@@ -184,36 +187,50 @@ pub async fn run_tool_pipeline(
         }
     }
 
-    // ── Phase 2: concurrent execution ────────────────────────────────────────
     let n = tickets.len();
     let mut results: Vec<Option<ToolResult>> = (0..n).map(|_| None).collect();
 
-    let to_execute: Vec<(usize, &ToolCall)> = tickets
-        .iter()
+    let to_execute: Vec<(usize, ToolCall)> = tickets
+        .into_iter()
         .enumerate()
-        .filter_map(|(i, t)| {
-            if let Ticket::Execute(call) = t {
-                Some((i, call))
-            } else {
+        .filter_map(|(i, t)| match t {
+            Ticket::Execute(call) => Some((i, call)),
+            Ticket::Resolved(result) => {
+                results[i] = Some(result);
                 None
             }
         })
         .collect();
 
+    // ── Phase 2: concurrent execution with cancel polling ──────────────
     if !to_execute.is_empty() {
-        let futs = to_execute.iter().map(|(i, call)| {
-            let fut = tools.execute(call);
-            async move { (*i, fut.await) }
-        });
-        let executed: Vec<(usize, ToolResult)> = join_all(futs).await;
-        for (i, result) in executed {
-            results[i] = Some(result);
-        }
-    }
+        let mut cancel_poll = tokio::time::interval(Duration::from_millis(50));
+        cancel_poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-    // Fill pre-resolved slots
-    for (i, ticket) in tickets.into_iter().enumerate() {
-        if let Ticket::Resolved(result) = ticket {
+        // Run tool executions concurrently.  Poll cancel_flag every 50 ms so
+        // the user can interrupt long-running tools (e.g. cargo build).
+        let exec_fut = async {
+            let futs = to_execute.iter().map(|(i, call)| {
+                let fut = tools.execute(call);
+                async move { (*i, fut.await) }
+            });
+            futures_util::future::join_all(futs).await
+        };
+
+        tokio::pin!(exec_fut);
+
+        let executed: Vec<(usize, ToolResult)> = loop {
+            tokio::select! {
+                result = exec_fut.as_mut() => break result,
+                _ = cancel_poll.tick() => {
+                    if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                        return Err("run cancelled during tool execution".into());
+                    }
+                }
+            }
+        };
+
+        for (i, result) in executed {
             results[i] = Some(result);
         }
     }

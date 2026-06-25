@@ -1,7 +1,6 @@
 pub mod apply_patch;
 pub mod ask_question;
 pub mod ast_grep;
-pub mod bash;
 pub mod code_intel_tool;
 pub mod copy_path;
 pub mod create_directory;
@@ -76,13 +75,24 @@ impl ToolRegistry {
         registry.register(Box::new(move_path::MovePathTool::new(fs.clone())));
         registry.register(Box::new(copy_path::CopyPathTool::new(fs.clone())));
         registry.register(Box::new(delete_path::DeletePathTool::new(fs.clone())));
-        registry.register(Box::new(run_validation::RunValidationTool::new(fs.clone())));
-        registry.register(Box::new(bash::BashTool::new(fs)));
+        registry.register(Box::new(run_validation::RunValidationTool::new(fs)));
         registry
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools.iter().map(|t| t.definition()).collect()
+        let mut seen = std::collections::HashSet::new();
+        self.tools
+            .iter()
+            .filter_map(|t| {
+                let def = t.definition();
+                if seen.insert(def.name.clone()) {
+                    Some(def)
+                } else {
+                    tracing::warn!("duplicate tool name skipped: {}", def.name);
+                    None
+                }
+            })
+            .collect()
     }
 
     pub async fn execute(&self, call: &ToolCall) -> ToolResult {

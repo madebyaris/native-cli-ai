@@ -14,6 +14,10 @@ impl PtyManager {
         }
     }
 
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
+    }
+
     /// Spawn a command in a new PTY, capture output, and return it.
     pub async fn exec(&self, command: &str, timeout_secs: u64) -> Result<PtyOutput, PtyError> {
         let mut cmd = tokio::process::Command::new("sh");
@@ -23,23 +27,51 @@ impl PtyManager {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let output = timeout(Duration::from_secs(timeout_secs), cmd.output())
-            .await
-            .map_err(|_| PtyError::Timeout(timeout_secs))?
+        let mut child = cmd
+            .spawn()
             .map_err(|e| PtyError::SpawnFailed(e.to_string()))?;
 
-        let mut text = String::new();
-        text.push_str(&String::from_utf8_lossy(&output.stdout));
-        if !output.stderr.is_empty() {
-            if !text.is_empty() {
-                text.push('\n');
+        let status = match timeout(Duration::from_secs(timeout_secs), child.wait()).await {
+            Ok(Ok(status)) => status,
+            Ok(Err(e)) => {
+                // Child exited with an error; ensure it's reaped.
+                std::mem::drop(child.kill());
+                return Err(PtyError::SpawnFailed(e.to_string()));
             }
-            text.push_str(&String::from_utf8_lossy(&output.stderr));
+            Err(_) => {
+                // Timeout — kill the child process.
+                std::mem::drop(child.kill());
+                std::mem::drop(child.wait());
+                return Err(PtyError::Timeout(timeout_secs));
+            }
+        };
+
+        // Collect stdout/stderr from the piped handles.
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        if let Some(mut out) = child.stdout.take() {
+            use tokio::io::AsyncReadExt;
+            let mut buf = Vec::new();
+            let _ = out.read_to_end(&mut buf).await;
+            stdout = String::from_utf8_lossy(&buf).into_owned();
+        }
+        if let Some(mut err) = child.stderr.take() {
+            use tokio::io::AsyncReadExt;
+            let mut buf = Vec::new();
+            let _ = err.read_to_end(&mut buf).await;
+            stderr = String::from_utf8_lossy(&buf).into_owned();
+        }
+
+        if !stderr.is_empty() && !stdout.is_empty() {
+            stdout.push('\n');
+            stdout.push_str(&stderr);
+        } else if !stderr.is_empty() {
+            stdout = stderr;
         }
 
         Ok(PtyOutput {
-            stdout: text,
-            exit_code: output.status.code().unwrap_or(-1),
+            stdout,
+            exit_code: status.code().unwrap_or(-1),
         })
     }
 }

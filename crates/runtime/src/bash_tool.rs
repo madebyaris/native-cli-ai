@@ -19,9 +19,10 @@ impl RuntimeBashTool {
 #[async_trait::async_trait]
 impl ToolExecutor for RuntimeBashTool {
     fn definition(&self) -> ToolDefinition {
+        let cwd = self.pty.workspace_root().display().to_string();
         ToolDefinition {
             name: "execute_bash".into(),
-            description: "Execute a shell command in the workspace".into(),
+            description: format!("Execute a shell command in the workspace (cwd: {cwd})"),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

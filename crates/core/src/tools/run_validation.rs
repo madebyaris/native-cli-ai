@@ -86,14 +86,27 @@ impl ToolExecutor for RunValidationTool {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
-        let output = match tokio::time::timeout(
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                return ToolResult {
+                    call_id: call.id.clone(),
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Failed to execute command: {e}")),
+                };
+            }
+        };
+
+        let status = match tokio::time::timeout(
             std::time::Duration::from_secs(p.timeout_secs),
-            cmd.output(),
+            child.wait(),
         )
         .await
         {
-            Ok(Ok(out)) => out,
+            Ok(Ok(status)) => status,
             Ok(Err(e)) => {
+                std::mem::drop(child.kill());
                 return ToolResult {
                     call_id: call.id.clone(),
                     success: false,
@@ -102,6 +115,8 @@ impl ToolExecutor for RunValidationTool {
                 };
             }
             Err(_) => {
+                std::mem::drop(child.kill());
+                std::mem::drop(child.wait());
                 return ToolResult {
                     call_id: call.id.clone(),
                     success: false,
@@ -112,17 +127,28 @@ impl ToolExecutor for RunValidationTool {
         };
 
         let mut text = String::new();
-        text.push_str(&String::from_utf8_lossy(&output.stdout));
-        if !output.stderr.is_empty() {
-            if !text.is_empty() {
-                text.push('\n');
+        if let Some(mut out) = child.stdout.take() {
+            use tokio::io::AsyncReadExt;
+            let mut buf = Vec::new();
+            let _ = out.read_to_end(&mut buf).await;
+            text = String::from_utf8_lossy(&buf).into_owned();
+        }
+        if let Some(mut err) = child.stderr.take() {
+            use tokio::io::AsyncReadExt;
+            let mut buf = Vec::new();
+            let _ = err.read_to_end(&mut buf).await;
+            let stderr = String::from_utf8_lossy(&buf).into_owned();
+            if !stderr.is_empty() {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(&stderr);
             }
-            text.push_str(&String::from_utf8_lossy(&output.stderr));
         }
 
         ToolResult {
             call_id: call.id.clone(),
-            success: output.status.success(),
+            success: status.success(),
             output: text,
             error: None,
         }
