@@ -36,6 +36,8 @@ pub(crate) struct SideEffectChannels {
     pub active_question_id: Arc<StdMutex<Option<String>>>,
     /// Shared active question payload for answer parsing.
     pub active_question_payload: Arc<StdMutex<Option<InteractiveQuestionPayload>>>,
+    /// Shared active approval request for answer routing.
+    pub active_approval_payload: Arc<StdMutex<Option<crate::tui::state::ApprovalRequest>>>,
     /// Shared staged images for synchronous reads by the runtime.
     pub staged_images: Arc<StdMutex<Vec<ImageAttachment>>>,
 }
@@ -433,6 +435,58 @@ impl NcaModel {
                     AgentEvent::BusyStateChanged { state } => {
                         self.components.status_bar.set_busy(*state);
                     }
+                    AgentEvent::QuestionRequested { question } => {
+                        self.components.status_bar.set_active_question(true);
+                        self.components
+                            .transcript
+                            .set_active_question(Some(question.clone()));
+                        self.components.state_mut().active_question = true;
+                        if let Ok(mut guard) = self.side_effects.active_question_id.lock() {
+                            *guard = Some(question.question_id.clone());
+                        }
+                        if let Ok(mut guard) = self.side_effects.active_question_payload.lock() {
+                            *guard = Some(question.clone());
+                        }
+                    }
+                    AgentEvent::QuestionResolved { .. } => {
+                        self.components.status_bar.set_active_question(false);
+                        self.components.transcript.set_active_question(None);
+                        self.components.state_mut().active_question = false;
+                        if let Ok(mut guard) = self.side_effects.active_question_id.lock() {
+                            *guard = None;
+                        }
+                        if let Ok(mut guard) = self.side_effects.active_question_payload.lock() {
+                            *guard = None;
+                        }
+                    }
+                    AgentEvent::ApprovalRequested {
+                        call_id,
+                        tool,
+                        description,
+                    } => {
+                        let req = crate::tui::state::ApprovalRequest {
+                            call_id: call_id.clone(),
+                            tool: tool.clone(),
+                            description: description.clone(),
+                            input: String::new(),
+                        };
+                        self.components.status_bar.set_active_approval(true);
+                        self.components
+                            .transcript
+                            .set_active_approval(Some(req.clone()));
+                        self.components.state_mut().active_approval = true;
+                        if let Ok(mut guard) = self.side_effects.active_approval_payload.lock() {
+                            *guard = Some(req);
+                        }
+                    }
+                    AgentEvent::ApprovalResolved { .. } => {
+                        self.components.status_bar.set_active_approval(false);
+                        self.components.transcript.set_active_approval(None);
+                        self.components.state_mut().active_approval = false;
+                        if let Ok(mut guard) = self.side_effects.active_approval_payload.lock() {
+                            *guard = None;
+                        }
+                    }
                     _ => {}
                 }
                 // Delegate to transcript for blocks/streaming
@@ -464,10 +518,14 @@ impl NcaModel {
                 self.components.transcript.clear();
             }
             TuiFeedbackMsg::SetActiveApproval(req) => {
-                self.components
-                    .status_bar
-                    .set_active_approval(req.is_some());
-                self.components.transcript.set_active_approval(req);
+                let has_approval = req.is_some();
+                self.components.status_bar.set_active_approval(has_approval);
+                self.components.transcript.set_active_approval(req.clone());
+                self.components.state_mut().active_approval = has_approval;
+                // Store approval request for answer routing (need call_id).
+                if let Ok(mut guard) = self.side_effects.active_approval_payload.lock() {
+                    *guard = req;
+                }
             }
             TuiFeedbackMsg::SetActiveQuestion(q) => {
                 self.components.status_bar.set_active_question(q.is_some());
@@ -683,9 +741,19 @@ impl NcaModel {
     fn process_global_msg(&mut self, msg: Msg) {
         match msg {
             Msg::Quit => {
+                // Signal agent to stop so run_turn().await completes and cmd_rx can process the exit.
+                if let Some(ref flag) = self.side_effects.cancel_flag {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 self.quit = true;
             }
             Msg::Cmd(cmd) => {
+                // Immediately signal the agent loop to cancel (bypasses blocked cmd_rx).
+                if matches!(cmd, TuiCmd::CancelTurn) {
+                    if let Some(ref flag) = self.side_effects.cancel_flag {
+                        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
                 let _ = self.cmd_tx.send(Msg::Cmd(cmd));
             }
             Msg::Redraw => {
@@ -728,6 +796,25 @@ impl NcaModel {
             Msg::QuestionAnswer(sel) => {
                 self.send_question_answer(sel);
             }
+            Msg::ApprovalSubmit(raw) => {
+                let t = raw.trim();
+                let approved = t.eq_ignore_ascii_case("y") || t.eq_ignore_ascii_case("yes");
+                let denied = t.eq_ignore_ascii_case("n") || t.eq_ignore_ascii_case("no");
+                if approved || denied {
+                    self.send_approval_answer(approved);
+                }
+                // If input doesn't match y/yes/n/no, silently ignore (don't submit as command).
+            }
+            Msg::ApprovalQuickAnswer {
+                approved,
+                always_allow,
+            } => {
+                if always_allow {
+                    self.send_approval_always_allow();
+                } else {
+                    self.send_approval_answer(approved);
+                }
+            }
             _ => {}
         }
     }
@@ -762,6 +849,37 @@ impl NcaModel {
             && let Some(ref q) = self.components.transcript.active_question_id()
         {
             let _ = tx.send((q.clone(), sel));
+        }
+    }
+
+    /// Send an approval answer through the side channel.
+    fn send_approval_answer(&mut self, approved: bool) {
+        if let Some(ref tx) = self.side_effects.approval_answer_tx
+            && let Ok(guard) = self.side_effects.active_approval_payload.lock()
+            && let Some(ref req) = *guard
+        {
+            let _ = tx.send(crate::tui::app::ApprovalAnswer::Verdict {
+                call_id: req.call_id.clone(),
+                approved,
+            });
+        }
+    }
+
+    /// Send an "always allow" approval — generates a wildcard pattern from the tool name and input.
+    fn send_approval_always_allow(&mut self) {
+        if let Some(ref tx) = self.side_effects.approval_answer_tx
+            && let Ok(guard) = self.side_effects.active_approval_payload.lock()
+            && let Some(ref req) = *guard
+        {
+            let pattern = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&req.input) {
+                nca_core::approval::suggest_allow_pattern(&req.tool, &json)
+            } else {
+                format!("{}:*", req.tool)
+            };
+            let _ = tx.send(crate::tui::app::ApprovalAnswer::AllowPattern {
+                call_id: req.call_id.clone(),
+                pattern,
+            });
         }
     }
 

@@ -1,7 +1,4 @@
-use crate::file_mentions::{
-    at_token_before_cursor, discover_workspace_files, expand_at_file_mentions_default,
-    filter_paths_prefix,
-};
+use crate::file_mentions::expand_at_file_mentions_default;
 use crate::prompt::NcaPrompt;
 use crate::runner::{SessionRuntime, dispatch_question_answer, dispatch_tool_approval};
 use crate::slash_commands::SLASH_COMMANDS;
@@ -17,7 +14,10 @@ use nca_common::config::{PermissionMode, ProviderKind};
 use nca_common::event::{BusyState, EndReason, QuestionSelection};
 use nca_core::skills::SkillCatalog;
 use nca_runtime::memory_store::MemoryStore;
-use reedline::{Completer, Emacs, FileBackedHistory, Reedline, Signal, Suggestion, Vi};
+use reedline::{
+    Emacs, FileBackedHistory, Hinter, KeyCode, KeyModifiers, Reedline, ReedlineEvent, Signal, Vi,
+    default_emacs_keybindings,
+};
 use std::io::Write;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -228,7 +228,7 @@ impl Repl {
                         continue;
                     }
 
-                    // Tab switches agent profile (OpenCode-style)
+                    // Tab switches agent profile (also used by hinter for slash completion)
                     if input == "\t" {
                         self.switch_agent();
                         continue;
@@ -301,7 +301,7 @@ impl Repl {
 ║    ! <cmd>   Run shell command (bash mode)                    ║
 ║    @path     Inline file mentions (expanded before send)      ║
 ║    / <cmd>   Slash commands                                  ║
-║    Tab       Switch agent profile (@build/@plan/@review...)   ║
+║    Tab       Complete /commands or switch agent profile           ║
 ║    Ctrl+D    Exit                                            ║
 ║    Ctrl+C    Cancel current request                           ║
 ║    Ctrl+L    Clear screen                                     ║
@@ -311,6 +311,7 @@ impl Repl {
         );
     }
 
+    #[allow(dead_code)] // retained for future keybinding re-enablement
     /// Switch to the next agent profile (called on Tab press)
     fn switch_agent(&mut self) {
         let next = self.agent_profile.next();
@@ -463,9 +464,8 @@ impl Repl {
 
     fn build_editor(&self) -> anyhow::Result<Reedline> {
         let mut builder = Reedline::create()
-            .with_quick_completions(true)
-            .with_partial_completions(true)
-            .with_ansi_colors(true);
+            .with_ansi_colors(true)
+            .with_hinter(Box::new(SlashHinter::default()));
 
         // Try to load history from disk
         if let Some(parent) = self.history_path.parent() {
@@ -475,6 +475,18 @@ impl Repl {
             }
         }
 
+        // Tab: accept slash-command hinter hint, otherwise immediately exit for agent switch.
+        // crossterm reports Tab as KeyCode::Char('\t').
+        let mut keybindings = default_emacs_keybindings();
+        keybindings.add_binding(
+            KeyModifiers::NONE,
+            KeyCode::Char('\t'),
+            ReedlineEvent::UntilFound(vec![
+                ReedlineEvent::HistoryHintComplete,
+                ReedlineEvent::ExecuteHostCommand(String::from("\t")),
+            ]),
+        );
+
         // Support vim mode if enabled via env
         if std::env::var("NCA_EDITOR_MODE")
             .map(|v| v.eq_ignore_ascii_case("vi") || v.eq_ignore_ascii_case("vim"))
@@ -482,7 +494,7 @@ impl Repl {
         {
             builder = builder.with_edit_mode(Box::new(Vi::default()));
         } else {
-            builder = builder.with_edit_mode(Box::new(Emacs::default()));
+            builder = builder.with_edit_mode(Box::new(Emacs::new(keybindings)));
         }
 
         Ok(builder)
@@ -1522,6 +1534,9 @@ impl Repl {
         // Shared handles for cmd_rx loop (read active question / staged images from Elm side).
         let active_question_id = tui_feedback.active_question_id_handle();
         let active_question_payload = tui_feedback.active_question_payload_handle();
+        let active_approval_payload: std::sync::Arc<
+            std::sync::Mutex<Option<crate::tui::state::ApprovalRequest>>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(None));
         let staged_images = tui_feedback.staged_images_handle();
 
         let _bridge = spawn_tui_bridge(
@@ -1616,6 +1631,7 @@ impl Repl {
                 Some(cancel_flag),
                 Arc::clone(&active_question_id),
                 Arc::clone(&active_question_payload),
+                Arc::clone(&active_approval_payload),
                 Arc::clone(&staged_images),
                 params,
             )
@@ -1994,90 +2010,68 @@ impl Repl {
     }
 }
 
-/// Tab completion for REPL commands and skills
-impl Completer for Repl {
-    fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
-        let mut suggestions = Vec::new();
+/// Inline hint provider for slash commands.
+/// Shows the first matching command as greyed-out text; Tab accepts it.
+/// When no slash command is being typed, returns empty (Tab falls through to agent switch).
+#[derive(Default)]
+struct SlashHinter {
+    hint_suffix: String,
+}
 
-        if let Some((at_byte, prefix)) = at_token_before_cursor(line, pos) {
-            let files = discover_workspace_files(self.runtime.workspace_root());
-            for path in filter_paths_prefix(&files, &prefix) {
-                suggestions.push(Suggestion {
-                    value: format!("@{path}"),
-                    description: Some("workspace file".to_string()),
-                    extra: None,
-                    span: reedline::Span {
-                        start: at_byte,
-                        end: pos,
-                    },
-                    append_whitespace: false,
-                    style: None,
-                });
-            }
-            if !suggestions.is_empty() {
-                return suggestions;
+impl Hinter for SlashHinter {
+    fn handle(
+        &mut self,
+        line: &str,
+        _pos: usize,
+        _history: &dyn reedline::History,
+        _use_ansi_coloring: bool,
+        _cwd: &str,
+    ) -> String {
+        self.hint_suffix.clear();
+
+        if !line.starts_with('/') {
+            return String::new();
+        }
+
+        let command = line.split_whitespace().next().unwrap_or(line);
+
+        // Find the first (alphabetically) matching slash command
+        for &cmd in SLASH_COMMANDS {
+            if cmd.starts_with(command) && cmd != command {
+                let suffix = &cmd[command.len()..];
+                self.hint_suffix = suffix.to_string();
+                return suffix.to_string();
             }
         }
 
-        // Complete REPL commands starting with /
-        if line.starts_with('/') {
-            for cmd in SLASH_COMMANDS {
-                if cmd.starts_with(line) {
-                    suggestions.push(Suggestion {
-                        value: cmd.to_string(),
-                        description: Some("REPL command".to_string()),
-                        extra: None,
-                        span: reedline::Span { start: 0, end: 0 },
-                        append_whitespace: true,
-                        style: None,
-                    });
-                }
-            }
-        }
-
-        // Complete bash mode commands (starting with !)
-        if line.starts_with('!') {
-            // Common shell commands
-            let bash_commands = [
-                "git", "ls", "cat", "find", "grep", "npm", "cargo", "make", "docker", "curl",
-            ];
-            let _prefix = line.trim_start_matches('!');
-            for cmd in bash_commands {
-                let full = format!("!{}", cmd);
-                if full.starts_with(line) {
-                    suggestions.push(Suggestion {
-                        value: full,
-                        description: Some("Shell command".to_string()),
-                        extra: None,
-                        span: reedline::Span { start: 0, end: 0 },
-                        append_whitespace: true,
-                        style: None,
-                    });
-                }
-            }
-        }
-
-        // Load skills for completion
-        if let Ok(skills) = SkillCatalog::discover(
-            self.runtime.workspace_root(),
-            &self.runtime.config().harness.skill_directories,
-        ) {
-            for skill in skills {
+        // Also check discovered skills
+        if let Ok(skills) =
+            SkillCatalog::discover(&std::env::current_dir().unwrap_or_default(), &[])
+        {
+            let mut skill_match: Option<String> = None;
+            for skill in &skills {
                 let skill_cmd = format!("/{}", skill.command);
-                if skill_cmd.starts_with(line) {
-                    suggestions.push(Suggestion {
-                        value: skill_cmd,
-                        description: skill.description,
-                        extra: None,
-                        span: reedline::Span { start: 0, end: 0 },
-                        append_whitespace: true,
-                        style: None,
-                    });
+                if skill_cmd.starts_with(command) && skill_cmd != command {
+                    let suffix = &skill_cmd[command.len()..];
+                    skill_match = Some(suffix.to_string());
+                    break;
                 }
+            }
+            if let Some(suffix) = skill_match {
+                self.hint_suffix = suffix.clone();
+                return suffix;
             }
         }
 
-        suggestions
+        String::new()
+    }
+
+    fn complete_hint(&self) -> String {
+        self.hint_suffix.clone()
+    }
+
+    fn next_hint_token(&self) -> String {
+        self.hint_suffix.clone()
     }
 }
 

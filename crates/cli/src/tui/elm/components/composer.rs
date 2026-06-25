@@ -526,6 +526,27 @@ impl ComposerState {
             return None;
         }
 
+        // ── Tab: slash completion (panel visible) or cycle agent (empty line) ──
+        if key.code == KeyCode::Tab && key.modifiers == KeyModifiers::NONE {
+            // Slash command panel: complete the selected command without executing it,
+            // so the user can review/edit before pressing Enter to run.
+            if slash_panel_visible(&self.input_buffer) {
+                let filtered = filter_slash_entries(&self.slash_entries, &self.input_buffer);
+                if !filtered.is_empty() {
+                    let pick = self.slash_menu_index.min(filtered.len().saturating_sub(1));
+                    self.input_buffer = filtered[pick].command.clone();
+                    self.cursor_char_idx = self.input_buffer.chars().count();
+                    self.slash_menu_index = 0;
+                }
+                return None;
+            }
+            // Empty input: cycle to the next agent profile (Build→Plan→Review→Fix→Test).
+            if self.input_buffer.trim().is_empty() {
+                return Some(Msg::Cmd(TuiCmd::CycleAgent));
+            }
+            return None;
+        }
+
         // ── Enter: submit (with @-completion first) ──
         if key.code == KeyCode::Enter && key.modifiers == KeyModifiers::NONE {
             if let Some((buf, cidx)) = apply_selected_at_completion(
@@ -539,6 +560,15 @@ impl ComposerState {
                 self.cursor_char_idx = cidx;
                 return None;
             }
+            // Apply selected slash command from panel
+            if slash_panel_visible(&self.input_buffer) {
+                let filtered = filter_slash_entries(&self.slash_entries, &self.input_buffer);
+                if !filtered.is_empty() {
+                    let pick = self.slash_menu_index.min(filtered.len().saturating_sub(1));
+                    self.input_buffer = filtered[pick].command.clone();
+                    self.cursor_char_idx = self.input_buffer.chars().count();
+                }
+            }
             let line = std::mem::take(&mut self.input_buffer);
             self.cursor_char_idx = 0;
             self.slash_menu_index = 0;
@@ -548,7 +578,28 @@ impl ComposerState {
             if self.active_question {
                 return Some(Msg::QuestionSubmit(line));
             }
+            // When an approval is active, route through the approval side channel
+            // because run_turn is blocked waiting for the approval answer.
+            if self.active_approval {
+                return Some(Msg::ApprovalSubmit(line));
+            }
             return Some(Msg::Cmd(TuiCmd::Submit(line)));
+        }
+
+        // ── Approval shortcuts (active only when an approval is pending) ──
+        if self.active_approval {
+            if key.code == KeyCode::Char('y') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                return Some(Msg::ApprovalQuickAnswer {
+                    approved: true,
+                    always_allow: false,
+                });
+            }
+            if key.code == KeyCode::Char('u') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                return Some(Msg::ApprovalQuickAnswer {
+                    approved: true,
+                    always_allow: true,
+                });
+            }
         }
 
         // ── Ctrl+A / Home: move cursor to start ──
@@ -791,7 +842,7 @@ impl Composer {
         // Hint line
         let hint = if self.state.active_approval {
             Line::from(Span::styled(
-                "Approval: y/n · Ctrl+Y approve · Ctrl+N deny · Ctrl+U always allow",
+                "Approval: y/n · Ctrl+Y approve · Ctrl+U always allow",
                 Style::default().fg(theme::ERROR),
             ))
         } else if self.state.active_question {
@@ -880,7 +931,7 @@ impl Composer {
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(theme::BORDER))
                     .title(Span::styled(
-                        " commands (↑↓ Tab complete) ",
+                        " commands (↑↓ select, Enter) ",
                         Style::default().fg(theme::MUTED),
                     )),
             )
@@ -932,5 +983,88 @@ impl Composer {
             )
             .style(Style::default().bg(theme::SURFACE));
         frame.render_widget(w, area);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn state_with_slash_entries(entries: &[&str]) -> ComposerState {
+        ComposerState {
+            slash_entries: entries
+                .iter()
+                .map(|c| SlashEntry {
+                    display: (*c).to_string(),
+                    command: (*c).to_string(),
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn tab_on_empty_line_cycles_agent() {
+        // WHY: an empty input is the user's signal to switch profiles; Tab must
+        // emit the cycle command and must never insert a stray character.
+        let mut s = ComposerState::default();
+        assert!(s.input_buffer.is_empty());
+
+        let msg = s.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        assert!(
+            matches!(msg, Some(Msg::Cmd(TuiCmd::CycleAgent))),
+            "expected CycleAgent on empty-line Tab, got {msg:?}"
+        );
+        assert_eq!(s.input_buffer, "", "Tab must not mutate an empty buffer");
+    }
+
+    #[test]
+    fn tab_on_whitespace_only_cycles_agent() {
+        // WHY: whitespace-only input is still "no command being typed", so it
+        // should behave like an empty line and switch profiles.
+        let mut s = ComposerState {
+            input_buffer: "   ".into(),
+            ..Default::default()
+        };
+
+        let msg = s.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        assert!(
+            matches!(msg, Some(Msg::Cmd(TuiCmd::CycleAgent))),
+            "expected CycleAgent on whitespace-only Tab, got {msg:?}"
+        );
+    }
+
+    #[test]
+    fn tab_completes_slash_command_without_submitting() {
+        // WHY: slash completion must let the user review/edit before running —
+        // Tab fills the buffer but must NOT emit Submit (Enter still runs it).
+        let mut s = state_with_slash_entries(&["/help", "/clear"]);
+        s.input_buffer = "/h".into();
+        s.cursor_char_idx = s.input_buffer.chars().count();
+
+        let msg = s.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        assert!(msg.is_none(), "Tab must not submit, got {msg:?}");
+        assert_eq!(s.input_buffer, "/help");
+        assert_eq!(s.cursor_char_idx, "/help".chars().count());
+    }
+
+    #[test]
+    fn tab_on_plain_text_is_a_noop() {
+        // WHY: Tab is only meaningful for slash completion or agent switching;
+        // plain prose should be left untouched with no side effects.
+        let mut s = ComposerState {
+            input_buffer: "hello world".into(),
+            ..Default::default()
+        };
+        s.cursor_char_idx = s.input_buffer.chars().count();
+
+        let msg = s.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        assert!(msg.is_none());
+        assert_eq!(s.input_buffer, "hello world");
     }
 }

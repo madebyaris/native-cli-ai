@@ -17,10 +17,16 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 
 /// Message from TUI to the approval dispatch task.
 #[derive(Debug)]
-#[allow(dead_code)] // variants will be wired when Elm approval popup is implemented
 pub enum ApprovalAnswer {
-    Verdict { call_id: String, approved: bool },
-    AllowPattern { call_id: String, pattern: String },
+    Verdict {
+        call_id: String,
+        approved: bool,
+    },
+    #[allow(dead_code)]
+    AllowPattern {
+        call_id: String,
+        pattern: String,
+    },
 }
 
 /// Commands dispatched from the Elm TUI to the runtime (via `repl.rs`).

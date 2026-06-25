@@ -37,6 +37,7 @@ pub(crate) fn run_nca_model(
     cancel_flag: Option<Arc<AtomicBool>>,
     active_question_id: Arc<StdMutex<Option<String>>>,
     active_question_payload: Arc<StdMutex<Option<InteractiveQuestionPayload>>>,
+    active_approval_payload: Arc<StdMutex<Option<crate::tui::state::ApprovalRequest>>>,
     staged_images: Arc<StdMutex<Vec<nca_common::message::ImageAttachment>>>,
     params: NcaModelParams,
 ) -> anyhow::Result<()> {
@@ -53,6 +54,7 @@ pub(crate) fn run_nca_model(
             cancel_flag,
             active_question_id,
             active_question_payload,
+            active_approval_payload,
             staged_images,
         },
     );

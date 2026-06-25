@@ -218,8 +218,13 @@ impl TranscriptState {
                         DisplayBlock::ApprovalPending(req) => req.tool.clone(),
                         _ => "?".into(),
                     };
+                    let input = match &self.blocks[idx] {
+                        DisplayBlock::ToolRunning { input, .. } => input.clone(),
+                        _ => String::new(),
+                    };
                     self.blocks[idx] = DisplayBlock::ToolDone {
                         name,
+                        input,
                         ok,
                         detail,
                         full_output,
@@ -228,6 +233,7 @@ impl TranscriptState {
                 } else {
                     self.blocks.push(DisplayBlock::ToolDone {
                         name: "?".into(),
+                        input: String::new(),
                         ok,
                         detail,
                         full_output,

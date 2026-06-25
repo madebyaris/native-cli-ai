@@ -71,6 +71,7 @@ impl GlobalListener {
                 self.leader_pending = true;
                 None
             }
+            (KeyCode::Esc, KeyModifiers::NONE) => Some(Msg::Cmd(TuiCmd::CancelTurn)),
             (KeyCode::F(2), KeyModifiers::NONE) => Some(Msg::Cmd(TuiCmd::CycleModel(true))),
             (KeyCode::F(2), KeyModifiers::SHIFT) => Some(Msg::Cmd(TuiCmd::CycleModel(false))),
             _ => None,

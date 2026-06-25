@@ -29,6 +29,10 @@ pub(crate) enum Msg {
     QuestionAnswer(QuestionSelection),
     /// Raw input for the active question — parsed and routed by the model.
     QuestionSubmit(String),
+    /// Raw input for the active approval — parsed and routed by the model.
+    ApprovalSubmit(String),
+    /// Quick approval: approve (Ctrl+Y), deny (Enter with "n"), or always-allow (Ctrl+U).
+    ApprovalQuickAnswer { approved: bool, always_allow: bool },
     /// Force a redraw (e.g. after busy indicator animation tick).
     Redraw,
     /// Request application exit.

@@ -218,6 +218,7 @@ pub(super) fn block_line_count(block: &DisplayBlock, width: usize) -> usize {
         DisplayBlock::ToolDone {
             full_output,
             expanded,
+            input,
             ..
         } => {
             let all = wrap_text(full_output, w);
@@ -231,6 +232,13 @@ pub(super) fn block_line_count(block: &DisplayBlock, width: usize) -> usize {
             let mut n = 1 + show;
             if total > preview {
                 n += 1;
+            }
+            let cmd = serde_json::from_str::<serde_json::Value>(input)
+                .ok()
+                .and_then(|v| v.get("command").and_then(|v| v.as_str().map(String::from)))
+                .unwrap_or_default();
+            if !cmd.is_empty() {
+                n += wrap_text(&cmd, w.saturating_sub(3)).len();
             }
             n + 1
         }
@@ -663,6 +671,7 @@ pub(super) fn emit_block_lines(
         }
         DisplayBlock::ToolDone {
             name,
+            input,
             ok: _,
             detail,
             full_output,
@@ -697,6 +706,21 @@ pub(super) fn emit_block_lines(
                 ]),
                 None,
             );
+            let cmd = serde_json::from_str::<serde_json::Value>(input)
+                .ok()
+                .and_then(|v| v.get("command").and_then(|v| v.as_str().map(String::from)))
+                .unwrap_or_default();
+            if !cmd.is_empty() {
+                for tl in wrap_text(&cmd, w.saturating_sub(3)) {
+                    push(
+                        Line::from(Span::styled(
+                            format!("   {tl}"),
+                            Style::default().fg(theme::MUTED),
+                        )),
+                        None,
+                    );
+                }
+            }
             for tl in &all_l[..show] {
                 push(
                     Line::from(Span::styled(tl.clone(), Style::default().fg(theme::MUTED))),

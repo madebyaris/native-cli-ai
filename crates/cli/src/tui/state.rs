@@ -25,6 +25,7 @@ pub enum DisplayBlock {
     },
     ToolDone {
         name: String,
+        input: String,
         #[allow(dead_code)] // not yet consumed by rendering; kept for future use
         ok: bool,
         detail: String,
