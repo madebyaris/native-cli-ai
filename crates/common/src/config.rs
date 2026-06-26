@@ -433,13 +433,34 @@ impl UiConfig {
     }
 }
 
+/// Global config file: `$XDG_CONFIG_HOME/nca/config.toml` (default `~/.config/nca/config.toml`).
 pub fn global_config_path() -> Option<PathBuf> {
-    env::var_os("HOME").map(|home| PathBuf::from(home).join(".nca/config.toml"))
+    xdg_config_dir().map(|dir| dir.join("nca/config.toml"))
 }
 
-/// `$HOME/.nca` when `HOME` is set.
-pub fn nca_home_dir() -> Option<PathBuf> {
-    env::var_os("HOME").map(|home| PathBuf::from(home).join(".nca"))
+/// XDG config home: `$XDG_CONFIG_HOME` (default `$HOME/.config`).
+pub fn xdg_config_dir() -> Option<PathBuf> {
+    if let Ok(v) = env::var("XDG_CONFIG_HOME")
+        && !v.is_empty()
+    {
+        return Some(PathBuf::from(v));
+    }
+    env::var_os("HOME").map(|home| PathBuf::from(home).join(".config"))
+}
+
+/// XDG data home: `$XDG_DATA_HOME` (default `$HOME/.local/share`).
+pub fn xdg_data_dir() -> Option<PathBuf> {
+    if let Ok(v) = env::var("XDG_DATA_HOME")
+        && !v.is_empty()
+    {
+        return Some(PathBuf::from(v));
+    }
+    env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
+}
+
+/// `$XDG_DATA_HOME/nca` when a home directory is resolvable.
+pub fn nca_data_dir() -> Option<PathBuf> {
+    xdg_data_dir().map(|dir| dir.join("nca"))
 }
 
 /// Stable per-workspace id: `{slug}-{hex}` derived from the canonical workspace path.
@@ -457,11 +478,11 @@ pub fn workspace_cache_id(workspace_root: &Path) -> Result<(String, PathBuf), Wo
     Ok((format!("{slug}-{suffix}"), canonical))
 }
 
-/// `~/.nca/workspaces/<workspace-id>/`
+/// `$XDG_DATA_HOME/nca/workspaces/<workspace-id>/`
 pub fn workspace_cache_dir(workspace_root: &Path) -> Result<PathBuf, WorkspaceCacheError> {
     let (id, _) = workspace_cache_id(workspace_root)?;
-    let home = nca_home_dir().ok_or(WorkspaceCacheError::NoHomeDir)?;
-    Ok(home.join("workspaces").join(id))
+    let data = nca_data_dir().ok_or(WorkspaceCacheError::NoHomeDir)?;
+    Ok(data.join("workspaces").join(id))
 }
 
 /// Cached CLI index JSON for this workspace.
@@ -1346,7 +1367,7 @@ impl Default for SessionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HarnessConfig {
     pub built_in_enabled: bool,
-    /// Path to a global instructions file (e.g. `~/.nca/AGENTS.md`).
+    /// Path to a global instructions file (e.g. `$XDG_CONFIG_HOME/nca/AGENTS.md`).
     /// Loaded before the workspace `AGENTS.md`, shared across all projects.
     /// Supports `~` expansion to `$HOME`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

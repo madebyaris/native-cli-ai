@@ -1,6 +1,5 @@
 use nca_common::config::PermissionMode;
 use serde::Deserialize;
-use std::env;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -36,10 +35,9 @@ impl SkillCatalog {
         skill_directories: &[PathBuf],
     ) -> Result<Vec<Skill>, String> {
         let mut roots = Vec::new();
-        if let Some(home) = env::var_os("HOME") {
-            let home = PathBuf::from(home);
-            roots.push(home.join(".nca/skills"));
-            roots.push(home.join(".claude/skills"));
+        if let Some(config_dir) = nca_common::config::xdg_config_dir() {
+            roots.push(config_dir.join("nca/skills"));
+            roots.push(config_dir.join("claude/skills"));
         }
 
         for dir in skill_directories {

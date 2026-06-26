@@ -1,0 +1,143 @@
+# nca 全局配置模板
+# 路径: $XDG_CONFIG_HOME/nca/config.toml  (默认 ~/.config/nca/config.toml)
+# 优先级: 编译默认值 → 本文件 → 工作区 .nca/config.local.toml → 环境变量 → CLI 参数
+#
+# 使用方法: 取消注释并修改需要的字段，未覆盖的字段保持编译默认值。
+
+# ── Provider ──────────────────────────────────────────────────────
+
+[provider]
+# 默认 provider: "minimax" | "openai" | "anthropic" | "openrouter" | "zhipuai" | "deepseek"
+default = "minimax"
+
+# MiniMax (默认, Anthropic 兼容端点)
+[provider.minimax]
+# api_key = ""                    # 也可通过 MINIMAX_API_KEY 环境变量设置
+# api_key_env = "MINIMAX_API_KEY"
+# base_url = "https://api.minimax.io/anthropic"  # 国际; 国内: https://api.minimaxi.com/anthropic
+# model = "MiniMax-M2.5"
+# temperature = 0.7
+
+# OpenAI
+# [provider.openai]
+# api_key = ""
+# base_url = "https://api.openai.com"
+# model = "gpt-4o-mini"
+# temperature = 0.7
+
+# Anthropic
+# [provider.anthropic]
+# api_key = ""
+# base_url = "https://api.anthropic.com"
+# model = "claude-3-7-sonnet-latest"
+# temperature = 1.0
+
+# OpenRouter
+# [provider.openrouter]
+# api_key = ""
+# base_url = "https://openrouter.ai/api"
+# model = "openai/gpt-4o-mini"
+# temperature = 0.7
+# site_url = ""
+# app_name = ""
+
+# 智谱 AI
+# [provider.zhipuai]
+# api_key = ""
+# base_url = "https://open.bigmodel.cn/api/coding/paas/v4"
+# model = "glm-5.2"
+# temperature = 0.7
+
+# DeepSeek
+# [provider.deepseek]
+# api_key = ""
+# base_url = "https://api.deepseek.com"
+# model = "deepseek-v4-flash"
+# temperature = 0.7
+
+# ── Model ────────────────────────────────────────────────────────
+
+# [model]
+# max_tokens = 8192
+# enable_thinking = false
+# thinking_budget = 5120
+
+# ── Permissions ──────────────────────────────────────────────────
+
+# [permissions]
+# mode = "default"                  # "default" | "plan" | "accept-edits"
+# allow = []
+# deny = []
+# ask = []
+
+# ── Session ──────────────────────────────────────────────────────
+
+# [session]
+# history_dir = ".nca/sessions"     # 相对于工作区
+# max_turns_per_run = 128
+# max_tool_calls_per_turn = 200
+# checkpoint_interval = 5
+# last_session_file = ".nca/.last_session"
+# auto_compact_on_finish = false
+
+# ── Harness (system prompt 层) ──────────────────────────────────
+
+# [harness]
+# built_in_enabled = true
+# global_instructions_path = "$XDG_CONFIG_HOME/nca/AGENTS.md"  # 支持 ~ 展开
+# project_instructions_path = ".ncarc"
+# local_instructions_path = ".nca/instructions.md"
+# skill_directories = [".nca/skills", ".claude/skills"]
+
+# ── MCP Servers ─────────────────────────────────────────────────
+
+# [mcp]
+# expose_in_safe_mode = false
+#
+# [[mcp.servers]]
+# name = "my-server"
+# command = "npx"
+# args = ["-y", "@example/mcp-server"]
+# enabled = true
+# env = {}
+
+# ── Memory ──────────────────────────────────────────────────────
+
+# [memory]
+# file_path = ".nca/memory.json"    # 相对于工作区
+# max_notes = 128
+# auto_compact_on_finish = false
+
+# ── Hooks ──────────────────────────────────────────────────────
+
+# [hooks]
+# session_start = []
+# session_end = []
+# pre_tool_use = []
+# post_tool_use = []
+# post_tool_failure = []
+# approval_requested = []
+# subagent_start = []
+# subagent_stop = []
+# turn_complete = []
+#
+# [[hooks.session_end]]
+# command = "echo session ended"
+# blocking = false
+
+# ── Web ─────────────────────────────────────────────────────────
+
+# [web]
+# timeout_secs = 15
+# max_fetch_chars = 25000
+# default_search_limit = 5
+# user_agent = "nca/0.5 (+https://github.com/user/native-cli-ai)"
+
+# ── UI ──────────────────────────────────────────────────────────
+
+# [ui]
+# editor = ""                      # 优先级: NCA_EDITOR > 本字段 > EDITOR > vim
+# theme = ""
+# hide_tips = false
+# scroll_speed = 3
+# onboarding_completed = false

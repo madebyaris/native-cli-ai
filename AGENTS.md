@@ -30,7 +30,7 @@ No `rust-toolchain.toml` or `rustfmt.toml` — CI pins stable channel via `dtoln
 5 crates, edition 2024, version 0.3.0:
 
 ```
-common  ← leaf crate, no internal deps. Shared types: config, events, messages, tool schemas.
+common  ← leaf crate, no internal deps. Shared types: config, events, messages, tool schemas, model capabilities.
 core    ← depends on common only. Agent loop, Provider trait, tool registry, harness, skills, approvals.
 runtime ← depends on common + core. Supervisor, IPC, session persistence, worktrees, PTY.
 cli     ← depends on all above. Binary entrypoint, TUI, REPL, stream rendering.
@@ -68,7 +68,7 @@ Infrastructure modules in the same directory:
 - **Tool-use streaming:** incoming tool-use blocks are buffered until the closing tag is received, then executed as a batch (not streamed incrementally).
 - **IPC:** newline-delimited JSON over Unix domain sockets. `AgentEvent` enum is the shared event bus.
 - **Sessions:** `<workspace>/.nca/sessions/<id>.json` (state) + `<id>.events.jsonl` (event log). IPC socket at `$XDG_RUNTIME_DIR/nca/` (fallback `/tmp/nca/`).
-- **Config resolution:** compiled defaults → `~/.nca/config.toml` → `<workspace>/.nca/config.local.toml` → env vars → CLI flags.
+- **Config resolution:** compiled defaults → `$XDG_CONFIG_HOME/nca/config.toml` → `<workspace>/.nca/config.local.toml` → env vars → CLI flags.
 - **Conventional Commits** for commit messages (type(scope): description).
 - **Do not edit `for-test/`** — it is gitignored and used for transient test artifacts.
 - **Doc sync (same commit):** adding/removing deps → update `docs/tech-stack.md`; changing crate boundaries → update `docs/architecture.md`; changing MVP scope → update `docs/prd.md`.
@@ -94,7 +94,7 @@ The Elm TUI (`tui/elm/model.rs::NcaModel`) runs inside `spawn_blocking` on a ded
 
 **Question-answer bypass:** While `run_turn` blocks on `ask_question`'s oneshot channel, the main `cmd_rx` loop never receives `TuiCmd::Submit` or `QuestionAnswer`. Answers must flow through the `question_answer_tx` side channel (set up in `repl.rs`). The Elm composer routes Enter keypresses through this channel when `active_question` is set.
 
-**Dead-code suppression:** `tui/mod.rs` has `#[allow(dead_code)]` on `pub mod app`. The legacy `app.rs` contains many unused items during the migration. Do not remove `#[allow]` annotations without verifying the item is truly dead. `TuiSessionState` in `state.rs` is retained only for tests and the legacy `replay_event_log_into_state` helper.
+**Dead-code suppression:** The legacy `app.rs` has `#[allow(dead_code)]` on `TuiCmd` and `ApprovalAnswer` variants. `tui/elm/mod.rs` has `#![allow(dead_code, unused_imports)]`. Do not remove `#[allow]` annotations without verifying the item is truly dead. `TuiSessionState` in `state.rs` is retained only for tests and the legacy `replay_event_log_into_state` helper.
 
 **Shared state between Elm and runtime:** Uses `Arc<StdMutex<...>>` (not tokio::Mutex) because Elm runs on a blocking thread. Key shared handles: `active_question_id`, `active_question_payload`, `staged_images`.
 
@@ -118,7 +118,7 @@ MCP servers are loaded via `rmcp` crate (v1.7, features: `client`, `transport-as
 Built in `core::harness::build_system_prompt`:
 1. Built-in harness prompt
 2. Permission-mode guidance
-3. Global Instructions (`~/.nca/AGENTS.md`, user-level)
+3. Global Instructions (`$XDG_CONFIG_HOME/nca/AGENTS.md`, user-level)
 4. `AGENTS.md` (workspace repo-level instructions)
 5. `.ncarc` (committed project instructions, if present)
 6. `.nca/instructions.md` (local instructions)
@@ -132,9 +132,21 @@ Built in `core::harness::build_system_prompt`:
 | `crates/core/src/agent.rs` | Main agent loop, `truncate_tool_output`, token estimation |
 | `crates/core/src/harness.rs` | System prompt builder, skills index assembly |
 | `crates/core/src/provider/` | All provider implementations, factory, stream parsers |
-| `crates/core/src/tools/` | Built-in tool definitions (file ops, search, shell, etc.) |
-| `crates/core/src/skills.rs` | Skill discovery and resolution |
-| `crates/runtime/src/` | Supervisor, IPC server, session persistence, PTY, worktrees |
+| `crates/core/src/tools/` | Built-in tool definitions (file ops, search, edit, validation, git, AST, etc.) |
+| `crates/core/src/skills.rs` | Skill discovery, resolution, and metadata |
+| `crates/core/src/approval.rs` | Approval policy, permission modes, tiered command rules |
+| `crates/core/src/code_intel.rs` | Fast local code intelligence, Rust symbol lookup |
+| `crates/core/src/cost.rs` | Token counting and cost estimation (with cache token accounting) |
+| `crates/core/src/hooks.rs` | Hook runner, lifecycle event hooks (pre/post tool execution) |
+| `crates/core/src/tool_pipeline.rs` | Tool execution pipeline (approval → hooks → execution → post-hooks) |
+| `crates/core/src/workspace_fs.rs` | Workspace filesystem abstraction and path validation |
+| `crates/core/src/skill_installer.rs` | Skill installation from registries |
+| `crates/runtime/src/` | Supervisor, IPC server, session persistence, PTY, worktrees, context manager, subagent |
+| `crates/runtime/src/supervisor.rs` | Session lifecycle supervisor |
+| `crates/runtime/src/context_manager.rs` | Token tracking, auto-summarize, sliding window |
+| `crates/runtime/src/subagent.rs` | Subagent spawning and management |
+| `crates/runtime/src/worktree.rs` | Git worktree creation and cleanup |
+| `crates/runtime/src/memory_store.rs` | Workspace memory persistence |
 | `crates/cli/src/main.rs` | Binary entrypoint |
 | `crates/cli/src/repl.rs` | Line-oriented REPL (reedline-based), Elm TUI wiring (`run_with_tui`) |
 | `crates/cli/src/tui/bridge.rs` | Dual-write event fanout: state + Elm feedback channel |
@@ -145,6 +157,9 @@ Built in `core::harness::build_system_prompt`:
 | `crates/cli/src/tui/app.rs` | Legacy TUI (dead code with `#[allow(dead_code)]`), exports `TuiCmd`, `ApprovalAnswer`, theme |
 | `crates/cli/src/tui/state.rs` | `TuiSessionState`, `DisplayBlock`, event application |
 | `crates/common/src/config.rs` | Config schema and resolution chain |
+| `crates/common/src/event.rs` | `AgentEvent` enum, event bus types |
+| `crates/common/src/model_caps.rs` | Model capability detection (vision, context window, etc.) |
+| `crates/common/src/session.rs` | Session metadata, `OrchestrationContext`, orchestration env contract |
 
 ## Release & Distribution
 

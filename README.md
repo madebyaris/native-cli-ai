@@ -153,7 +153,7 @@ The main interface is designed to feel like a serious terminal tool, not a toy o
 | `nca skills` | List discovered skills with their source (`AGENTS.md`, filesystem, or user directory). Subcommands: `list`, `add`, `remove`, `update`. |
 | `nca mcp` | List configured MCP servers. |
 | `nca completion <shell>` | Generate shell completions (bash, zsh, fish, PowerShell, elvish). |
-| `nca index build\|show` | Build or inspect a cached CLI index under `~/.nca/workspaces/<workspace-id>/`. |
+| `nca index build\|show` | Build or inspect a cached CLI index under `$XDG_DATA_HOME/nca/workspaces/<workspace-id>/`. |
 | `nca autoresearch once <program.md>` | Run a metric-driven research program and print parsed output. |
 
 There is also a hidden `serve` subcommand used for IPC-oriented service sessions.
@@ -198,19 +198,19 @@ See [Orchestration Contract](docs/orchestration.md) for the subprocess-facing su
 
 | Path | Purpose |
 |---|---|
-| `~/.nca/config.toml` | Global config file. |
+| `$XDG_CONFIG_HOME/nca/config.toml` | Global config file (defaults to `~/.config/nca/config.toml`). |
 | `<workspace>/.nca/config.local.toml` | Workspace-local config overrides. |
 | `<workspace>/.nca/sessions/<id>.json` | Saved session state. |
 | `<workspace>/.nca/sessions/<id>.events.jsonl` | Event log for the session. |
 | `<workspace>/.nca/memory.json` | Default memory store. |
 | `<workspace>/AGENTS.md` | Repo-local instruction layer; each `## Heading` is also a discoverable skill. |
 | `<workspace>/.nca/skills/` | Default workspace skill directory. |
-| `~/.nca/skills/` | User-level skill directory. |
-| `~/.claude/skills/` | Imported Claude-style skill directory, if present. |
+| `$XDG_CONFIG_HOME/nca/skills/` | User-level skill directory. |
+| `$XDG_CONFIG_HOME/claude/skills/` | Imported Claude-style skill directory, if present. |
 | `<repo>/.nca/worktrees/<session-id>` | Worktree path for isolated child sessions. |
 | `$XDG_RUNTIME_DIR/nca/<session_id>.sock` | IPC socket path when `XDG_RUNTIME_DIR` is set. |
 | `/tmp/nca/<session_id>.sock` | IPC socket fallback when `XDG_RUNTIME_DIR` is not set. |
-| `~/.nca/workspaces/<workspace-id>/cli-index.json` | Cached CLI index for agents and tooling. |
+| `$XDG_DATA_HOME/nca/workspaces/<workspace-id>/cli-index.json` | Cached CLI index for agents and tooling (defaults to `~/.local/share/nca/...`). |
 | `.ncarc` | Project instructions file committed with the repo, if present. |
 | `.nca/instructions.md` | Local instructions file. |
 
@@ -219,7 +219,7 @@ See [Orchestration Contract](docs/orchestration.md) for the subprocess-facing su
 `nca` discovers skills from multiple sources with visible provenance:
 
 1. **`AGENTS.md`** — Each root-level `## Heading` becomes a slash-invokable skill. Optional directive bullets can set `model=...`, `permission_mode=...`, and `context=...`.
-2. **Filesystem directories** — Skills from `.nca/skills/`, `~/.nca/skills/`, and `~/.claude/skills/`.
+2. **Filesystem directories** — Skills from `.nca/skills/`, `$XDG_CONFIG_HOME/nca/skills/`, and `$XDG_CONFIG_HOME/claude/skills/`.
 3. **Built-in skills** — Core skills baked into the binary.
 
 Use `nca skills --json` to see all discovered skills with their sources.
@@ -246,7 +246,7 @@ Several guards prevent any single turn from blowing the context window:
 
 Cost tracking includes cache-aware token pricing. `cache_read` tokens (e.g. from DeepSeek prefix caching) are billed at 1/50 of the normal input rate.
 
-Configuration in `~/.nca/config.toml`:
+Configuration in `$XDG_CONFIG_HOME/nca/config.toml`:
 
 ```toml
 [memory.context]
@@ -271,7 +271,7 @@ Typical environment variables:
 
 DeepSeek sessions benefit from provider-level token optimizations: `reasoning_content` (thinking chain) is stripped before re-uploading to save ~500 prompt-input tokens per turn and keep the prefix cache byte-stable.
 
-Provider config is loaded from defaults, then `~/.nca/config.toml`, then `<workspace>/.nca/config.local.toml`, then environment overrides.
+Provider config is loaded from defaults, then `$XDG_CONFIG_HOME/nca/config.toml`, then `<workspace>/.nca/config.local.toml`, then environment overrides.
 
 Use `nca doctor` to verify provider readiness and `nca models` to inspect model selection.
 
@@ -281,7 +281,7 @@ The system prompt is layered in this order:
 
 1. Built-in harness prompt
 2. Permission-mode guidance
-3. Global Instructions (`~/.nca/AGENTS.md`, user-level)
+3. Global Instructions (`$XDG_CONFIG_HOME/nca/AGENTS.md`, user-level)
 4. `AGENTS.md` (workspace repo-level instructions)
 5. `.ncarc` (committed project instructions, if present)
 6. `.nca/instructions.md` (local instructions)
@@ -305,8 +305,8 @@ Recent search/edit improvements are aimed at making agent file work less brittle
 
 | Crate | Responsibility |
 |---|---|
-| `crates/common` | Shared config, events, sessions, messages, tool schemas, and orchestration metadata. |
-| `crates/core` | Agent loop, provider abstraction, harness builder, skills, approvals, and tool registry. |
+| `crates/common` | Shared config, events, sessions, messages, tool schemas, model capabilities, and orchestration metadata. |
+| `crates/core` | Agent loop, provider abstraction, harness builder, skills, approvals, tool pipeline, hooks, code intelligence, cost tracking, workspace FS, and tool registry. |
 | `crates/runtime` | Session supervision, IPC, persistence, worktrees, memory store, context management, and subagent execution. |
 | `crates/cli` | `nca` entrypoint, command parsing, stream rendering, REPL, and TUI. |
 | `crates/autoresearch` | Metric-driven autonomous research helpers and experiment runner. |

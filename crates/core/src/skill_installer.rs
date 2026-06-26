@@ -138,8 +138,9 @@ impl SkillLock {
 /// Get the lock file path for the given scope.
 pub fn lock_file_path(global: bool, workspace_root: &Path) -> PathBuf {
     if global {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        PathBuf::from(home).join(".nca/skills.lock")
+        let config_dir =
+            nca_common::config::xdg_config_dir().unwrap_or_else(|| PathBuf::from("/tmp/nca"));
+        config_dir.join("nca/skills.lock")
     } else {
         workspace_root.join(".nca/skills.lock")
     }
@@ -148,8 +149,9 @@ pub fn lock_file_path(global: bool, workspace_root: &Path) -> PathBuf {
 /// Get the skills directory for the given scope.
 pub fn skills_dir(global: bool, workspace_root: &Path) -> PathBuf {
     if global {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        PathBuf::from(home).join(".nca/skills")
+        let config_dir =
+            nca_common::config::xdg_config_dir().unwrap_or_else(|| PathBuf::from("/tmp/nca"));
+        config_dir.join("nca/skills")
     } else {
         workspace_root.join(".nca/skills")
     }
