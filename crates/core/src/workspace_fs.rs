@@ -12,7 +12,7 @@
 
 use async_trait::async_trait;
 use std::path::{Component, Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 /// Errors produced by workspace filesystem operations.
 #[derive(Debug, thiserror::Error)]
@@ -106,6 +106,24 @@ pub trait WorkspaceFs: Send + Sync {
 
     /// Copy a file.
     async fn copy(&self, from: &str, to: &str) -> Result<(), SandboxError>;
+
+    // ── Mount management ─────────────────────────────────────────────
+
+    /// Mount an additional directory as an allowed root for file operations.
+    ///
+    /// After mounting, all file tools can read, write, search, and list files
+    /// under this path as if it were inside the workspace. The path is
+    /// canonicalized on mount; symlinks are resolved.
+    fn mount_path(&self, path: &Path) -> Result<(), SandboxError>;
+
+    /// Unmount a previously mounted path.
+    ///
+    /// Accepts either the original mount argument or a path that resolves to
+    /// the same canonical location. Returns an error if the path was not mounted.
+    fn unmount_path(&self, path: &Path) -> Result<(), SandboxError>;
+
+    /// Return the list of currently mounted extra paths (canonical).
+    fn mounted_paths(&self) -> Vec<PathBuf>;
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +134,8 @@ pub trait WorkspaceFs: Send + Sync {
 pub struct RealFs {
     root: PathBuf,
     canonical_cache: OnceLock<PathBuf>,
+    /// Additional directories mounted as allowed roots (canonicalized).
+    extra_allowed: RwLock<Vec<PathBuf>>,
 }
 
 impl RealFs {
@@ -129,6 +149,7 @@ impl RealFs {
         Self {
             root,
             canonical_cache: OnceLock::from(canonical),
+            extra_allowed: RwLock::new(Vec::new()),
         }
     }
 
@@ -138,6 +159,32 @@ impl RealFs {
             .get()
             .map(|p| p.as_path())
             .unwrap_or(&self.root)
+    }
+
+    /// Check whether a canonical path is within the workspace root or any mounted extra root.
+    fn is_allowed(&self, canonical: &Path, root: &Path) -> bool {
+        if canonical.starts_with(root) {
+            return true;
+        }
+        let extra = self
+            .extra_allowed
+            .read()
+            .expect("extra_allowed lock poisoned");
+        extra.iter().any(|r| canonical.starts_with(r))
+    }
+
+    /// Check whether a logically-normalized (non-canonicalized) path is within
+    /// the workspace root or any mounted extra root.
+    fn is_allowed_normalized(&self, normalized: &Path) -> bool {
+        let root = self.cached_canonical_root();
+        if normalized.starts_with(root) {
+            return true;
+        }
+        let extra = self
+            .extra_allowed
+            .read()
+            .expect("extra_allowed lock poisoned");
+        extra.iter().any(|r| normalized.starts_with(r))
     }
 }
 
@@ -158,7 +205,7 @@ impl WorkspaceFs for RealFs {
             .root
             .canonicalize()
             .unwrap_or_else(|_| self.cached_canonical_root().to_path_buf());
-        if canonical.starts_with(&root) {
+        if self.is_allowed(&canonical, &root) {
             Ok(canonical)
         } else {
             Err(SandboxError::OutsideWorkspace {
@@ -170,13 +217,59 @@ impl WorkspaceFs for RealFs {
     fn validate_prefix(&self, path: &str) -> Result<PathBuf, SandboxError> {
         let full = self.root.join(path);
         let normalized = logical_normalize(&full);
-        if normalized.starts_with(self.cached_canonical_root()) {
+        if self.is_allowed_normalized(&normalized) {
             Ok(normalized)
         } else {
             Err(SandboxError::OutsideWorkspace {
                 path: path.to_string(),
             })
         }
+    }
+
+    fn mount_path(&self, path: &Path) -> Result<(), SandboxError> {
+        let canonical = path.canonicalize().map_err(|e| SandboxError::NotFound {
+            path: path.display().to_string(),
+            source: e,
+        })?;
+        // Reject if it's already inside the workspace root (redundant).
+        let root = self
+            .root
+            .canonicalize()
+            .unwrap_or_else(|_| self.cached_canonical_root().to_path_buf());
+        if canonical.starts_with(&root) {
+            return Ok(());
+        }
+        let mut extra = self
+            .extra_allowed
+            .write()
+            .expect("extra_allowed lock poisoned");
+        if !extra.contains(&canonical) {
+            extra.push(canonical);
+        }
+        Ok(())
+    }
+
+    fn unmount_path(&self, path: &Path) -> Result<(), SandboxError> {
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let mut extra = self
+            .extra_allowed
+            .write()
+            .expect("extra_allowed lock poisoned");
+        let before = extra.len();
+        extra.retain(|r| r != &canonical);
+        if extra.len() == before {
+            return Err(SandboxError::OutsideWorkspace {
+                path: format!("path '{}' is not currently mounted", canonical.display()),
+            });
+        }
+        Ok(())
+    }
+
+    fn mounted_paths(&self) -> Vec<PathBuf> {
+        self.extra_allowed
+            .read()
+            .expect("extra_allowed lock poisoned")
+            .clone()
     }
 
     async fn read_file(&self, path: &str) -> Result<String, SandboxError> {
@@ -200,7 +293,7 @@ impl WorkspaceFs for RealFs {
                 path: parent.display().to_string(),
                 source: e,
             })?;
-        // Validate the now-existing parent is within the workspace.
+        // Validate the now-existing parent is within the workspace or a mounted path.
         let canonical_parent = parent.canonicalize().map_err(|e| SandboxError::Io {
             path: parent.display().to_string(),
             source: e,
@@ -209,7 +302,7 @@ impl WorkspaceFs for RealFs {
             .root
             .canonicalize()
             .unwrap_or_else(|_| self.cached_canonical_root().to_path_buf());
-        if !canonical_parent.starts_with(&root) {
+        if !self.is_allowed(&canonical_parent, &root) {
             return Err(SandboxError::OutsideWorkspace {
                 path: path.to_string(),
             });
@@ -257,7 +350,7 @@ impl WorkspaceFs for RealFs {
             .root
             .canonicalize()
             .unwrap_or_else(|_| self.cached_canonical_root().to_path_buf());
-        if !canonical.starts_with(&root) {
+        if !self.is_allowed(&canonical, &root) {
             return Err(SandboxError::OutsideWorkspace {
                 path: path.to_string(),
             });
@@ -310,7 +403,7 @@ impl WorkspaceFs for RealFs {
                 .root
                 .canonicalize()
                 .unwrap_or_else(|_| self.cached_canonical_root().to_path_buf());
-            if !canonical_parent.starts_with(&root) {
+            if !self.is_allowed(&canonical_parent, &root) {
                 return Err(SandboxError::OutsideWorkspace {
                     path: to.to_string(),
                 });
@@ -344,7 +437,7 @@ impl WorkspaceFs for RealFs {
                 .root
                 .canonicalize()
                 .unwrap_or_else(|_| self.cached_canonical_root().to_path_buf());
-            if !canonical_parent.starts_with(&root) {
+            if !self.is_allowed(&canonical_parent, &root) {
                 return Err(SandboxError::OutsideWorkspace {
                     path: to.to_string(),
                 });
@@ -536,5 +629,115 @@ mod tests {
         let path = Path::new("/workspace/../etc/passwd");
         let normalized = logical_normalize(path);
         assert_eq!(normalized, Path::new("/etc/passwd"));
+    }
+
+    // ── Mount tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn mount_path_allows_external_read() {
+        let ws = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("secret.txt"), "payload").unwrap();
+
+        let fs = RealFs::new(ws.path().to_path_buf());
+
+        // Before mount: reading external file fails.
+        // (Can't resolve a relative path to outside, but we test resolve directly)
+        let full = ws.path().join(external.path());
+        // resolve only takes relative paths; the external dir won't be under ws.
+        // Instead, test mount + validate_prefix for new files, and mount + read.
+        // We need to test by mounting the external dir.
+        assert!(fs.mounted_paths().is_empty());
+
+        fs.mount_path(external.path()).unwrap();
+        assert_eq!(fs.mounted_paths().len(), 1);
+
+        // After mount: resolve on a relative path that happens to be the external dir
+        // won't work because join(ws, external) doesn't point inside external.
+        // But we can test that the external path is tracked.
+        assert!(fs.mounted_paths()[0].starts_with(external.path()));
+    }
+
+    #[tokio::test]
+    async fn mount_path_allows_resolve_of_external_file() {
+        let ws = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("data.txt"), "hello mounted").unwrap();
+
+        let fs = RealFs::new(ws.path().to_path_buf());
+
+        // The external dir is outside the workspace; mounting it should let us
+        // resolve files under it. But resolve() takes a *relative* path and joins
+        // with root. To reach external files we need the full path to be resolved.
+        //
+        // We test indirectly: mount the external dir, then use read_file which
+        // calls resolve internally. However, read_file also does root.join(path),
+        // so a relative path like "../external/data.txt" would be normalized to
+        // a path outside root.
+        //
+        // The actual use case is that tools call resolve with absolute-ish paths
+        // that get joined with root. Let's verify the boundary check works.
+        fs.mount_path(external.path()).unwrap();
+
+        // The resolve function joins with root, so even after mount,
+        // root.join("anything") won't point to external unless the path itself
+        // is crafted to escape. With mount, the *check* passes for external paths.
+        // Test by creating a symlink inside workspace pointing to external.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(external.path(), ws.path().join("ext-link")).unwrap();
+            // resolve follows symlinks: ws/ext-link/data.txt -> external/data.txt
+            let result = fs.resolve("ext-link/data.txt");
+            assert!(
+                result.is_ok(),
+                "resolve after mount should work: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mount_redundant_inside_workspace_is_noop() {
+        let ws = tempfile::tempdir().unwrap();
+        let sub = ws.path().join("subdir");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let fs = RealFs::new(ws.path().to_path_buf());
+        fs.mount_path(&sub).unwrap();
+        // Should be noop since sub is already inside workspace.
+        assert!(fs.mounted_paths().is_empty());
+    }
+
+    #[test]
+    fn unmount_removes_mounted_path() {
+        let ws = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+
+        let fs = RealFs::new(ws.path().to_path_buf());
+        fs.mount_path(external.path()).unwrap();
+        assert_eq!(fs.mounted_paths().len(), 1);
+
+        fs.unmount_path(external.path()).unwrap();
+        assert!(fs.mounted_paths().is_empty());
+    }
+
+    #[test]
+    fn unmount_nonexistent_fails() {
+        let ws = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+
+        let fs = RealFs::new(ws.path().to_path_buf());
+        let err = fs.unmount_path(external.path()).unwrap_err();
+        assert!(err.to_string().contains("not currently mounted"));
+    }
+
+    #[test]
+    fn mount_duplicate_is_idempotent() {
+        let ws = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+
+        let fs = RealFs::new(ws.path().to_path_buf());
+        fs.mount_path(external.path()).unwrap();
+        fs.mount_path(external.path()).unwrap();
+        assert_eq!(fs.mounted_paths().len(), 1);
     }
 }

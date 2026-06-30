@@ -203,10 +203,17 @@ impl TranscriptState {
             }
             AgentEvent::ToolCallCompleted { call_id, output } => {
                 let ok = output.success;
+                // On failure, prefer the explicit error string; fall back to the
+                // tool's stdout/stderr output (e.g. run_validation leaves error
+                // as None and puts diagnostics in output).
                 let full_output = if ok {
                     output.output.clone()
                 } else {
-                    output.error.clone().unwrap_or_else(|| "failed".into())
+                    output
+                        .error
+                        .clone()
+                        .filter(|e| !e.is_empty())
+                        .unwrap_or_else(|| output.output.clone())
                 };
                 let detail = truncate(&full_output, 120);
                 if let Some(idx) = self.blocks.iter().rposition(|b| {
@@ -276,21 +283,28 @@ impl TranscriptState {
                 approved,
                 allow_pattern: _,
             } => {
-                let tool = self
-                    .blocks
-                    .iter()
-                    .rev()
-                    .find_map(|block| match block {
-                        DisplayBlock::ApprovalPending(req) if req.call_id == *call_id => {
-                            Some(req.tool.clone())
-                        }
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| "tool".into());
-                self.blocks.push(DisplayBlock::ApprovalResolved {
-                    tool,
-                    approved: *approved,
-                });
+                // Replace the matching ApprovalPending block in-place so the
+                // stale prompt ("y/yes approve · n/no deny") disappears.
+                if let Some(idx) = self.blocks.iter().rposition(|block| {
+                    matches!(
+                        block,
+                        DisplayBlock::ApprovalPending(req) if req.call_id == *call_id
+                    )
+                }) {
+                    let tool = match &self.blocks[idx] {
+                        DisplayBlock::ApprovalPending(req) => req.tool.clone(),
+                        _ => "tool".into(),
+                    };
+                    self.blocks[idx] = DisplayBlock::ApprovalResolved {
+                        tool,
+                        approved: *approved,
+                    };
+                } else {
+                    self.blocks.push(DisplayBlock::ApprovalResolved {
+                        tool: "tool".into(),
+                        approved: *approved,
+                    });
+                }
             }
             AgentEvent::QuestionRequested { question } => {
                 self.blocks.push(DisplayBlock::Question(question.clone()));

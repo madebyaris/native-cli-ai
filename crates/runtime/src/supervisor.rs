@@ -15,6 +15,7 @@ use crate::ipc::{IpcHandle, IpcServer};
 use crate::last_session::LastSessionStore;
 use crate::memory_store::{MemoryNote, MemoryStore};
 use crate::model_limits_api;
+use crate::plugin_host::PluginHost;
 use crate::pty::PtyManager;
 use crate::session_store::SessionStore;
 use chrono::Utc;
@@ -27,6 +28,7 @@ use nca_core::agent::AgentLoop;
 use nca_core::approval::{ApprovalHandler, ApprovalPolicy, ApprovalVerdict};
 use nca_core::harness::build_system_prompt;
 use nca_core::hooks::{HookEventKind, HookRunner};
+use nca_core::plugin::PluginRegistry;
 use nca_core::provider::ProviderError;
 use nca_core::provider::factory::build_provider;
 use nca_core::tools::AskQuestionTool;
@@ -34,7 +36,7 @@ use nca_core::tools::InvokeSkillTool;
 use nca_core::tools::ToolRegistry;
 use nca_core::tools::mcp::load_mcp_tools;
 use nca_core::tools::spawn_subagent::{SpawnRequest, SpawnSubagentTool};
-use nca_core::workspace_fs::RealFs;
+use nca_core::workspace_fs::{RealFs, WorkspaceFs};
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -71,8 +73,12 @@ pub struct Supervisor {
     orchestration: Option<OrchestrationContext>,
     config: NcaConfig,
     hooks: Option<HookRunner>,
+    plugins: PluginRegistry,
+    #[allow(dead_code)] // retained for RAII — drop cleans up child plugin processes.
+    plugin_host: Option<PluginHost>,
     context_manager: ContextManager,
     last_summary_at_tokens: usize,
+    fs: Arc<dyn WorkspaceFs>,
 }
 
 /// Configuration for creating a new supervised session.
@@ -132,7 +138,7 @@ fn persist_allow_pattern(workspace_root: &Path, pattern: String) {
             Ok(mut config) => {
                 if !config.permissions.allow.contains(&pattern) {
                     config.permissions.allow.push(pattern);
-                    tracing::info!("persisted allow pattern to workspace config");
+                    tracing::debug!("persisted allow pattern to workspace config");
                     if let Err(e) = config.save_workspace_file(&root) {
                         tracing::warn!("failed to persist allow pattern: {e}");
                     }
@@ -160,8 +166,8 @@ impl Supervisor {
         }
 
         let provider = build_provider(&config)?;
-        let fs: Arc<dyn nca_core::workspace_fs::WorkspaceFs> =
-            Arc::new(RealFs::new(workspace_root.clone()));
+        let fs: Arc<dyn WorkspaceFs> = Arc::new(RealFs::new(workspace_root.clone()));
+        let fs_for_supervisor = fs.clone();
         let mut tools = if cfg.safe_mode {
             ToolRegistry::with_default_readonly_tools(fs.clone(), config.web.clone())
         } else {
@@ -251,6 +257,27 @@ impl Supervisor {
             let runner = HookRunner::new(config.hooks.clone());
             runner.has_any().then_some(runner)
         };
+
+        // Build plugin registry — discover and spawn out-of-process plugins.
+        let mut plugin_host = Option::<PluginHost>::None;
+        let plugins = if cfg.safe_mode {
+            PluginRegistry::new()
+        } else {
+            let descriptors = crate::plugin_host::discover_plugins();
+            if descriptors.is_empty() {
+                PluginRegistry::new()
+            } else {
+                let mut host = PluginHost::new();
+                let errors = host.start_all(&descriptors).await;
+                for err in &errors {
+                    tracing::warn!("plugin startup error: {err}");
+                }
+                let reg = host.registry();
+                plugin_host = Some(host);
+                reg
+            }
+        };
+
         let mut agent = AgentLoop::new(
             provider,
             tools,
@@ -262,8 +289,12 @@ impl Supervisor {
             config.session.checkpoint_interval,
             hook_runner.clone(),
         );
-        let system_prompt =
-            build_system_prompt(&config, &workspace_root, cfg.orchestration_context.as_ref());
+        let system_prompt = build_system_prompt(
+            &config,
+            &workspace_root,
+            &plugins,
+            cfg.orchestration_context.as_ref(),
+        );
         agent.set_system_prompt(system_prompt);
 
         let context_manager =
@@ -296,8 +327,11 @@ impl Supervisor {
             orchestration: cfg.orchestration_context,
             config,
             hooks: hook_runner,
+            plugins,
+            plugin_host,
             context_manager,
             last_summary_at_tokens: 0,
+            fs: fs_for_supervisor,
         };
         sup.save().await.map_err(ProviderError::Other)?;
         sup.update_last_session()
@@ -813,6 +847,7 @@ impl Supervisor {
         let system_prompt = build_system_prompt(
             &self.config,
             &self.workspace_root,
+            &self.plugins,
             self.orchestration.as_ref(),
         );
         self.agent.set_system_prompt(system_prompt);
@@ -877,6 +912,23 @@ impl Supervisor {
         self.context_manager = ContextManager::new(context_config, self.model.clone());
     }
 
+    // ── Mount management ─────────────────────────────────────────────
+
+    /// Mount an additional directory so tools can access files outside the workspace root.
+    pub fn mount_path(&self, path: &Path) -> Result<(), String> {
+        self.fs.mount_path(path).map_err(|e| e.to_string())
+    }
+
+    /// Unmount a previously mounted directory.
+    pub fn unmount_path(&self, path: &Path) -> Result<(), String> {
+        self.fs.unmount_path(path).map_err(|e| e.to_string())
+    }
+
+    /// List currently mounted extra paths.
+    pub fn mounted_paths(&self) -> Vec<PathBuf> {
+        self.fs.mounted_paths()
+    }
+
     pub fn request_cancel(&self) {
         self.agent.request_cancel();
     }
@@ -932,6 +984,12 @@ impl Supervisor {
     }
 }
 
+/// Discover plugin descriptors from environment variables + default paths.
+///
+/// Resolution order:
+/// 1. `NCA_PLUGIN_<NAME>_BIN` env var (e.g. `NCA_PLUGIN_PONYTAIL_BIN`)
+/// 2. `<name>-plugin` in PATH
+///
 /// IPC-based approval handler that waits for approve/deny commands from
 /// connected clients (e.g. CLI over the session socket).
 pub struct IpcApprovalHandler {

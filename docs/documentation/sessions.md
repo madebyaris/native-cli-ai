@@ -193,7 +193,7 @@ Export a session to markdown:
 ```toml
 [session]
 history_dir = ".nca/sessions"         # Where sessions are stored
-max_turns_per_run = 128               # Max turns before session ends
+max_turns_per_run = 1024               # Max turns before session ends
 max_tool_calls_per_turn = 200         # Max tools per single turn
 checkpoint_interval = 5               # Checkpoint frequency
 last_session_file = ".nca/.last_session"  # Last session pointer

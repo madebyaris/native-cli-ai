@@ -64,7 +64,7 @@ Infrastructure modules in the same directory:
 - **Visibility:** default to `pub(crate)`, promote to `pub` only when another crate needs it. All public types and traits must have doc comments.
 - **Tests:** inline `#[cfg(test)] mod tests` in source files. Integration tests in `crates/cli/tests/`. Use `tempfile` for filesystem tests. Never depend on network access in tests—mock the `Provider` trait. `core` has a `tiny_http` dev-dependency for mock HTTP servers in tests. `cli` uses `insta` for TUI snapshot tests.
 - **Channels:** prefer `tokio::sync::mpsc`. Use `tokio::sync::broadcast` only when multiple independent consumers need the same stream.
-- **Tool execution:** shell commands must go through `runtime::pty` (PTY with timeout). Never use bare `std::process::Command` for user-visible execution. File write tools must canonicalize paths and verify they are within the workspace root.
+- **Tool execution:** shell commands must go through `runtime::pty` (PTY with timeout). Never use bare `std::process::Command` for user-visible execution. File write tools must canonicalize paths and verify they are within the workspace root or any mounted extra path. External directories can be mounted at runtime via `/mount <path>`.
 - **Tool-use streaming:** incoming tool-use blocks are buffered until the closing tag is received, then executed as a batch (not streamed incrementally).
 - **IPC:** newline-delimited JSON over Unix domain sockets. `AgentEvent` enum is the shared event bus.
 - **Sessions:** `<workspace>/.nca/sessions/<id>.json` (state) + `<id>.events.jsonl` (event log). IPC socket at `$XDG_RUNTIME_DIR/nca/` (fallback `/tmp/nca/`).
@@ -139,7 +139,7 @@ Built in `core::harness::build_system_prompt`:
 | `crates/core/src/cost.rs` | Token counting and cost estimation (with cache token accounting) |
 | `crates/core/src/hooks.rs` | Hook runner, lifecycle event hooks (pre/post tool execution) |
 | `crates/core/src/tool_pipeline.rs` | Tool execution pipeline (approval → hooks → execution → post-hooks) |
-| `crates/core/src/workspace_fs.rs` | Workspace filesystem abstraction and path validation |
+| `crates/core/src/workspace_fs.rs` | Workspace filesystem abstraction, path sandbox, and runtime mount support |
 | `crates/core/src/skill_installer.rs` | Skill installation from registries |
 | `crates/runtime/src/` | Supervisor, IPC server, session persistence, PTY, worktrees, context manager, subagent |
 | `crates/runtime/src/supervisor.rs` | Session lifecycle supervisor |

@@ -64,6 +64,22 @@ pub fn spawn_anthropic_stream(
             let chunk = match item {
                 Ok(chunk) => chunk,
                 Err(err) => {
+                    tracing::error!(
+                        provider = provider_name,
+                        error = %err,
+                        is_timeout = err.is_timeout(),
+                        is_connect = err.is_connect(),
+                        is_request = err.is_request(),
+                        is_body = err.is_body(),
+                        "stream_byte_error"
+                    );
+                    if let Some(src) = std::error::Error::source(&err) {
+                        tracing::error!(
+                            provider = provider_name,
+                            source = %src,
+                            "stream_byte_error_source"
+                        );
+                    }
                     let _ = tx
                         .send(StreamChunk::TextDelta(format!(
                             "\n[{provider_name} stream error: {err}]"

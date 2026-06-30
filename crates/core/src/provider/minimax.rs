@@ -140,11 +140,37 @@ impl Provider for MiniMaxProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|err| ProviderError::RequestFailed(err.to_string()))?;
+            .map_err(|err| {
+                tracing::error!(
+                    provider = "minimax",
+                    model = %model,
+                    error = %err,
+                    is_timeout = err.is_timeout(),
+                    is_connect = err.is_connect(),
+                    is_request = err.is_request(),
+                    is_body = err.is_body(),
+                    "provider_request_failed"
+                );
+                if let Some(src) = std::error::Error::source(&err) {
+                    tracing::error!(
+                        provider = "minimax",
+                        source = %src,
+                        "provider_request_failed_source"
+                    );
+                }
+                ProviderError::RequestFailed(err.to_string())
+            })?;
 
         let status = response.status();
         if !status.is_success() {
             let body_text = response.text().await.unwrap_or_default();
+            tracing::error!(
+                provider = "minimax",
+                model = %model,
+                http_status = %status,
+                response_preview = %&body_text[..body_text.len().min(500)],
+                "provider_http_error"
+            );
             return Err(map_provider_error(status, body_text));
         }
 

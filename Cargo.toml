@@ -47,3 +47,4 @@ nca-common = { path = "crates/common" }
 nca-core = { path = "crates/core" }
 nca-runtime = { path = "crates/runtime" }
 nca-autoresearch = { path = "crates/autoresearch" }
+

@@ -100,6 +100,26 @@ Or the agent can invoke skills programmatically via the `invoke_skill` tool.
 
 ## Writing Skills
 
+### Frontmatter Reference
+
+Skills support optional YAML frontmatter for metadata:
+
+```yaml
+---
+name: Skill Name              # Display name (default: directory name)
+command: skill-name           # Slash command name (default: slugified name)
+description: Brief description
+provider: openai              # Route to this LLM provider (optional)
+model: gpt-4o                # Model name on that provider (optional)
+permission_mode: plan        # Permission mode: plan | accept-edits | dont-ask (optional)
+context: inline              # inline (default) or fork
+---
+```
+
+When `provider` is set, invoking this skill switches the session to that provider
+for the duration of the skill execution. See [Custom Agents](./agents.md) for the
+full list of supported providers.
+
 ### `SKILL.md` Format
 
 Create a `SKILL.md` file in a skill directory:

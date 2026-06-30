@@ -341,14 +341,29 @@ fn render_event(event: &AgentEvent, stats: &StreamStats) {
                     "Tool completed".color(theme::TEXT_DIM)
                 );
             } else {
+                let label = output
+                    .error
+                    .as_deref()
+                    .filter(|e| !e.is_empty())
+                    .unwrap_or_else(|| {
+                        // run_validation and similar tools leave error as
+                        // None and put diagnostics in output.
+                        if output.output.is_empty() {
+                            "Tool failed"
+                        } else {
+                            // Show last non-empty line as a compact summary.
+                            output
+                                .output
+                                .lines()
+                                .rev()
+                                .find(|l| !l.trim().is_empty())
+                                .unwrap_or("Tool failed")
+                        }
+                    });
                 println!(
                     "  {} {}",
                     "✗".color(theme::ERROR),
-                    output
-                        .error
-                        .as_deref()
-                        .unwrap_or("Tool failed")
-                        .color(theme::ERROR)
+                    label.color(theme::ERROR)
                 );
             }
         }

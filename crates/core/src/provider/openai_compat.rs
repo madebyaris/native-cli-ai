@@ -66,6 +66,26 @@ pub fn spawn_openai_stream(
             let chunk = match item {
                 Ok(chunk) => chunk,
                 Err(err) => {
+                    // Log the full error chain for diagnostics — the Display
+                    // message alone (e.g. "error decoding response body") is
+                    // often too vague to diagnose intermittent stream
+                    // disruptions.
+                    tracing::error!(
+                        provider = provider_name,
+                        error = %err,
+                        is_timeout = err.is_timeout(),
+                        is_connect = err.is_connect(),
+                        is_request = err.is_request(),
+                        is_body = err.is_body(),
+                        "stream_byte_error"
+                    );
+                    if let Some(src) = std::error::Error::source(&err) {
+                        tracing::error!(
+                            provider = provider_name,
+                            source = %src,
+                            "stream_byte_error_source"
+                        );
+                    }
                     let _ = tx
                         .send(StreamChunk::TextDelta(format!(
                             "\n[{provider_name} stream error: {err}]"
@@ -213,6 +233,8 @@ async fn flush_openai_tool_calls(
     tx: &tokio::sync::mpsc::Sender<StreamChunk>,
     tool_calls: &mut BTreeMap<u64, ToolCallAccumulator>,
 ) {
+    use crate::tools::input_repair;
+
     let drained = std::mem::take(tool_calls);
     for (index, call) in drained {
         if call.name.is_empty() {
@@ -229,6 +251,52 @@ async fn flush_openai_tool_calls(
                     },
                     name: call.name,
                     input,
+                }))
+                .await;
+        } else if let Some(input) = input_repair::repair_json_string(&call.arguments) {
+            // Repaired from stream-level JSON issue (truncation, trailing comma, etc.)
+            tracing::warn!(
+                tool = %call.name,
+                call_id = %call.id,
+                index,
+                "tool_input_stream_repaired"
+            );
+            let _ = tx
+                .send(StreamChunk::ToolUse(ToolCall {
+                    id: if call.id.is_empty() {
+                        format!("tool-call-{index}")
+                    } else {
+                        call.id
+                    },
+                    name: call.name,
+                    input,
+                }))
+                .await;
+        } else {
+            // Even stream-level repair failed — emit a tool call with the raw
+            // string so the model gets an error it can recover from, rather
+            // than having the call silently vanish.
+            tracing::warn!(
+                tool = %call.name,
+                call_id = %call.id,
+                index,
+                arguments_preview = %&call.arguments[..call.arguments.len().min(200)],
+                "tool_input_unparseable"
+            );
+            let _ = tx
+                .send(StreamChunk::ToolUse(ToolCall {
+                    id: if call.id.is_empty() {
+                        format!("tool-call-{index}")
+                    } else {
+                        call.id
+                    },
+                    name: call.name,
+                    input: json!({
+                        "_error": format!(
+                            "Failed to parse tool arguments as JSON. Raw input: {}",
+                            &call.arguments[..call.arguments.len().min(500)]
+                        )
+                    }),
                 }))
                 .await;
         }
@@ -469,11 +537,37 @@ impl Provider for OpenAiCompatProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|err| ProviderError::RequestFailed(err.to_string()))?;
+            .map_err(|err| {
+                tracing::error!(
+                    provider = self.name,
+                    model = %model,
+                    error = %err,
+                    is_timeout = err.is_timeout(),
+                    is_connect = err.is_connect(),
+                    is_request = err.is_request(),
+                    is_body = err.is_body(),
+                    "provider_request_failed"
+                );
+                if let Some(src) = std::error::Error::source(&err) {
+                    tracing::error!(
+                        provider = self.name,
+                        source = %src,
+                        "provider_request_failed_source"
+                    );
+                }
+                ProviderError::RequestFailed(err.to_string())
+            })?;
 
         let status = response.status();
         if !status.is_success() {
             let body_text = response.text().await.unwrap_or_default();
+            tracing::error!(
+                provider = self.name,
+                model = %model,
+                http_status = %status,
+                response_preview = %&body_text[..body_text.len().min(500)],
+                "provider_http_error"
+            );
             return Err(map_provider_error(status, body_text));
         }
 

@@ -1,3 +1,4 @@
+use nca_common::config::ProviderKind;
 use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
 use tokio::sync::{mpsc, oneshot};
 
@@ -9,6 +10,8 @@ pub struct SpawnRequest {
     pub task: String,
     pub focus_files: Vec<String>,
     pub use_worktree: bool,
+    pub provider_override: Option<ProviderKind>,
+    pub model_override: Option<String>,
     pub reply: oneshot::Sender<SpawnResponse>,
 }
 
@@ -58,6 +61,14 @@ impl ToolExecutor for SpawnSubagentTool {
                     "use_worktree": {
                         "type": "boolean",
                         "description": "If true, the sub-agent runs in an isolated git worktree branch. Defaults to true."
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": "Optional provider override for the sub-agent (e.g. \"openai\", \"anthropic\", \"deepseek\"). Routes the child session to a different LLM endpoint."
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Optional model name override for the sub-agent (e.g. \"gpt-4o\"). Used in conjunction with provider or alone for alias-based routing."
                     }
                 },
                 "required": ["task"]
@@ -88,12 +99,20 @@ impl ToolExecutor for SpawnSubagentTool {
 
         let use_worktree = call.input["use_worktree"].as_bool().unwrap_or(true);
 
+        // Parse optional provider/model overrides for per-agent routing.
+        let provider_override = call.input["provider"]
+            .as_str()
+            .and_then(ProviderKind::from_cli_name);
+        let model_override = call.input["model"].as_str().map(String::from);
+
         let (reply_tx, reply_rx) = oneshot::channel();
 
         let req = SpawnRequest {
             task,
             focus_files,
             use_worktree,
+            provider_override,
+            model_override,
             reply: reply_tx,
         };
 

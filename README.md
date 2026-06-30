@@ -111,6 +111,11 @@ nca spawn --prompt "Inspect the repo and draft a plan"
 nca sessions
 nca status <session_id>
 nca attach <session_id>
+
+# Mount an external directory so tools can access it
+nca
+> /mount /path/to/other-project
+> /mount           # list mounted paths
 ```
 
 The full-screen UI appears when `stdin` and `stdout` are TTYs and `--stream human` is active. Otherwise `nca` falls back to the line-oriented REPL or one-shot execution path.
@@ -173,6 +178,8 @@ Useful interactive behaviors:
 - `Tab` cycles agent profiles (`build` → `plan` → `review` → `fix` → `test`) when the input is empty, or completes the selected slash command without running it.
 - `Ctrl+C` or `/stop` cancels the current running turn.
 - `/auto-answer` accepts the suggested answer for a pending `ask_question`.
+- `/mount <path>` mounts an external directory so tools can read, write, and search files outside the workspace.
+- `/unmount <path>` removes a previously mounted directory.
 
 Small touches in the TUI matter too: branch switching, structured options, session sidebars, model picker, provider configuration, and direct control over long-running turns.
 
@@ -306,7 +313,7 @@ Recent search/edit improvements are aimed at making agent file work less brittle
 | Crate | Responsibility |
 |---|---|
 | `crates/common` | Shared config, events, sessions, messages, tool schemas, model capabilities, and orchestration metadata. |
-| `crates/core` | Agent loop, provider abstraction, harness builder, skills, approvals, tool pipeline, hooks, code intelligence, cost tracking, workspace FS, and tool registry. |
+| `crates/core` | Agent loop, provider abstraction, harness builder, skills, approvals, tool pipeline, hooks, code intelligence, cost tracking, workspace FS (with runtime mount), and tool registry. |
 | `crates/runtime` | Session supervision, IPC, persistence, worktrees, memory store, context management, and subagent execution. |
 | `crates/cli` | `nca` entrypoint, command parsing, stream rendering, REPL, and TUI. |
 | `crates/autoresearch` | Metric-driven autonomous research helpers and experiment runner. |

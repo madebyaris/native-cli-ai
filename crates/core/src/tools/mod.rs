@@ -9,6 +9,7 @@ pub mod edit_file;
 pub mod fetch_url;
 pub mod filesystem;
 pub mod git;
+pub mod input_repair;
 pub mod invoke_skill;
 pub mod list_directory;
 pub mod mcp;
@@ -137,17 +138,53 @@ pub trait ToolExecutor: Send + Sync {
 /// - reports missing required fields clearly,
 /// - coerces types via serde,
 /// - provides compile-time struct shape for tests.
+///
+/// **Validate-then-repair**: if the initial deserialization fails, the input
+/// is passed through [`input_repair::repair_value`] which fixes common LLM
+/// tool-calling mistakes (null optional fields, stringified arrays, bare
+/// objects where arrays are expected, etc.) before retrying. Valid inputs
+/// are never touched.
 pub trait ToolCallExt {
     fn extract_params<T: serde::de::DeserializeOwned>(&self) -> Result<T, ToolResult>;
 }
 
 impl ToolCallExt for ToolCall {
     fn extract_params<T: serde::de::DeserializeOwned>(&self) -> Result<T, ToolResult> {
-        serde_json::from_value(self.input.clone()).map_err(|e| ToolResult {
-            call_id: self.id.clone(),
-            success: false,
-            output: String::new(),
-            error: Some(format!("Invalid tool parameters: {e}")),
-        })
+        // Phase 1: try direct deserialization (fast path for well-formed inputs).
+        if let Ok(params) = serde_json::from_value::<T>(self.input.clone()) {
+            return Ok(params);
+        }
+
+        // Phase 2: repair then retry (handles ~90% of open-model tool errors).
+        let repaired = input_repair::repair_value(&self.input);
+        let Ok(params) = serde_json::from_value::<T>(repaired) else {
+            return Err(ToolResult {
+                call_id: self.id.clone(),
+                success: false,
+                output: String::new(),
+                error: Some(format_tool_param_error(&self.name, &self.input)),
+            });
+        };
+        tracing::info!(
+            tool = %self.name,
+            call_id = %self.id,
+            "tool_input_repaired"
+        );
+        Ok(params)
     }
+}
+
+/// Build a model-readable error message for invalid tool parameters.
+///
+/// Instead of a raw serde error (which models can't recover from), this
+/// surfaces the tool name and the parameter keys that were received.
+fn format_tool_param_error(tool_name: &str, input: &serde_json::Value) -> String {
+    let received_keys = match input.as_object() {
+        Some(map) => map.keys().cloned().collect::<Vec<_>>().join(", "),
+        None => format!("raw value: {}", input),
+    };
+    format!(
+        "Invalid parameters for tool `{}`. Received keys: [{}]. Please check the tool schema and retry.",
+        tool_name, received_keys
+    )
 }

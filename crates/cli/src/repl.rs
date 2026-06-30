@@ -539,6 +539,7 @@ impl Repl {
                     "  /thinking          Toggle thinking/reasoning visibility".into(),
                     "  /tool-output      Toggle tool output expand/collapse (TUI)".into(),
                     "  /skills            List discovered skills".into(),
+                    "  /ponytail [mode]   Toggle lazy mode (lite|full|ultra|off)".into(),
                     "  /memory [text]     Show or store memory notes".into(),
                     "  /models            Browse and select models".into(),
                     "  /connect           Connect LLM provider".into(),
@@ -846,6 +847,54 @@ impl Repl {
                     out.println("(shortcut: /permissions bypass toggles bypass ↔ default)");
                 }
             }
+            "/ponytail" => {
+                // Read/write ponytail mode via its state file.
+                // The plugin reads this file on every system-prompt build.
+                let mode = rest.trim();
+                if mode.is_empty() {
+                    // Show current mode
+                    let state_dir = nca_common::config::xdg_config_dir()
+                        .map(|d| d.join("nca/state/ponytail"))
+                        .unwrap_or_else(|| {
+                            std::path::PathBuf::from(
+                                &std::env::var("HOME").unwrap_or_else(|_| ".".into()),
+                            )
+                            .join(".nca/state/ponytail")
+                        });
+                    let current = std::fs::read_to_string(state_dir.join("mode"))
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_else(|_| "full".to_string());
+                    out.println(&format!("ponytail mode is: {current}"));
+                    out.println("usage: /ponytail lite|full|ultra|off");
+                } else {
+                    // Write mode directly to the state file (the plugin process reads this).
+                    let state_dir = nca_common::config::xdg_config_dir()
+                        .map(|d| d.join("nca/state/ponytail"))
+                        .unwrap_or_else(|| {
+                            std::path::PathBuf::from(
+                                &std::env::var("HOME").unwrap_or_else(|_| ".".into()),
+                            )
+                            .join(".nca/state/ponytail")
+                        });
+                    let valid_modes = ["lite", "full", "ultra", "off"];
+                    let normalized = mode.trim().to_ascii_lowercase();
+                    if valid_modes.contains(&normalized.as_str()) {
+                        let path = state_dir.join("mode");
+                        if let Some(parent) = path.parent()
+                            && let Err(e) = std::fs::create_dir_all(parent)
+                        {
+                            out.eprintln(&format!("ponytail: failed to create state dir: {e}"));
+                            return Ok(true);
+                        }
+                        match std::fs::write(&path, &normalized) {
+                            Ok(()) => out.println(&format!("ponytail mode set to: {normalized}")),
+                            Err(e) => out.eprintln(&format!("ponytail: failed to write mode: {e}")),
+                        }
+                    } else {
+                        out.eprintln(&format!("ponytail: invalid mode '{mode}'; valid: lite, full, ultra, off"));
+                    }
+                }
+            }
             "/skills" => {
                 let skills = SkillCatalog::discover(
                     self.runtime.workspace_root(),
@@ -1021,6 +1070,66 @@ impl Repl {
                 } else {
                     for l in &lines {
                         out.println(l);
+                    }
+                }
+            }
+            "/mount" => {
+                let rest_trim = rest.trim();
+                if rest_trim.is_empty() {
+                    // List mounted paths.
+                    let mounted = self.runtime.mounted_paths();
+                    let ws = self.runtime.workspace_root().display().to_string();
+                    let mut lines = vec![
+                        format!("Workspace: {}", ws),
+                        format!("Mounted paths: {}", mounted.len()),
+                    ];
+                    if mounted.is_empty() {
+                        lines.push("  (none)".into());
+                    } else {
+                        for p in &mounted {
+                            lines.push(format!("  {}", p.display()));
+                        }
+                    }
+                    lines.push(String::new());
+                    lines.push("Usage: /mount <path>   Mount an external directory".into());
+                    lines.push("       /unmount <path>  Remove a mount".into());
+                    if let ReplOutput::Tui(st) = &out {
+                        st.open_info_modal("mount".to_string(), lines);
+                    } else {
+                        for l in &lines {
+                            out.println(l);
+                        }
+                    }
+                } else {
+                    let path = std::path::Path::new(rest_trim);
+                    match self.runtime.mount_path(path) {
+                        Ok(()) => {
+                            let mounted = self.runtime.mounted_paths();
+                            out.println(&format!(
+                                "[mount] {} ({} mounted)",
+                                path.display(),
+                                mounted.len()
+                            ));
+                        }
+                        Err(e) => {
+                            out.eprintln(&format!("[mount] {e}"));
+                        }
+                    }
+                }
+            }
+            "/unmount" => {
+                let rest_trim = rest.trim();
+                if rest_trim.is_empty() {
+                    out.println("Usage: /unmount <path>");
+                } else {
+                    let path = std::path::Path::new(rest_trim);
+                    match self.runtime.unmount_path(path) {
+                        Ok(()) => {
+                            out.println(&format!("[unmount] {}", path.display()));
+                        }
+                        Err(e) => {
+                            out.eprintln(&format!("[unmount] {e}"));
+                        }
                     }
                 }
             }
@@ -1471,7 +1580,28 @@ impl Repl {
             return Ok(false);
         };
 
-        if let Some(model) = &skill.model {
+        // Route provider if the skill specifies one.
+        if let Some(provider) = skill.provider {
+            match self
+                .runtime
+                .switch_provider(provider, skill.model.as_deref())
+            {
+                Ok(effective_model) => {
+                    out.println(&format!(
+                        "[skill] provider={:?} model={effective_model}",
+                        provider
+                    ));
+                }
+                Err(e) => {
+                    out.eprintln(&format!(
+                        "[skill] failed to switch to provider {:?}: {e}",
+                        provider
+                    ));
+                    return Ok(true);
+                }
+            }
+        } else if let Some(model) = &skill.model {
+            // No explicit provider — just override model (existing behavior).
             self.runtime
                 .set_model(self.runtime.config().model.resolve_alias(model));
         }
@@ -1958,6 +2088,10 @@ impl Repl {
                                 .await
                         };
                         if let Err(e) = turn {
+                            tracing::error!(
+                                error = %e,
+                                "provider_turn_error"
+                            );
                             tui_feedback.push_error(e.to_string());
                         }
                         tui_feedback.set_busy(false);

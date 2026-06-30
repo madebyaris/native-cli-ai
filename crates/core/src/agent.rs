@@ -140,6 +140,10 @@ impl AgentLoop {
         // Consecutive failures of the same tool — stops infinite retry loops.
         let mut consecutive_tool_failures: u32 = 0;
         let mut last_failed_tool: String = String::new();
+        // Diagnostic details from the most recent failure (populated by the
+        // `all_failed_same_tool` branch; only read when the max is reached).
+        let mut last_failed_output: String = String::new();
+        let mut last_failed_error: Option<String> = None;
         const MAX_CONSECUTIVE_TOOL_FAILURES: u32 = 3;
 
         let final_text = loop {
@@ -347,12 +351,24 @@ impl AgentLoop {
                 && tool_calls.len() == 1;
             if all_failed_same_tool {
                 let tool_name = &tool_calls[0].name;
+                let last_result = &pipeline.results[0];
                 if *tool_name == last_failed_tool {
                     consecutive_tool_failures += 1;
                 } else {
                     last_failed_tool = tool_name.clone();
                     consecutive_tool_failures = 1;
                 }
+                // Capture failure details for diagnostics and the final error message.
+                last_failed_output = last_result.output.clone();
+                last_failed_error = last_result.error.clone();
+                tracing::warn!(
+                    tool = %tool_name,
+                    attempt = consecutive_tool_failures,
+                    max_attempts = MAX_CONSECUTIVE_TOOL_FAILURES,
+                    output = %truncate_str(&last_result.output, 500),
+                    error = ?last_result.error,
+                    "consecutive tool failure detected"
+                );
             } else {
                 consecutive_tool_failures = 0;
                 last_failed_tool.clear();
@@ -371,9 +387,13 @@ impl AgentLoop {
             }
 
             if consecutive_tool_failures >= MAX_CONSECUTIVE_TOOL_FAILURES {
+                let detail = last_failed_error
+                    .as_deref()
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| truncate_str(&last_failed_output, 300));
                 let msg = format!(
-                    "Tool `{}` failed {} times consecutively — stopping to avoid infinite loop.",
-                    last_failed_tool, consecutive_tool_failures
+                    "Tool `{}` failed {} times consecutively — stopping to avoid infinite loop.\n\nLast failure detail:\n{}",
+                    last_failed_tool, consecutive_tool_failures, detail
                 );
                 self.emit(AgentEvent::Error {
                     message: msg.clone(),

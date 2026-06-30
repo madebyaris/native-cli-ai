@@ -1,7 +1,7 @@
 use crate::session_store::SessionStore;
 use crate::session_utils::spawn_event_fanout;
 use crate::supervisor::{AutoDenyHandler, Supervisor, SupervisorConfig};
-use nca_common::config::NcaConfig;
+use nca_common::config::{NcaConfig, ProviderKind};
 use nca_common::event::{AgentEvent, EndReason};
 use nca_core::approval::ApprovalHandler;
 use nca_core::hooks::{HookEventKind, HookRunner};
@@ -20,6 +20,10 @@ pub struct ChildSessionConfig {
     pub parent_summary: String,
     pub use_worktree: bool,
     pub focus_files: Vec<String>,
+    /// Override the LLM provider for this child session.
+    pub provider_override: Option<ProviderKind>,
+    /// Override the model name for this child session.
+    pub model_override: Option<String>,
 }
 
 /// Result of a spawned child session.
@@ -93,6 +97,17 @@ pub async fn spawn_child_session(
     // run tools, and spawn their own children without being auto-denied.
     let mut child_config = cfg.config.clone();
     child_config.permissions.mode = nca_common::config::PermissionMode::BypassPermissions;
+
+    // Apply provider/model overrides from parent agent/skill routing.
+    if let Some(provider) = cfg.provider_override {
+        child_config.set_default_provider(provider);
+    }
+    if let Some(model) = &cfg.model_override {
+        child_config
+            .provider
+            .set_model_for_default(child_config.model.resolve_alias(model));
+        child_config.sync_default_model_from_provider();
+    }
 
     let mut sup = Supervisor::create(SupervisorConfig {
         config: child_config,
@@ -226,6 +241,8 @@ pub fn spawn_subagent_consumer(
                 parent_summary,
                 use_worktree: req.use_worktree,
                 focus_files: req.focus_files,
+                provider_override: req.provider_override,
+                model_override: req.model_override.clone(),
             };
 
             tokio::spawn(async move {

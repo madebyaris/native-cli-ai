@@ -18,6 +18,10 @@ pub struct NcaConfig {
     /// CLI/TUI preferences (e.g. external editor).
     #[serde(default)]
     pub ui: UiConfig,
+    /// Named agent profiles: each can override provider, model, permissions,
+    /// system prompt, and tool gating.  Keyed by profile name (e.g. "code-reviewer").
+    #[serde(default)]
+    pub agents: BTreeMap<String, AgentProfileConfig>,
 }
 
 impl NcaConfig {
@@ -183,6 +187,9 @@ impl NcaConfig {
         }
         if let Some(ui) = partial.ui {
             self.ui.merge(ui);
+        }
+        if let Some(agents) = partial.agents {
+            self.merge_agents(agents);
         }
 
         if provider_changed {
@@ -375,9 +382,107 @@ impl NcaConfig {
     pub fn needs_onboarding(&self) -> bool {
         !self.ui.onboarding_completed || !self.provider.any_api_key_present()
     }
+
+    /// Merge a map of partial agent profiles into the existing `agents` map.
+    /// Each key creates or updates the corresponding agent profile.
+    fn merge_agents(&mut self, partials: BTreeMap<String, PartialAgentProfileConfig>) {
+        for (name, partial) in partials {
+            let existing = self.agents.entry(name).or_default();
+            existing.merge(partial);
+        }
+    }
+
+    /// Look up a named agent profile by name.
+    pub fn agent_profile(&self, name: &str) -> Option<&AgentProfileConfig> {
+        self.agents.get(name)
+    }
+
+    /// List all defined agent profile names.
+    pub fn agent_profile_names(&self) -> Vec<&str> {
+        self.agents.keys().map(|s| s.as_str()).collect()
+    }
 }
 
-/// User interface preferences persisted in config.
+/// Configuration overrides for a named agent profile.
+///
+/// Agents can be defined in `config.toml` under `[agents.<name>]` and also
+/// in skill frontmatter (`provider:` key).  Each field is optional — missing
+/// fields inherit from the global config.
+///
+/// # Example (config.toml)
+///
+/// ```toml
+/// [agents.code-reviewer]
+/// provider = "openai"
+/// model = "gpt-4o"
+/// permission_mode = "plan"
+/// system_prompt_append = "Focus on security and correctness."
+/// allowed_tools = ["read", "search", "list_directory"]
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentProfileConfig {
+    /// Override the LLM provider for this agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderKind>,
+    /// Override the model name for this agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Override the permission mode for this agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<PermissionMode>,
+    /// Extra system-prompt text appended when this agent is active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt_append: Option<String>,
+    /// If set, only these tools are available (all others are disabled).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_tools: Option<Vec<String>>,
+}
+
+impl AgentProfileConfig {
+    /// Merge partial overrides into this profile.
+    fn merge(&mut self, partial: PartialAgentProfileConfig) {
+        if let Some(v) = partial.provider {
+            self.provider = Some(v);
+        }
+        if let Some(v) = partial.model {
+            self.model = Some(v);
+        }
+        if let Some(v) = partial.permission_mode {
+            self.permission_mode = Some(v);
+        }
+        if let Some(v) = partial.system_prompt_append {
+            self.system_prompt_append = Some(v);
+        }
+        if let Some(v) = partial.allowed_tools {
+            self.allowed_tools = Some(v);
+        }
+    }
+
+    /// Resolve the effective provider: explicit override > alias hint from model > inherit.
+    pub fn resolve_provider(&self) -> Option<ProviderKind> {
+        self.provider.or_else(|| {
+            self.model
+                .as_ref()
+                .and_then(|m| NcaConfig::provider_hint_for_alias(m))
+        })
+    }
+
+    /// Resolve the effective model: explicit override > inherit.
+    pub fn resolve_model<'a>(&'a self, config_default_model: &'a str) -> &'a str {
+        self.model.as_deref().unwrap_or(config_default_model)
+    }
+}
+
+/// Partial version for deserialization (all fields optional).
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialAgentProfileConfig {
+    provider: Option<ProviderKind>,
+    model: Option<String>,
+    permission_mode: Option<PermissionMode>,
+    system_prompt_append: Option<String>,
+    allowed_tools: Option<Vec<String>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiConfig {
     /// Shell command to launch the external editor (e.g. `vim` or `code --wait`).
@@ -1355,7 +1460,7 @@ impl Default for SessionConfig {
     fn default() -> Self {
         Self {
             history_dir: PathBuf::from(".nca/sessions"),
-            max_turns_per_run: 128,
+            max_turns_per_run: 1024,
             max_tool_calls_per_turn: 200,
             checkpoint_interval: 5,
             last_session_file: PathBuf::from(".nca/.last_session"),
@@ -1695,6 +1800,7 @@ struct PartialNcaConfig {
     hooks: Option<PartialHookConfig>,
     web: Option<PartialWebConfig>,
     ui: Option<PartialUiConfig>,
+    agents: Option<BTreeMap<String, PartialAgentProfileConfig>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -2564,5 +2670,116 @@ global_instructions_path = "~/.nca/AGENTS.md"
         assert_eq!(result, std::path::PathBuf::from("/absolute/path"));
         let result2 = expand_tilde(std::path::Path::new("relative/path"));
         assert_eq!(result2, std::path::PathBuf::from("relative/path"));
+    }
+
+    #[test]
+    fn agent_profile_config_parses_from_toml() {
+        let toml_str = r#"
+[agents.code-reviewer]
+provider = "openai"
+model = "gpt-4o"
+permission_mode = "plan"
+system_prompt_append = "Focus on security."
+allowed_tools = ["read", "search"]
+
+[agents.reviewer-lite]
+model = "claude-sonnet"
+"#;
+        let partial: PartialNcaConfig = toml::from_str(toml_str).expect("parse");
+        assert!(partial.agents.is_some());
+
+        let mut config = NcaConfig::default();
+        config.merge(partial);
+
+        let reviewer = config.agent_profile("code-reviewer").unwrap();
+        assert_eq!(reviewer.provider, Some(ProviderKind::OpenAi));
+        assert_eq!(reviewer.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(reviewer.permission_mode, Some(PermissionMode::Plan));
+        assert_eq!(
+            reviewer.system_prompt_append.as_deref(),
+            Some("Focus on security.")
+        );
+        assert_eq!(reviewer.allowed_tools.as_deref().map(|v| v.len()), Some(2));
+
+        let lite = config.agent_profile("reviewer-lite").unwrap();
+        assert_eq!(lite.provider, None);
+        assert_eq!(lite.model.as_deref(), Some("claude-sonnet"));
+        // Alias hint from model name should resolve provider
+        assert_eq!(lite.resolve_provider(), Some(ProviderKind::Anthropic));
+    }
+
+    #[test]
+    fn agent_profile_resolve_provider_prefers_explicit_over_alias() {
+        let profile = AgentProfileConfig {
+            provider: Some(ProviderKind::DeepSeek),
+            model: Some("gpt-4o".into()),
+            ..Default::default()
+        };
+        // Explicit provider wins over alias hint from model
+        assert_eq!(profile.resolve_provider(), Some(ProviderKind::DeepSeek));
+    }
+
+    #[test]
+    fn agent_profile_resolve_model_falls_back_to_config_default() {
+        let profile = AgentProfileConfig {
+            provider: Some(ProviderKind::OpenAi),
+            model: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            profile.resolve_model("deepseek-v4-flash"),
+            "deepseek-v4-flash"
+        );
+    }
+
+    #[test]
+    fn agent_profile_names_lists_all() {
+        let mut config = NcaConfig::default();
+        config.agents.insert(
+            "alpha".into(),
+            AgentProfileConfig {
+                provider: Some(ProviderKind::MiniMax),
+                ..Default::default()
+            },
+        );
+        config
+            .agents
+            .insert("beta".into(), AgentProfileConfig::default());
+        let mut names = config.agent_profile_names();
+        names.sort();
+        assert_eq!(names, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn agent_profile_merge_accumulates() {
+        let toml1 = r#"
+[agents.reviewer]
+provider = "openai"
+"#;
+        let toml2 = r#"
+[agents.reviewer]
+model = "gpt-4o"
+permission_mode = "plan"
+
+[agents.tester]
+provider = "deepseek"
+"#;
+        let partial1: PartialNcaConfig = toml::from_str(toml1).unwrap();
+        let partial2: PartialNcaConfig = toml::from_str(toml2).unwrap();
+
+        let mut config = NcaConfig::default();
+        config.merge(partial1);
+        config.merge(partial2);
+
+        // reviewer should have both provider from partial1 and model from partial2
+        let reviewer = config.agent_profile("reviewer").unwrap();
+        assert_eq!(reviewer.provider, Some(ProviderKind::OpenAi));
+        assert_eq!(reviewer.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(reviewer.permission_mode, Some(PermissionMode::Plan));
+
+        // tester only from partial2
+        let tester = config.agent_profile("tester").unwrap();
+        assert_eq!(tester.provider, Some(ProviderKind::DeepSeek));
+        assert!(tester.model.is_none());
     }
 }

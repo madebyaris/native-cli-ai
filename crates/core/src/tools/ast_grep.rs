@@ -694,13 +694,8 @@ mod tests {
             .await;
 
         assert!(!result.success);
-        // extract_params gives a structured error for missing required fields
-        assert!(
-            result
-                .error
-                .as_ref()
-                .map_or(false, |e| e.contains("lang") || e.contains("missing field"))
-        );
+        // extract_params gives a model-readable error for missing required fields
+        assert!(result.error.unwrap().contains("Invalid parameters"));
     }
 
     #[tokio::test]

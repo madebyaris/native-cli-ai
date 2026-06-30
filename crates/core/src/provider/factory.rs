@@ -30,9 +30,20 @@ const DEEPSEEK_PROFILE: CompatProfile = CompatProfile {
     strip_reasoning: true,
 };
 
-/// Build the configured provider for the current workspace.
+/// Build the configured provider for the current workspace (uses `config.provider.default`).
 pub fn build_provider(config: &NcaConfig) -> Result<Box<dyn Provider>, ProviderError> {
-    match config.provider.default {
+    build_provider_for(config, config.provider.default)
+}
+
+/// Build a provider for a specific [`ProviderKind`], ignoring `config.provider.default`.
+///
+/// This is used when an agent profile or skill specifies a different provider than
+/// the session default.
+pub fn build_provider_for(
+    config: &NcaConfig,
+    kind: ProviderKind,
+) -> Result<Box<dyn Provider>, ProviderError> {
+    match kind {
         ProviderKind::MiniMax => Ok(Box::new(MiniMaxProvider::from_config(config)?)),
         ProviderKind::OpenRouter => {
             let mut extra = HeaderMap::new();
@@ -138,5 +149,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn build_provider_for_uses_explicit_kind_not_default() {
+        let mut config = NcaConfig::default();
+        // Default is minimax, but we request openai explicitly
+        config.provider.default = ProviderKind::MiniMax;
+        config.provider.minimax.api_key = Some("minimax-key".into());
+        config.provider.openai.api_key = Some("openai-key".into());
+
+        // build_provider follows default (minimax)
+        assert!(build_provider(&config).is_ok());
+
+        // build_provider_for can override to openai
+        let provider = build_provider_for(&config, ProviderKind::OpenAi);
+        assert!(provider.is_ok(), "expected openai provider to build");
     }
 }

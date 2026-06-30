@@ -1,5 +1,5 @@
 use crate::ipc_pending::{ApprovalPendingMap, QuestionPendingMap};
-use nca_common::config::{NcaConfig, PermissionMode};
+use nca_common::config::{NcaConfig, PermissionMode, ProviderKind};
 use nca_common::event::{AgentEvent, EndReason, QuestionSelection};
 use nca_common::session::{OrchestrationContext, SessionSnapshot};
 use nca_core::approval::{ApprovalHandler, ApprovalVerdict};
@@ -162,6 +162,27 @@ impl SessionRuntime {
         self.supervisor.agent_mut().approval.set_mode(mode);
     }
 
+    /// Switch the active LLM provider and optionally override the model.
+    /// Rebuilds the underlying provider connection.
+    /// Returns the effective model name after the switch.
+    pub fn switch_provider(
+        &mut self,
+        provider: ProviderKind,
+        model_override: Option<&str>,
+    ) -> Result<String, ProviderError> {
+        let mut cfg = self.config.clone();
+        cfg.set_default_provider(provider);
+        if let Some(model) = model_override {
+            cfg.provider
+                .set_model_for_default(cfg.model.resolve_alias(model));
+        }
+        cfg.sync_default_model_from_provider();
+        let effective_model = cfg.model.default_model.clone();
+        self.supervisor.apply_nca_config(cfg.clone())?;
+        self.config = cfg;
+        Ok(effective_model)
+    }
+
     pub fn request_cancel(&self) {
         self.supervisor.request_cancel();
     }
@@ -269,6 +290,23 @@ impl SessionRuntime {
         self.handle = Some(handle);
         self.question_pending = question_pending;
         Ok(())
+    }
+
+    // ── Mount management ─────────────────────────────────────────────
+
+    /// Mount an additional directory so tools can access files outside the workspace root.
+    pub fn mount_path(&self, path: &std::path::Path) -> Result<(), String> {
+        self.supervisor.mount_path(path)
+    }
+
+    /// Unmount a previously mounted directory.
+    pub fn unmount_path(&self, path: &std::path::Path) -> Result<(), String> {
+        self.supervisor.unmount_path(path)
+    }
+
+    /// List currently mounted extra paths.
+    pub fn mounted_paths(&self) -> Vec<std::path::PathBuf> {
+        self.supervisor.mounted_paths()
     }
 }
 

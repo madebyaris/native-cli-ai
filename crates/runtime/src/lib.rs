@@ -5,6 +5,7 @@ pub mod last_session;
 pub mod memory_store;
 pub mod model_limits;
 pub mod model_limits_api;
+pub mod plugin_host;
 pub mod process;
 pub mod pty;
 pub mod service;

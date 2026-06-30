@@ -48,6 +48,7 @@ nca -p "add error handling to src/main.rs"
 | [Sessions](./sessions.md) | Session lifecycle, persistence, resume, and management |
 | [Permissions](./permissions.md) | Approval system, permission modes, and safe mode |
 | [Skills](./skills.md) | Skill discovery, installation, and authoring |
+| [Custom Agents](./agents.md) | Named agent profiles, per-agent provider routing, tool gating |
 | [Advanced](./advanced.md) | Sub-agents, MCP servers, hooks, orchestration, and IPC |
 
 ## Architecture

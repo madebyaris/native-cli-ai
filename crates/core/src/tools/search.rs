@@ -82,7 +82,8 @@ fn default_max_results() -> usize {
 }
 
 /// Resolve the search scope to a path relative to workspace root,
-/// validating it stays within the workspace.
+/// validating it stays within the workspace or any mounted path.
+/// Returns an absolute path if the scope is under a mounted directory.
 fn relative_search_root(fs: &dyn WorkspaceFs, scope: Option<&str>) -> Result<String, String> {
     let Some(scope) = scope.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(".".into());
@@ -90,17 +91,17 @@ fn relative_search_root(fs: &dyn WorkspaceFs, scope: Option<&str>) -> Result<Str
 
     let canonical = fs.resolve(scope).map_err(|e| e.to_string())?;
     let root = fs.root();
-    canonical
-        .strip_prefix(root)
-        .map(|path| {
-            let rendered = path.display().to_string();
-            if rendered.is_empty() {
-                ".".into()
-            } else {
-                rendered
-            }
+    if let Ok(rel) = canonical.strip_prefix(root) {
+        let rendered = rel.display().to_string();
+        Ok(if rendered.is_empty() {
+            ".".into()
+        } else {
+            rendered
         })
-        .map_err(|_| "Failed to render search path relative to workspace".into())
+    } else {
+        // Path is under a mounted directory; use the absolute canonical path.
+        Ok(canonical.display().to_string())
+    }
 }
 
 fn json_text(value: Option<&Value>) -> String {

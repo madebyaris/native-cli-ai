@@ -98,7 +98,7 @@ See [Permissions](./permissions.md) for full details on each mode.
 ```toml
 [session]
 history_dir = ".nca/sessions"       # Relative to workspace
-max_turns_per_run = 128             # Max agent turns per session run
+max_turns_per_run = 1024             # Max agent turns per session run
 max_tool_calls_per_turn = 200       # Max tool calls in a single turn
 checkpoint_interval = 5             # Save checkpoint every N turns
 last_session_file = ".nca/.last_session"
@@ -191,6 +191,28 @@ hide_tips = false         # Hide usage tips
 scroll_speed = 3          # Scroll speed in TUI
 onboarding_completed = false
 ```
+
+### `[agents]` — Named Agent Profiles
+
+Define reusable agent profiles that override provider, model, permissions, system
+prompt, and tool gating. Each profile is a `[agents.<name>]` section.
+
+```toml
+[agents.code-reviewer]
+provider = "openai"                         # LLM provider override
+model = "gpt-4o"                            # Model name override
+permission_mode = "plan"                    # Read-only mode
+system_prompt_append = "Focus on security."  # Extra prompt text
+allowed_tools = ["read_file", "search_code", "list_directory"]  # Tool gate
+
+[agents.fast-coder]
+provider = "minimax"
+model = "MiniMax-M2.5"
+permission_mode = "accept-edits"
+```
+
+See [Custom Agents](./agents.md) for the full guide on agent profiles, per-skill
+provider routing, and `spawn_subagent` overrides.
 
 ---
 

@@ -2,6 +2,7 @@ use nca_common::config::{NcaConfig, PermissionMode};
 use nca_common::session::OrchestrationContext;
 use std::path::Path;
 
+use crate::plugin::PluginRegistry;
 use crate::skills::SkillCatalog;
 
 const BUILT_IN_SYSTEM_PROMPT: &str = r#"You are nca, a native Rust coding assistant running in a terminal workspace.
@@ -56,6 +57,7 @@ Response style:
 pub fn build_system_prompt(
     config: &NcaConfig,
     workspace_root: &Path,
+    plugins: &PluginRegistry,
     orchestration: Option<&OrchestrationContext>,
 ) -> String {
     let mut sections = Vec::new();
@@ -97,6 +99,16 @@ pub fn build_system_prompt(
 
     if let Some(section) = skills_section(workspace_root, &config.harness.skill_directories) {
         sections.push(section);
+    }
+
+    // Plugin system-prompt hooks — registered Rust crates (e.g. ponytail) inject
+    // always-on behavior rules here, after project-local instructions but before
+    // orchestration metadata.
+    for (name, text) in plugins.collect_prompts(config, workspace_root) {
+        sections.push(format!(
+            "Plugin [{name}]:
+{text}"
+        ));
     }
 
     if let Some(section) = orchestration_context_section(orchestration) {
@@ -217,7 +229,7 @@ mod tests {
         let config = NcaConfig::default();
         let temp = tempdir().expect("tempdir");
 
-        let prompt = build_system_prompt(&config, temp.path(), None);
+        let prompt = build_system_prompt(&config, temp.path(), &PluginRegistry::new(), None);
 
         assert!(prompt.contains("Rust-native only."));
         assert!(prompt.contains("MiniMax is the primary provider path."));
@@ -270,7 +282,12 @@ mod tests {
             metadata: BTreeMap::new(),
         };
 
-        let prompt = build_system_prompt(&config, temp.path(), Some(&orchestration));
+        let prompt = build_system_prompt(
+            &config,
+            temp.path(),
+            &PluginRegistry::new(),
+            Some(&orchestration),
+        );
 
         let identity_idx = prompt.find("Identity:").expect("built-in section");
         let permission_idx = prompt
@@ -312,7 +329,7 @@ mod tests {
         fs::write(temp.path().join(".nca/instructions.md"), "local override")
             .expect("write local instructions");
 
-        let prompt = build_system_prompt(&config, temp.path(), None);
+        let prompt = build_system_prompt(&config, temp.path(), &PluginRegistry::new(), None);
 
         assert!(prompt.contains("Product priorities:"));
         assert!(prompt.contains("AGENTS.md Instructions:\nagents override"));

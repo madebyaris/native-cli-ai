@@ -4,6 +4,8 @@ pub mod code_intel;
 pub mod cost;
 pub mod harness;
 pub mod hooks;
+pub mod plugin;
+pub mod plugin_protocol;
 pub mod provider;
 pub mod skill_installer;
 pub mod skills;

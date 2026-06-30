@@ -1,4 +1,4 @@
-use nca_common::config::PermissionMode;
+use nca_common::config::{PermissionMode, ProviderKind};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -8,6 +8,9 @@ pub struct Skill {
     pub description: Option<String>,
     pub command: String,
     pub model: Option<String>,
+    /// Explicit provider override (e.g. `provider: openai`).
+    /// When set, skill invocations route to this provider instead of the session default.
+    pub provider: Option<ProviderKind>,
     pub permission_mode: Option<PermissionMode>,
     pub context: SkillContextMode,
     pub directory: PathBuf,
@@ -128,6 +131,11 @@ impl Skill {
             raw_description.to_string()
         };
         let model = self.model.as_deref().unwrap_or("inherit");
+        let provider = self
+            .provider
+            .as_ref()
+            .map(|p| format!("{p:?}").to_ascii_lowercase())
+            .unwrap_or_else(|| "inherit".into());
         let permission_mode = self
             .permission_mode
             .map(|mode| format!("{mode:?}"))
@@ -137,7 +145,7 @@ impl Skill {
             SkillSource::FileSystem => "",
         };
         format!(
-            "- /{}: {}{}\n  model={model} permission_mode={permission_mode} context={:?}",
+            "- /{}: {}{}\n  model={model} provider={provider} permission_mode={permission_mode} context={:?}",
             self.command, description, source_tag, self.context
         )
     }
@@ -221,6 +229,7 @@ fn parse_skill_file(path: &Path) -> Result<Skill, String> {
         description: frontmatter.description,
         command,
         model: frontmatter.model,
+        provider: frontmatter.provider,
         permission_mode: frontmatter.permission_mode,
         context: frontmatter.context.unwrap_or(SkillContextMode::Inline),
         directory,
@@ -263,6 +272,7 @@ struct SkillFrontmatter {
     description: Option<String>,
     command: Option<String>,
     model: Option<String>,
+    provider: Option<ProviderKind>,
     permission_mode: Option<PermissionMode>,
     context: Option<SkillContextMode>,
 }
@@ -323,6 +333,7 @@ fn parse_agents_md(workspace_root: &Path) -> Result<Vec<Skill>, String> {
             // First directive line - check if it's a skill frontmatter directive
             let trimmed = line.trim_start_matches("- ");
             if trimmed.starts_with("model=")
+                || trimmed.starts_with("provider=")
                 || trimmed.starts_with("permission_mode=")
                 || trimmed.starts_with("context=")
             {
@@ -375,6 +386,7 @@ fn build_skill_from_section(
     }
 
     let mut model = None;
+    let mut provider = None;
     let mut permission_mode = None;
     let mut context = SkillContextMode::Inline;
 
@@ -387,7 +399,10 @@ fn build_skill_from_section(
         }
         // Split by spaces to handle "model=inherit permission_mode=plan"
         for directive in line.split_whitespace() {
-            if directive.starts_with("model=") {
+            if directive.starts_with("provider=") {
+                let val = directive.trim_start_matches("provider=").trim();
+                provider = ProviderKind::from_cli_name(val);
+            } else if directive.starts_with("model=") {
                 let val = directive.trim_start_matches("model=").trim();
                 if val != "inherit" {
                     model = Some(val.to_string());
@@ -412,6 +427,7 @@ fn build_skill_from_section(
         description: Some(section_description(heading, body)),
         command,
         model,
+        provider,
         permission_mode,
         context,
         directory: workspace_root.to_path_buf(),
@@ -781,6 +797,7 @@ Component management and styling...
             description: None,
             command: "test".into(),
             model: None,
+            provider: None,
             permission_mode: None,
             context: SkillContextMode::Inline,
             directory: skill_dir,
@@ -805,6 +822,7 @@ Component management and styling...
             description: None,
             command: "test".into(),
             model: None,
+            provider: None,
             permission_mode: None,
             context: SkillContextMode::Inline,
             directory: skill_dir,
@@ -832,6 +850,7 @@ Component management and styling...
             description: None,
             command: "test".into(),
             model: None,
+            provider: None,
             permission_mode: None,
             context: SkillContextMode::Inline,
             directory: skill_dir,
@@ -859,6 +878,7 @@ Component management and styling...
             description: None,
             command: "test".into(),
             model: None,
+            provider: None,
             permission_mode: None,
             context: SkillContextMode::Inline,
             directory: skill_dir,
@@ -883,6 +903,7 @@ Component management and styling...
             description: None,
             command: "test".into(),
             model: None,
+            provider: None,
             permission_mode: None,
             context: SkillContextMode::Inline,
             directory: skill_dir,

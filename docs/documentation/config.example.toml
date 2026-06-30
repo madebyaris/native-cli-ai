@@ -74,7 +74,7 @@ default = "minimax"
 
 # [session]
 # history_dir = ".nca/sessions"     # 相对于工作区
-# max_turns_per_run = 128
+# max_turns_per_run = 1024
 # max_tool_calls_per_turn = 200
 # checkpoint_interval = 5
 # last_session_file = ".nca/.last_session"
@@ -133,7 +133,7 @@ default = "minimax"
 # default_search_limit = 5
 # user_agent = "nca/0.5 (+https://github.com/user/native-cli-ai)"
 
-# ── UI ──────────────────────────────────────────────────────────
+# ── UI ────────────────────────────────���─────────────────────────
 
 # [ui]
 # editor = ""                      # 优先级: NCA_EDITOR > 本字段 > EDITOR > vim
@@ -141,3 +141,25 @@ default = "minimax"
 # hide_tips = false
 # scroll_speed = 3
 # onboarding_completed = false
+
+# ── Agent Profiles ──────────────────────────────────────────────
+# 每个 [agents.<name>] 定���一个命名 agent 配置，
+# 可以覆盖 provider、model、权限、系统提示和工具范围。
+# 调用对应 skill 或 spawn_subagent 时生效。
+#
+# [agents.code-reviewer]
+# provider = "openai"                  # 路由到 OpenAI 端点
+# model = "gpt-4o"                     # 使用 GPT-4o
+# permission_mode = "plan"             # 只读，不允许编辑
+# system_prompt_append = "Focus on security and correctness."
+# allowed_tools = ["read_file", "search_code", "list_directory"]
+#
+# [agents.security-audit]
+# provider = "anthropic"
+# model = "claude-3-7-sonnet-latest"
+# permission_mode = "plan"
+#
+# [agents.fast-coder]
+# provider = "minimax"
+# model = "MiniMax-M2.5"
+# permission_mode = "accept-edits"
