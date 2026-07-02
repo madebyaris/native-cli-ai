@@ -44,7 +44,7 @@ Key UI dependencies in `cli`: `ratatui 0.30` + `crossterm 0.29` (TUI), `reedline
 ## Provider Architecture
 
 All LLM calls go through the `Provider` trait in `core::provider`. Provider modules:
-`minimax` (default), `minimax_vlm` (vision-language model), `anthropic`, `openai`, `deepseek`, `openrouter`, `zhipuai`.
+`deepseek` (default), `minimax`, `minimax_vlm` (vision-language model), `anthropic`, `openai`, `openrouter`, `zhipuai`.
 
 Infrastructure modules in the same directory:
 - `factory.rs` — provider instantiation from config.
@@ -55,6 +55,32 @@ Infrastructure modules in the same directory:
 - `prepare_messages_for_request()` is the hook for provider-specific message rewriting (e.g. DeepSeek strips `reasoning_content`).
 - Never hard-code a model name. Always read from config (`common::config::NcaConfig`).
 - Empty completions must fail loudly (never silently succeed).
+
+## Agent Profiles
+
+Agent profiles allow per-agent overrides of provider, model, permission mode, system prompt, and tool gating. They are defined in config under `[agents.<name>]` and also auto-registered from skill frontmatter.
+
+**Config-defined profiles** (`config.toml` / `config.local.toml`):
+
+```toml
+[agents.code-reviewer]
+provider = "openai"
+model = "gpt-4o"
+permission_mode = "plan"
+system_prompt_append = "Focus on security and correctness."
+allowed_tools = ["read", "search", "list_directory"]
+```
+
+**Skill-based profiles:** Skills with `agent: true` in frontmatter (or known OMO specialist names: `explorer`, `oracle`, `librarian`, `designer`, `fixer`, `tester`, `observer`, `council`) are auto-registered as agent profiles at supervisor startup via `register_skill_agents()`. Explicit `[agents.<name>]` config entries take precedence over skill-discovered profiles.
+
+**Built-in OMO specialists:** Seeded into the user's XDG skills directory on startup via `nca_common::builtin_skills::seed_builtin_skills()`. These provide the seven specialist personas used for subagent delegation.
+
+**Runtime switching:** `Supervisor::apply_agent_profile(name)` rebuilds the LLM provider, system prompt, permission mode, and tool registry. The `@orchestrator` profile (index 0) restores the default harness prompt with no overrides. Tab cycling in the REPL/TUI rotates through the full profile list.
+
+Key types:
+- `AgentProfileConfig` (`common::config`) — the profile override struct.
+- `build_system_prompt_with_agent()` (`core::harness`) — system prompt builder that swaps in the agent's `system_prompt` when set, otherwise uses the built-in.
+- `ToolRegistry::restrict_to()` (`core::tools`) — tool gating when `allowed_tools` is set.
 
 ## Key Conventions
 
@@ -98,6 +124,8 @@ The Elm TUI (`tui/elm/model.rs::NcaModel`) runs inside `spawn_blocking` on a ded
 
 **Shared state between Elm and runtime:** Uses `Arc<StdMutex<...>>` (not tokio::Mutex) because Elm runs on a blocking thread. Key shared handles: `active_question_id`, `active_question_payload`, `staged_images`.
 
+**Tracing in TUI mode:** When the full-screen TUI is active, tracing output is redirected to `<workspace>/.nca/nca.log` instead of stderr to avoid corrupting the display. The `TuiFileWriter` in `main.rs` implements `MakeWriter` for this. Non-TUI runs (REPL, one-shot, `--stream ndjson`) continue to use stderr. User-visible errors flow through `AgentEvent` → transcript, not tracing.
+
 ## TUI & IPC Performance
 
 - Ratatui rendering must use `is_dirty()` guards to skip frames when nothing changed — without this, idle CPU stays at 7%+ instead of target <1%. The Elm architecture has a `redraw` guard and `BlockLineCache` for incremental rendering.
@@ -115,7 +143,7 @@ MCP servers are loaded via `rmcp` crate (v1.7, features: `client`, `transport-as
 
 ## System Prompt Layering
 
-Built in `core::harness::build_system_prompt`:
+Built in `core::harness::build_system_prompt_with_agent` (accepts an optional `AgentProfileConfig` that can replace the built-in prompt with a specialist persona):
 1. Built-in harness prompt
 2. Permission-mode guidance
 3. Global Instructions (`$XDG_CONFIG_HOME/nca/AGENTS.md`, user-level)
@@ -130,7 +158,7 @@ Built in `core::harness::build_system_prompt`:
 | Path | Purpose |
 |---|---|
 | `crates/core/src/agent.rs` | Main agent loop, `truncate_tool_output`, token estimation |
-| `crates/core/src/harness.rs` | System prompt builder, skills index assembly |
+| `crates/core/src/harness.rs` | System prompt builder (`build_system_prompt_with_agent`), skills index assembly |
 | `crates/core/src/provider/` | All provider implementations, factory, stream parsers |
 | `crates/core/src/tools/` | Built-in tool definitions (file ops, search, edit, validation, git, AST, etc.) |
 | `crates/core/src/skills.rs` | Skill discovery, resolution, and metadata |
@@ -142,7 +170,7 @@ Built in `core::harness::build_system_prompt`:
 | `crates/core/src/workspace_fs.rs` | Workspace filesystem abstraction, path sandbox, and runtime mount support |
 | `crates/core/src/skill_installer.rs` | Skill installation from registries |
 | `crates/runtime/src/` | Supervisor, IPC server, session persistence, PTY, worktrees, context manager, subagent |
-| `crates/runtime/src/supervisor.rs` | Session lifecycle supervisor |
+| `crates/runtime/src/supervisor.rs` | Session lifecycle supervisor, `apply_agent_profile`, `register_skill_agents` |
 | `crates/runtime/src/context_manager.rs` | Token tracking, auto-summarize, sliding window |
 | `crates/runtime/src/subagent.rs` | Subagent spawning and management |
 | `crates/runtime/src/worktree.rs` | Git worktree creation and cleanup |
@@ -156,9 +184,10 @@ Built in `core::harness::build_system_prompt`:
 | `crates/cli/src/tui/elm/feedback.rs` | `TuiFeedbackMsg` enum, shared state handles |
 | `crates/cli/src/tui/app.rs` | Legacy TUI (dead code with `#[allow(dead_code)]`), exports `TuiCmd`, `ApprovalAnswer`, theme |
 | `crates/cli/src/tui/state.rs` | `TuiSessionState`, `DisplayBlock`, event application |
-| `crates/common/src/config.rs` | Config schema and resolution chain |
+| `crates/common/src/config.rs` | Config schema and resolution chain, `AgentProfileConfig` |
 | `crates/common/src/event.rs` | `AgentEvent` enum, event bus types |
 | `crates/common/src/model_caps.rs` | Model capability detection (vision, context window, etc.) |
+| `crates/common/src/builtin_skills.rs` | Built-in OMO specialist skill seeding into XDG dir |
 | `crates/common/src/session.rs` | Session metadata, `OrchestrationContext`, orchestration env contract |
 
 ## Release & Distribution

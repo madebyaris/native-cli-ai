@@ -19,18 +19,19 @@ use crate::plugin_host::PluginHost;
 use crate::pty::PtyManager;
 use crate::session_store::SessionStore;
 use chrono::Utc;
-use nca_common::config::NcaConfig;
+use nca_common::config::{AgentProfileConfig, NcaConfig};
 use nca_common::event::{AgentEvent, EndReason};
 use nca_common::session::{
     OrchestrationContext, SessionMeta, SessionSnapshot, SessionState, SessionStatus,
 };
 use nca_core::agent::AgentLoop;
 use nca_core::approval::{ApprovalHandler, ApprovalPolicy, ApprovalVerdict};
-use nca_core::harness::build_system_prompt;
+use nca_core::harness::build_system_prompt_with_agent;
 use nca_core::hooks::{HookEventKind, HookRunner};
 use nca_core::plugin::PluginRegistry;
 use nca_core::provider::ProviderError;
 use nca_core::provider::factory::build_provider;
+use nca_core::skills::SkillCatalog;
 use nca_core::tools::AskQuestionTool;
 use nca_core::tools::InvokeSkillTool;
 use nca_core::tools::ToolRegistry;
@@ -72,6 +73,12 @@ pub struct Supervisor {
     session_title: Option<String>,
     orchestration: Option<OrchestrationContext>,
     config: NcaConfig,
+    /// Config snapshot without agent-profile overrides applied. Used as the
+    /// base when switching agents at runtime via [`apply_agent_profile`].
+    base_config: NcaConfig,
+    /// Active agent profile (if any). Stored so `reset_for_new_session` can
+    /// rebuild the system prompt with the same specialist persona.
+    agent_profile: Option<AgentProfileConfig>,
     hooks: Option<HookRunner>,
     plugins: PluginRegistry,
     #[allow(dead_code)] // retained for RAII — drop cleans up child plugin processes.
@@ -90,6 +97,10 @@ pub struct SupervisorConfig {
     pub session_id: Option<String>,
     pub approval_handler: Option<Arc<dyn ApprovalHandler>>,
     pub orchestration_context: Option<OrchestrationContext>,
+    /// Optional agent profile name. When set, the matching `[agents.<name>]`
+    /// profile is loaded and its provider/model/permission/tool overrides are
+    /// applied to this session.
+    pub agent_name: Option<String>,
 }
 
 /// A handle returned to callers for interacting with a running supervisor.
@@ -165,6 +176,37 @@ impl Supervisor {
             config.permissions.deny.push("execute_bash".into());
         }
 
+        // Seed built-in OMO specialist skills into the user's XDG dir (idempotent).
+        // This ensures a fresh `nca` install has the seven specialists available
+        // without requiring a manual `nca skills add` step.
+        let _seeded = nca_common::builtin_skills::seed_builtin_skills();
+
+        // Auto-register skill-based agent profiles before resolving agent_name.
+        register_skill_agents(&mut config, &workspace_root);
+
+        // Snapshot the config BEFORE applying agent-profile overrides. This is
+        // used as the base when switching agents at runtime.
+        let base_config = config.clone();
+
+        // Resolve the agent profile (if any) and apply its overrides to the config.
+        let agent_profile = cfg
+            .agent_name
+            .as_deref()
+            .and_then(|name| config.agent_profile(name).cloned());
+        if let Some(ref profile) = agent_profile {
+            if let Some(provider) = profile.resolve_provider() {
+                config.set_default_provider(provider);
+            }
+            if let Some(ref model) = profile.model {
+                let resolved = config.model.resolve_alias(model);
+                config.provider.set_model_for_default(resolved);
+                config.sync_default_model_from_provider();
+            }
+            if let Some(mode) = profile.permission_mode {
+                config.permissions.mode = mode;
+            }
+        }
+
         let provider = build_provider(&config)?;
         let fs: Arc<dyn WorkspaceFs> = Arc::new(RealFs::new(workspace_root.clone()));
         let fs_for_supervisor = fs.clone();
@@ -236,6 +278,14 @@ impl Supervisor {
             workspace_root.clone(),
             config.harness.skill_directories.clone(),
         )));
+
+        // Apply tool gating from the agent profile (if any).
+        if let Some(ref profile) = agent_profile
+            && let Some(ref allowed) = profile.allowed_tools
+        {
+            tools.restrict_to(allowed);
+        }
+
         let session_id = cfg.session_id.unwrap_or_else(generate_session_id);
         let session_store = SessionStore::new(workspace_root.join(&config.session.history_dir));
 
@@ -289,11 +339,12 @@ impl Supervisor {
             config.session.checkpoint_interval,
             hook_runner.clone(),
         );
-        let system_prompt = build_system_prompt(
+        let system_prompt = build_system_prompt_with_agent(
             &config,
             &workspace_root,
             &plugins,
             cfg.orchestration_context.as_ref(),
+            agent_profile.as_ref(),
         );
         agent.set_system_prompt(system_prompt);
 
@@ -326,6 +377,8 @@ impl Supervisor {
             session_title: None,
             orchestration: cfg.orchestration_context,
             config,
+            base_config,
+            agent_profile,
             hooks: hook_runner,
             plugins,
             plugin_host,
@@ -369,6 +422,7 @@ impl Supervisor {
             session_id: Some(session_id.into()),
             approval_handler,
             orchestration_context: None,
+            agent_name: None,
         })
         .await?;
 
@@ -840,15 +894,65 @@ impl Supervisor {
         }
     }
 
-    /// Reset for a fresh session: new ID, rebuild system prompt, clear lineage and cost.
-    pub fn reset_for_new_session(&mut self) {
-        self.session_id = generate_session_id();
-        self.agent.messages.clear();
-        let system_prompt = build_system_prompt(
+    /// Switch the active agent profile at runtime.
+    ///
+    /// When `name` is `None`, the default (no-profile) harness prompt is restored.
+    /// When `name` matches a registered `[agents.<name>]` entry, its system prompt,
+    /// provider, model, and permission overrides are applied.
+    ///
+    /// This rebuilds the LLM provider if the profile changes provider/model.
+    pub fn apply_agent_profile(&mut self, name: Option<&str>) -> Result<(), ProviderError> {
+        // Start from the clean base config (before any agent overrides).
+        let mut config = self.base_config.clone();
+        let profile = name.and_then(|n| config.agent_profile(n).cloned());
+
+        if let Some(ref p) = profile {
+            if let Some(provider) = p.resolve_provider() {
+                config.set_default_provider(provider);
+            }
+            if let Some(ref model) = p.model {
+                let resolved = config.model.resolve_alias(model);
+                config.provider.set_model_for_default(resolved);
+                config.sync_default_model_from_provider();
+            }
+            if let Some(mode) = p.permission_mode {
+                config.permissions.mode = mode;
+            }
+        }
+
+        // Rebuild provider if config changed.
+        let provider = build_provider(&config)?;
+        self.config = config;
+        self.model = self.config.model.default_model.clone();
+        let m = self.model.clone();
+        self.agent.model = m;
+        self.agent.replace_provider(provider);
+        self.agent.approval.set_mode(self.config.permissions.mode);
+
+        // Store profile and rebuild system prompt.
+        self.agent_profile = profile;
+        let system_prompt = build_system_prompt_with_agent(
             &self.config,
             &self.workspace_root,
             &self.plugins,
             self.orchestration.as_ref(),
+            self.agent_profile.as_ref(),
+        );
+        self.agent.set_system_prompt(system_prompt);
+        self.rebuild_context_manager_sync();
+        Ok(())
+    }
+
+    /// Reset for a fresh session: new ID, rebuild system prompt, clear lineage and cost.
+    pub fn reset_for_new_session(&mut self) {
+        self.session_id = generate_session_id();
+        self.agent.messages.clear();
+        let system_prompt = build_system_prompt_with_agent(
+            &self.config,
+            &self.workspace_root,
+            &self.plugins,
+            self.orchestration.as_ref(),
+            self.agent_profile.as_ref(),
         );
         self.agent.set_system_prompt(system_prompt);
         self.child_session_ids.clear();
@@ -881,9 +985,15 @@ impl Supervisor {
         &mut self.agent
     }
 
+    /// Borrow the supervisor's merged config (includes OMO agents registered at startup).
+    pub fn config(&self) -> &NcaConfig {
+        &self.config
+    }
+
     /// Apply a new [`NcaConfig`] and rebuild the active LLM provider (in-session provider switch).
     pub fn apply_nca_config(&mut self, config: NcaConfig) -> Result<(), ProviderError> {
         let provider = build_provider(&config)?;
+        self.base_config = config.clone();
         self.config = config;
         self.model = self.config.provider.active_model().to_string();
         let m = self.model.clone();
@@ -987,7 +1097,7 @@ impl Supervisor {
 /// Discover plugin descriptors from environment variables + default paths.
 ///
 /// Resolution order:
-/// 1. `NCA_PLUGIN_<NAME>_BIN` env var (e.g. `NCA_PLUGIN_PONYTAIL_BIN`)
+/// 1. `NCA_PLUGIN_<NAME>_BIN` env var (e.g. `NCA_PLUGIN_MYPLUGIN_BIN`)
 /// 2. `<name>-plugin` in PATH
 ///
 /// IPC-based approval handler that waits for approve/deny commands from
@@ -1049,4 +1159,192 @@ fn generate_session_id() -> String {
     static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
     let counter = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("session-{}-{counter}", Utc::now().timestamp_micros())
+}
+
+/// Known OMO specialist agent names that auto-register as agent profiles.
+///
+/// `tester` is split from `fixer` by design: they should use different models
+/// for cross-model verification (code written by one model, tested by another).
+const SPECIALIST_NAMES: &[&str] = &[
+    "explorer",
+    "oracle",
+    "librarian",
+    "designer",
+    "fixer",
+    "tester",
+    "observer",
+    "council",
+];
+
+/// Check if a skill command name is a known OMO specialist.
+fn is_specialist_skill(command: &str) -> bool {
+    SPECIALIST_NAMES.contains(&command)
+}
+
+/// Scan skill directories and register specialist skills as agent profiles.
+///
+/// A skill becomes an agent profile candidate if:
+/// - It has `agent: true` in its frontmatter, OR
+/// - Its command name is a known OMO specialist (`explorer`, `oracle`, etc.)
+///
+/// Profiles are only inserted if not already defined in the user's config
+/// (explicit `[agents.<name>]` takes precedence).
+pub(crate) fn register_skill_agents(config: &mut NcaConfig, workspace_root: &Path) {
+    let skills = match SkillCatalog::discover(workspace_root, &config.harness.skill_directories) {
+        Ok(skills) => skills,
+        Err(e) => {
+            tracing::debug!("skill discovery for agent registration failed: {e}");
+            return;
+        }
+    };
+
+    for skill in &skills {
+        if !skill.agent && !is_specialist_skill(&skill.command) {
+            continue;
+        }
+
+        // Don't override a profile already defined by the user.
+        if config.agents.contains_key(&skill.command) {
+            continue;
+        }
+
+        let profile = AgentProfileConfig {
+            description: skill.description.clone(),
+            provider: skill.provider,
+            model: skill.model.clone(),
+            permission_mode: skill.permission_mode,
+            system_prompt: Some(skill.expanded_body()),
+            system_prompt_append: None,
+            allowed_tools: None,
+        };
+        config.agents.insert(skill.command.clone(), profile);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_specialist_skill_recognizes_known_names() {
+        assert!(is_specialist_skill("explorer"));
+        assert!(is_specialist_skill("oracle"));
+        assert!(is_specialist_skill("librarian"));
+        assert!(is_specialist_skill("designer"));
+        assert!(is_specialist_skill("fixer"));
+        assert!(is_specialist_skill("tester"));
+        assert!(is_specialist_skill("observer"));
+        assert!(is_specialist_skill("council"));
+    }
+
+    #[test]
+    fn is_specialist_skill_rejects_unknown_names() {
+        assert!(!is_specialist_skill("code-reviewer"));
+        assert!(!is_specialist_skill("brainstorming"));
+        assert!(!is_specialist_skill("random-skill"));
+    }
+
+    #[test]
+    fn register_skill_agents_registers_specialist_skill() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let empty_xdg = tempfile::tempdir().expect("tempdir for xdg isolation");
+
+        // Isolate from real XDG config (which may have explorer/oracle/etc. installed).
+        // SAFETY: this test does not depend on other tests that read XDG in parallel.
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", empty_xdg.path());
+        }
+
+        let skill_dir = dir.path().join(".nca/skills/explorer");
+        std::fs::create_dir_all(&skill_dir).expect("mkdir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: Explorer\ncommand: explorer\ndescription: Explores code\n---\nYou are an explorer.\n",
+        )
+        .expect("write");
+
+        let mut config = NcaConfig::default();
+        register_skill_agents(&mut config, dir.path());
+
+        let profile = config
+            .agent_profile("explorer")
+            .expect("profile should exist");
+        assert!(
+            profile
+                .system_prompt
+                .as_ref()
+                .unwrap()
+                .contains("You are an explorer")
+        );
+        assert_eq!(profile.description.as_deref(), Some("Explores code"));
+
+        // Restore env.
+        unsafe {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+    }
+
+    #[test]
+    fn register_skill_agents_registers_agent_flagged_skill() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let skill_dir = dir.path().join(".nca/skills/custom-agent");
+        std::fs::create_dir_all(&skill_dir).expect("mkdir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: Custom Agent\ncommand: custom-agent\nagent: true\n---\nCustom persona.\n",
+        )
+        .expect("write");
+
+        let mut config = NcaConfig::default();
+        register_skill_agents(&mut config, dir.path());
+
+        assert!(config.agent_profile("custom-agent").is_some());
+    }
+
+    #[test]
+    fn register_skill_agents_skips_non_agent_skills() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let skill_dir = dir.path().join(".nca/skills/regular-skill");
+        std::fs::create_dir_all(&skill_dir).expect("mkdir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: Regular Skill\ncommand: regular-skill\n---\nJust a skill.\n",
+        )
+        .expect("write");
+
+        let mut config = NcaConfig::default();
+        register_skill_agents(&mut config, dir.path());
+
+        assert!(config.agent_profile("regular-skill").is_none());
+    }
+
+    #[test]
+    fn register_skill_agents_does_not_override_existing_profile() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let skill_dir = dir.path().join(".nca/skills/oracle");
+        std::fs::create_dir_all(&skill_dir).expect("mkdir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: Oracle\ncommand: oracle\n---\nSkill body.\n",
+        )
+        .expect("write");
+
+        let mut config = NcaConfig::default();
+        // Pre-define an oracle profile
+        config.agents.insert(
+            "oracle".into(),
+            AgentProfileConfig {
+                system_prompt: Some("User-defined oracle.".into()),
+                ..Default::default()
+            },
+        );
+        register_skill_agents(&mut config, dir.path());
+
+        // Should keep user-defined profile
+        let profile = config.agent_profile("oracle").expect("profile");
+        assert_eq!(
+            profile.system_prompt.as_deref(),
+            Some("User-defined oracle.")
+        );
+    }
 }

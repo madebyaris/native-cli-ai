@@ -40,7 +40,7 @@ impl Default for StatusBarData {
     fn default() -> Self {
         Self {
             model: String::from("unknown"),
-            agent_profile: String::from("Build"),
+            agent_profile: String::from("@orchestrator"),
             current_branch: String::new(),
             permission_mode: String::from("ask"),
             session_id: String::new(),

@@ -32,7 +32,7 @@ The product surface is the CLI. No desktop wrapper, no Electron, no browser in t
 - Persists session state and event logs under the current workspace.
 - Exposes machine-readable JSON and NDJSON for automation.
 - Spawns child agents with explicit parent/child lineage and optional git worktrees.
-- Uses MiniMax by default, with DeepSeek, OpenAI, Anthropic, OpenRouter, and Zhipuai support.
+- Uses DeepSeek by default, with MiniMax, OpenAI, Anthropic, OpenRouter, and Zhipuai support.
 - Loads built-in tools plus optional MCP tools from config.
 - Sends **native multimodal** (text + image) messages to MiniMax and other vision-capable models.
 - Auto-summarizes long conversations to prevent token overflow.
@@ -93,7 +93,7 @@ cp target/release/nca /usr/local/bin/
 
 ```bash
 # Configure a provider
-export MINIMAX_API_KEY="your-api-key"
+export DEEPSEEK_API_KEY="your-api-key"
 
 # Start the interactive CLI
 nca
@@ -175,7 +175,7 @@ Useful interactive behaviors:
 - `! <cmd>` runs a shell command.
 - `@ <query>` searches files (fuzzy file mention completions).
 - `/...` runs slash commands.
-- `Tab` cycles agent profiles (`build` → `plan` → `review` → `fix` → `test`) when the input is empty, or completes the selected slash command without running it.
+- `Tab` cycles agent profiles (`@orchestrator` → specialists like `@explorer`, `@oracle`, `@fixer`, `@tester`, etc.) when the input is empty, or completes the selected slash command without running it.
 - `Ctrl+C` or `/stop` cancels the current running turn.
 - `/auto-answer` accepts the suggested answer for a pending `ask_question`.
 - `/mount <path>` mounts an external directory so tools can read, write, and search files outside the workspace.
@@ -210,6 +210,7 @@ See [Orchestration Contract](docs/orchestration.md) for the subprocess-facing su
 | `<workspace>/.nca/sessions/<id>.json` | Saved session state. |
 | `<workspace>/.nca/sessions/<id>.events.jsonl` | Event log for the session. |
 | `<workspace>/.nca/memory.json` | Default memory store. |
+| `<workspace>/.nca/nca.log` | Tracing log in TUI mode (stderr in non-TUI runs). |
 | `<workspace>/AGENTS.md` | Repo-local instruction layer; each `## Heading` is also a discoverable skill. |
 | `<workspace>/.nca/skills/` | Default workspace skill directory. |
 | `$XDG_CONFIG_HOME/nca/skills/` | User-level skill directory. |
@@ -265,12 +266,12 @@ enable_auto_summarize = true
 
 ## Providers
 
-MiniMax is the default provider path. The codebase also supports DeepSeek, OpenAI, Anthropic, OpenRouter, and Zhipuai, so the project can stay MiniMax-first without boxing itself into one provider forever.
+DeepSeek is the default provider path. The codebase also supports MiniMax, OpenAI, Anthropic, OpenRouter, and Zhipuai, so the project can stay DeepSeek-first without boxing itself into one provider forever.
 
 Typical environment variables:
 
-- `MINIMAX_API_KEY`
 - `DEEPSEEK_API_KEY`
+- `MINIMAX_API_KEY`
 - `OPENAI_API_KEY`
 - `ANTHROPIC_API_KEY`
 - `OPENROUTER_API_KEY`

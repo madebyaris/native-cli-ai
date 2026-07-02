@@ -73,6 +73,11 @@ fn run_without_config_exits_nonzero() {
         .current_dir(temp.path())
         .env("HOME", temp.path())
         .env_remove("MINIMAX_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OPENROUTER_API_KEY")
+        .env_remove("ZHIPUAI_API_KEY")
+        .env_remove("DEEPSEEK_API_KEY")
         .arg("run")
         .arg("--prompt")
         .arg("hello")
@@ -81,7 +86,7 @@ fn run_without_config_exits_nonzero() {
         .assert()
         .failure()
         .code(10)
-        .stderr(predicates::str::contains("missing MiniMax API key"));
+        .stderr(predicates::str::contains("missing DeepSeek API key"));
 }
 
 #[test]

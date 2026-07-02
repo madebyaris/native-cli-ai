@@ -601,11 +601,14 @@ impl NcaModel {
                     .open(elm_entries);
                 self.popup_open = true;
             }
-            TuiFeedbackMsg::OpenAgentPicker { current_index } => {
+            TuiFeedbackMsg::OpenAgentPicker {
+                labels,
+                current_index,
+            } => {
                 self.components
                     .agent_picker
                     .get_or_insert_with(agent_picker::AgentPickerState::new)
-                    .open(current_index);
+                    .open(labels, current_index);
                 self.popup_open = true;
             }
             TuiFeedbackMsg::OpenPermissionPicker { current_index } => {

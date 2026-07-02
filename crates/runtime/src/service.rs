@@ -98,6 +98,7 @@ async fn run_service_session_with_startup(
                 session_id: session_id.clone(),
                 approval_handler: None,
                 orchestration_context: request.orchestration_context.clone(),
+                agent_name: None,
             })
             .await
         }

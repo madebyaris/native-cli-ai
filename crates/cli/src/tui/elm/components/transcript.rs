@@ -552,6 +552,7 @@ impl TranscriptState {
                                 self.blocks.get_mut(*block_idx)
                             {
                                 *expanded = !*expanded;
+                                self.blocks_generation = self.blocks_generation.wrapping_add(1);
                             }
                             self.transcript_selection = None;
                             self.transcript_dragging = false;
@@ -568,6 +569,7 @@ impl TranscriptState {
                                 self.blocks.get_mut(*block_idx)
                             {
                                 *expanded = !*expanded;
+                                self.blocks_generation = self.blocks_generation.wrapping_add(1);
                             }
                             self.transcript_selection = None;
                             self.transcript_dragging = false;

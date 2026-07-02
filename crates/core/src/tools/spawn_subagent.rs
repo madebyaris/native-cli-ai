@@ -12,6 +12,9 @@ pub struct SpawnRequest {
     pub use_worktree: bool,
     pub provider_override: Option<ProviderKind>,
     pub model_override: Option<String>,
+    /// Optional specialist agent name (e.g. "explorer", "oracle").
+    /// When set, the runtime loads the matching agent profile.
+    pub specialist: Option<String>,
     pub reply: oneshot::Sender<SpawnResponse>,
 }
 
@@ -69,6 +72,10 @@ impl ToolExecutor for SpawnSubagentTool {
                     "model": {
                         "type": "string",
                         "description": "Optional model name override for the sub-agent (e.g. \"gpt-4o\"). Used in conjunction with provider or alone for alias-based routing."
+                    },
+                    "specialist": {
+                        "type": "string",
+                        "description": "Optional specialist agent name (e.g. 'explorer', 'oracle', 'fixer'). When set, the runtime loads the matching agent profile (provider, model, system prompt) automatically."
                     }
                 },
                 "required": ["task"]
@@ -104,6 +111,10 @@ impl ToolExecutor for SpawnSubagentTool {
             .as_str()
             .and_then(ProviderKind::from_cli_name);
         let model_override = call.input["model"].as_str().map(String::from);
+        let specialist = call.input["specialist"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .map(String::from);
 
         let (reply_tx, reply_rx) = oneshot::channel();
 
@@ -113,6 +124,7 @@ impl ToolExecutor for SpawnSubagentTool {
             use_worktree,
             provider_override,
             model_override,
+            specialist,
             reply: reply_tx,
         };
 

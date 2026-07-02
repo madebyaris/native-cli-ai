@@ -13,6 +13,9 @@ pub struct Skill {
     pub provider: Option<ProviderKind>,
     pub permission_mode: Option<PermissionMode>,
     pub context: SkillContextMode,
+    /// If `true`, this skill auto-registers as a named agent profile so it can be
+    /// used as a specialist via `spawn_subagent(specialist=...)`.
+    pub agent: bool,
     pub directory: PathBuf,
     pub body: String,
     pub source: SkillSource,
@@ -232,6 +235,7 @@ fn parse_skill_file(path: &Path) -> Result<Skill, String> {
         provider: frontmatter.provider,
         permission_mode: frontmatter.permission_mode,
         context: frontmatter.context.unwrap_or(SkillContextMode::Inline),
+        agent: frontmatter.agent.unwrap_or(false),
         directory,
         body: body.trim().to_string(),
         source: SkillSource::FileSystem,
@@ -275,6 +279,9 @@ struct SkillFrontmatter {
     provider: Option<ProviderKind>,
     permission_mode: Option<PermissionMode>,
     context: Option<SkillContextMode>,
+    /// If `true`, auto-register this skill as a named agent profile.
+    #[serde(default)]
+    agent: Option<bool>,
 }
 
 impl<'de> Deserialize<'de> for SkillContextMode {
@@ -336,6 +343,7 @@ fn parse_agents_md(workspace_root: &Path) -> Result<Vec<Skill>, String> {
                 || trimmed.starts_with("provider=")
                 || trimmed.starts_with("permission_mode=")
                 || trimmed.starts_with("context=")
+                || trimmed.starts_with("agent=")
             {
                 in_frontmatter = true;
                 frontmatter_lines.push(trimmed);
@@ -389,6 +397,7 @@ fn build_skill_from_section(
     let mut provider = None;
     let mut permission_mode = None;
     let mut context = SkillContextMode::Inline;
+    let mut agent = false;
 
     // Parse frontmatter lines: model=inherit permission_mode=inherit context=Inline
     // Each line may contain multiple directives separated by spaces
@@ -418,6 +427,9 @@ fn build_skill_from_section(
                 if val == "fork" {
                     context = SkillContextMode::Fork;
                 }
+            } else if directive.starts_with("agent=") {
+                let val = directive.trim_start_matches("agent=").trim().to_lowercase();
+                agent = val == "true";
             }
         }
     }
@@ -430,6 +442,7 @@ fn build_skill_from_section(
         provider,
         permission_mode,
         context,
+        agent,
         directory: workspace_root.to_path_buf(),
         body: body.to_string(),
         source: SkillSource::AgentsMd,
@@ -594,7 +607,7 @@ mod tests {
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(
             skill_dir.join("SKILL.md"),
-            "---\nname: Review PR\ndescription: Review code changes\ncommand: review\nmodel: MiniMax-M2.5\npermission_mode: plan\ncontext: fork\n---\nInspect diffs first.\n",
+            "---\nname: Review PR\ndescription: Review code changes\ncommand: review\nmodel: MiniMax-M2.7\npermission_mode: plan\ncontext: fork\n---\nInspect diffs first.\n",
         )
         .unwrap();
 
@@ -800,6 +813,7 @@ Component management and styling...
             provider: None,
             permission_mode: None,
             context: SkillContextMode::Inline,
+            agent: false,
             directory: skill_dir,
             body: "Main body.\n\nSee ./helper.md for details.".into(),
             source: SkillSource::FileSystem,
@@ -825,6 +839,7 @@ Component management and styling...
             provider: None,
             permission_mode: None,
             context: SkillContextMode::Inline,
+            agent: false,
             directory: skill_dir,
             body: "Main body.\n\nSee ./nonexistent.md for details.".into(),
             source: SkillSource::FileSystem,
@@ -853,6 +868,7 @@ Component management and styling...
             provider: None,
             permission_mode: None,
             context: SkillContextMode::Inline,
+            agent: false,
             directory: skill_dir,
             body: "Main body.\n\nRead @testing-anti-patterns.md to avoid pitfalls.".into(),
             source: SkillSource::FileSystem,
@@ -881,6 +897,7 @@ Component management and styling...
             provider: None,
             permission_mode: None,
             context: SkillContextMode::Inline,
+            agent: false,
             directory: skill_dir,
             body: "See `template.md` for the template.".into(),
             source: SkillSource::FileSystem,
@@ -906,6 +923,7 @@ Component management and styling...
             provider: None,
             permission_mode: None,
             context: SkillContextMode::Inline,
+            agent: false,
             directory: skill_dir,
             body: "See ./helper.md and `helper.md` again.".into(),
             source: SkillSource::FileSystem,

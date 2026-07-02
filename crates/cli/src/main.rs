@@ -22,9 +22,10 @@ use nca_core::skills::SkillCatalog;
 use nca_runtime::memory_store::{MemoryNote, MemoryStore};
 use repl::Repl;
 use runner::{build_resumed_session_runtime, build_session_runtime};
-use std::io::{IsTerminal, stdin, stdout};
+use std::io::{IsTerminal, Write, stdin, stdout};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 use stream::{StreamMode, spawn_stream_task};
 
 #[derive(Parser, Debug)]
@@ -383,11 +384,42 @@ async fn main() -> ExitCode {
 async fn try_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    // In TUI mode, redirect tracing to a log file to avoid corrupting the
+    // full-screen display (花屏). User-visible errors already flow through
+    // AgentEvent → push_error() to the transcript.
+    let use_tui = will_enter_tui(&cli);
     let filter = if cli.verbose { "debug" } else { "info" };
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .init();
+    if use_tui {
+        let log_path = PathBuf::from(".nca/nca.log");
+        if let Some(parent) = log_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            Ok(file) => {
+                let writer = TuiFileWriter(Arc::new(Mutex::new(file)));
+                tracing_subscriber::fmt()
+                    .with_env_filter(filter)
+                    .with_writer(writer)
+                    .init();
+            }
+            Err(e) => {
+                tracing_subscriber::fmt()
+                    .with_env_filter(filter)
+                    .with_writer(std::io::stderr)
+                    .init();
+                tracing::warn!("failed to open .nca/nca.log for tracing: {e}; using stderr");
+            }
+        }
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .init();
+    }
 
     tracing::info!("nca starting");
     let mut config = NcaConfig::load()?;
@@ -1620,7 +1652,7 @@ fn show_doctor(config: &NcaConfig, workspace_root: &Path, json: bool) -> anyhow:
         println!("Skills discovered: {}", output.skill_count);
         println!("MCP servers enabled: {}", output.mcp_server_count);
         println!("Memory path: {}", output.memory_path.display());
-        println!("MiniMax remains the default recommended path for this workspace.");
+        println!("DeepSeek is the default provider for this workspace.");
     }
     Ok(())
 }
@@ -1873,6 +1905,48 @@ fn generate_shell_completion(shell: ClapShell) {
     }
 }
 
+/// Tracing writer that writes to a file instead of stderr.
+/// Used in TUI mode to prevent log output from corrupting the full-screen display.
+#[derive(Clone)]
+struct TuiFileWriter(Arc<Mutex<std::fs::File>>);
+
+impl Write for TuiFileWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.lock().unwrap().flush()
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TuiFileWriter {
+    type Writer = TuiFileWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// Determine whether the TUI will be entered for this run.
+/// Used to decide whether to redirect tracing to a file (TUI) or stderr (non-TUI).
+fn will_enter_tui(cli: &Cli) -> bool {
+    let is_tty = stdout().is_terminal() && stdin().is_terminal();
+    // Top-level interactive session (no subcommand, no one-shot prompt)
+    if cli.command.is_none() && cli.prompt.is_none() {
+        return !cli.no_tui && is_tty && matches!(cli.stream, StreamMode::Human);
+    }
+    // Resume subcommand without a one-shot prompt
+    if let Some(Command::Resume {
+        no_tui,
+        stream,
+        prompt: None,
+        ..
+    }) = &cli.command
+    {
+        return !*no_tui && is_tty && matches!(stream, StreamMode::Human);
+    }
+    false
+}
+
 fn classify_exit_code(error: &anyhow::Error) -> ExitCode {
     const EXIT_CONFIGURATION: u8 = 10;
     const EXIT_RUNTIME: u8 = 11;
@@ -1895,6 +1969,10 @@ fn classify_exit_code(error: &anyhow::Error) -> ExitCode {
     } else if combined.contains("run cancelled") {
         EXIT_CANCELLED
     } else if combined.contains("missing minimax api key")
+        || combined.contains("missing deepseek api key")
+        || combined.contains("missing openai api key")
+        || combined.contains("missing anthropic api key")
+        || combined.contains("missing openrouter api key")
         || combined.contains("missing zhipuai api key")
         || combined.contains("failed to parse config file")
         || combined.contains("unable to determine the home directory")
@@ -1928,12 +2006,12 @@ mod tests {
     #[test]
     fn parses_run_subcommand_model_override() {
         let cli =
-            Cli::try_parse_from(["nca", "run", "--prompt", "hello", "--model", "MiniMax-M2.5"])
+            Cli::try_parse_from(["nca", "run", "--prompt", "hello", "--model", "MiniMax-M2.7"])
                 .expect("should parse run subcommand");
 
         match cli.command {
             Some(Command::Run { model, .. }) => {
-                assert_eq!(model.as_deref(), Some("MiniMax-M2.5"));
+                assert_eq!(model.as_deref(), Some("MiniMax-M2.7"));
             }
             _ => panic!("expected run subcommand"),
         }

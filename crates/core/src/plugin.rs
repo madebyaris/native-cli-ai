@@ -1,5 +1,5 @@
 //! Plugin trait for nca — lets Rust crates hook into the system prompt pipeline
-//! and inject always-on behavior rules (like ponytail's lazy-mode personality).
+//! and inject always-on behavior rules.
 //!
 //! # Example
 //!
@@ -24,7 +24,7 @@ use nca_common::config::NcaConfig;
 /// A Rust-native plugin that extends nca's behavior.
 ///
 /// Each plugin gets a chance to inject system-prompt text on every turn,
-/// similar to ponytail.mjs's `experimental.chat.system.transform` hook.
+/// similar to an `experimental.chat.system.transform` hook.
 ///
 /// Plugins are created once at session startup and live for the session's
 /// lifetime. State persistence is the plugin's own responsibility (typically
@@ -41,6 +41,17 @@ pub trait NcaPlugin: Send + Sync {
     /// The text is appended after local instructions but before the skills
     /// index, so plugin-injected rules appear in a predictable position.
     fn on_system_prompt(&self, _config: &NcaConfig, _workspace_root: &Path) -> Option<String> {
+        None
+    }
+
+    /// Called before a user prompt is sent to the LLM.
+    ///
+    /// Plugins can inspect the user's input and react to it (e.g. detect
+    /// natural-language activation or deactivation commands).
+    ///
+    /// Return `Some(text)` to display a message to the user via the REPL output.
+    /// Return `None` to take no visible action.
+    fn on_user_prompt(&self, _prompt: &str) -> Option<String> {
         None
     }
 }
@@ -80,6 +91,21 @@ impl PluginRegistry {
             .filter_map(|plugin| {
                 plugin
                     .on_system_prompt(config, workspace_root)
+                    .map(|text| (plugin.name().to_string(), text))
+            })
+            .collect()
+    }
+
+    /// Feed a user prompt to all plugins and collect any user-visible messages.
+    ///
+    /// Returns a list of `(plugin_name, message)` pairs from plugins that
+    /// responded with `Some(text)`.
+    pub fn collect_user_prompt_hooks(&self, prompt: &str) -> Vec<(String, String)> {
+        self.plugins
+            .iter()
+            .filter_map(|plugin| {
+                plugin
+                    .on_user_prompt(prompt)
                     .map(|text| (plugin.name().to_string(), text))
             })
             .collect()

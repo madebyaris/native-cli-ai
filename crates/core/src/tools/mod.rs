@@ -80,6 +80,13 @@ impl ToolRegistry {
         registry
     }
 
+    /// Retain only tools whose name is in `allowed`; remove all others.
+    /// Used by agent profiles to enforce tool gating.
+    pub fn restrict_to(&mut self, allowed: &[String]) {
+        self.tools
+            .retain(|t| allowed.iter().any(|name| t.definition().name == *name));
+    }
+
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         let mut seen = std::collections::HashSet::new();
         self.tools
@@ -187,4 +194,69 @@ fn format_tool_param_error(tool_name: &str, input: &serde_json::Value) -> String
         "Invalid parameters for tool `{}`. Received keys: [{}]. Please check the tool schema and retry.",
         tool_name, received_keys
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nca_common::tool::ToolCall;
+
+    /// A minimal tool for testing ToolRegistry operations.
+    struct StubTool {
+        name: String,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for StubTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: self.name.clone(),
+                description: "stub".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            }
+        }
+        async fn execute(&self, _call: &ToolCall) -> ToolResult {
+            ToolResult {
+                call_id: String::new(),
+                success: true,
+                output: String::new(),
+                error: None,
+            }
+        }
+    }
+
+    fn stub_registry(names: &[&str]) -> ToolRegistry {
+        let mut reg = ToolRegistry::new();
+        for name in names {
+            reg.register(Box::new(StubTool {
+                name: (*name).into(),
+            }));
+        }
+        reg
+    }
+
+    #[test]
+    fn restrict_to_keeps_only_allowed_tools() {
+        let mut reg = stub_registry(&["read_file", "search_code", "write_file", "delete_path"]);
+        reg.restrict_to(&["read_file".into(), "search_code".into()]);
+
+        let names: Vec<String> = reg.definitions().iter().map(|d| d.name.clone()).collect();
+        assert_eq!(names, vec!["read_file", "search_code"]);
+    }
+
+    #[test]
+    fn restrict_to_with_empty_allowed_removes_all() {
+        let mut reg = stub_registry(&["read_file", "write_file"]);
+        reg.restrict_to(&[]);
+
+        assert!(reg.definitions().is_empty());
+    }
+
+    #[test]
+    fn restrict_to_with_unknown_names_removes_all() {
+        let mut reg = stub_registry(&["read_file", "write_file"]);
+        reg.restrict_to(&["nonexistent".into()]);
+
+        assert!(reg.definitions().is_empty());
+    }
 }

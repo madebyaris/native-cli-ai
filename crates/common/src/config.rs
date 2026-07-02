@@ -313,13 +313,14 @@ impl NcaConfig {
     /// the default provider so the correct endpoint is used.
     pub fn provider_hint_for_alias(alias: &str) -> Option<ProviderKind> {
         match alias.trim().to_ascii_lowercase().as_str() {
-            "default" | "minimax" | "m2.5" | "coding" | "reasoning" => Some(ProviderKind::MiniMax),
+            "minimax" | "m2.7" | "m3" => Some(ProviderKind::MiniMax),
+            "kimi" | "kimi-k2" | "moonshot" | "moonshot-v1" => Some(ProviderKind::OpenAi),
             "openai" | "gpt" | "gpt4o" | "gpt4omini" => Some(ProviderKind::OpenAi),
             "claude" | "claude-sonnet" => Some(ProviderKind::Anthropic),
             "openrouter" => Some(ProviderKind::OpenRouter),
             "zhipuai" | "glm" | "glm5" | "glm-5.2" => Some(ProviderKind::ZhipuAI),
-            "deepseek" | "ds" | "deepseek-v4" | "dsv4" | "dsv4p" | "deepseek-v3" | "dsv3"
-            | "deepseek-r1" | "dsr1" => Some(ProviderKind::DeepSeek),
+            "default" | "deepseek" | "ds" | "deepseek-v4" | "dsv4" | "dsv4p" | "deepseek-v3"
+            | "dsv3" | "deepseek-r1" | "dsr1" => Some(ProviderKind::DeepSeek),
             _ => None,
         }
     }
@@ -421,6 +422,9 @@ impl NcaConfig {
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentProfileConfig {
+    /// Human-readable description shown in agent pickers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Override the LLM provider for this agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderKind>,
@@ -430,6 +434,10 @@ pub struct AgentProfileConfig {
     /// Override the permission mode for this agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<PermissionMode>,
+    /// Complete system prompt that replaces the built-in harness prompt when set.
+    /// Use this for specialist agents with their own persona.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
     /// Extra system-prompt text appended when this agent is active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt_append: Option<String>,
@@ -449,6 +457,12 @@ impl AgentProfileConfig {
         }
         if let Some(v) = partial.permission_mode {
             self.permission_mode = Some(v);
+        }
+        if let Some(v) = partial.description {
+            self.description = Some(v);
+        }
+        if let Some(v) = partial.system_prompt {
+            self.system_prompt = Some(v);
         }
         if let Some(v) = partial.system_prompt_append {
             self.system_prompt_append = Some(v);
@@ -476,9 +490,11 @@ impl AgentProfileConfig {
 /// Partial version for deserialization (all fields optional).
 #[derive(Debug, Clone, Deserialize, Default)]
 struct PartialAgentProfileConfig {
+    description: Option<String>,
     provider: Option<ProviderKind>,
     model: Option<String>,
     permission_mode: Option<PermissionMode>,
+    system_prompt: Option<String>,
     system_prompt_append: Option<String>,
     allowed_tools: Option<Vec<String>>,
 }
@@ -748,7 +764,7 @@ pub struct ProviderConfig {
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
-            default: ProviderKind::MiniMax,
+            default: ProviderKind::DeepSeek,
             minimax: MiniMaxConfig::default(),
             openai: OpenAiConfig::default(),
             anthropic: AnthropicConfig::default(),
@@ -948,7 +964,7 @@ impl Default for MiniMaxConfig {
             // International: https://api.minimax.io/anthropic
             // China:         https://api.minimaxi.com/anthropic
             base_url: "https://api.minimax.io/anthropic".into(),
-            model: "MiniMax-M2.5".into(),
+            model: "MiniMax-M2.7".into(),
             temperature: 0.7,
         }
     }
@@ -1316,7 +1332,7 @@ pub struct ModelConfig {
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
-            default_model: "MiniMax-M2.5".into(),
+            default_model: "deepseek-v4-flash".into(),
             max_tokens: 8192,
             enable_thinking: false,
             thinking_budget: 5120,
@@ -1659,7 +1675,12 @@ impl HarnessConfig {
             self.global_instructions_path = Some(global_instructions_path);
         }
         if let Some(skill_directories) = partial.skill_directories {
-            self.skill_directories = skill_directories;
+            // Expand `~` to `$HOME` for each directory so users can write
+            // `skill_directories = ["~/.config/nca/skills"]` in config.toml.
+            self.skill_directories = skill_directories
+                .into_iter()
+                .map(|p| expand_tilde(&p))
+                .collect();
         }
     }
 
@@ -1971,21 +1992,8 @@ fn default_max_memory_notes() -> usize {
 
 fn default_model_aliases() -> BTreeMap<String, String> {
     BTreeMap::from([
-        ("default".into(), "MiniMax-M2.5".into()),
-        ("minimax".into(), "MiniMax-M2.5".into()),
-        ("m2.5".into(), "MiniMax-M2.5".into()),
-        ("coding".into(), "MiniMax-M2.5".into()),
-        ("reasoning".into(), "MiniMax-M2.5".into()),
-        ("openai".into(), "gpt-4o-mini".into()),
-        ("gpt4o".into(), "gpt-4o".into()),
-        ("gpt4omini".into(), "gpt-4o-mini".into()),
-        ("claude".into(), "claude-3-7-sonnet-latest".into()),
-        ("claude-sonnet".into(), "claude-3-7-sonnet-latest".into()),
-        ("openrouter".into(), "openai/gpt-4o-mini".into()),
-        ("zhipuai".into(), "glm-5.2".into()),
-        ("glm".into(), "glm-5.2".into()),
-        ("glm5".into(), "glm-5.2".into()),
-        ("glm-5.2".into(), "glm-5.2".into()),
+        // DeepSeek (default provider)
+        ("default".into(), "deepseek-v4-flash".into()),
         ("deepseek".into(), "deepseek-v4-flash".into()),
         ("ds".into(), "deepseek-v4-flash".into()),
         ("deepseek-v4".into(), "deepseek-v4-flash".into()),
@@ -1995,6 +2003,27 @@ fn default_model_aliases() -> BTreeMap<String, String> {
         ("dsv3".into(), "deepseek-chat".into()),
         ("deepseek-r1".into(), "deepseek-reasoner".into()),
         ("dsr1".into(), "deepseek-reasoner".into()),
+        // MiniMax
+        ("minimax".into(), "MiniMax-M2.7".into()),
+        ("m2.7".into(), "MiniMax-M2.7".into()),
+        ("m3".into(), "MiniMax-M3".into()),
+        // ZhipuAI (GLM)
+        ("zhipuai".into(), "glm-5.2".into()),
+        ("glm".into(), "glm-5.2".into()),
+        ("glm5".into(), "glm-5.2".into()),
+        ("glm-5.2".into(), "glm-5.2".into()),
+        // Kimi (via OpenAI-compatible endpoint)
+        ("kimi".into(), "kimi-k2.6".into()),
+        ("moonshot".into(), "kimi-k2.6".into()),
+        // OpenAI
+        ("openai".into(), "gpt-4o-mini".into()),
+        ("gpt4o".into(), "gpt-4o".into()),
+        ("gpt4omini".into(), "gpt-4o-mini".into()),
+        // Anthropic
+        ("claude".into(), "claude-3-7-sonnet-latest".into()),
+        ("claude-sonnet".into(), "claude-3-7-sonnet-latest".into()),
+        // OpenRouter
+        ("openrouter".into(), "openai/gpt-4o-mini".into()),
     ])
 }
 
@@ -2051,7 +2080,7 @@ mod tests {
 
         assert_eq!(config.provider.openai.model, "gpt-4o");
         assert_eq!(config.model.default_model, "gpt-4o");
-        assert_eq!(config.provider.minimax.model, "MiniMax-M2.5");
+        assert_eq!(config.provider.minimax.model, "MiniMax-M2.7");
     }
 
     #[test]
@@ -2106,7 +2135,7 @@ mod tests {
         let aliases = default_model_aliases();
         for alias in aliases.keys() {
             // Skipping generic aliases that are not provider-specific (e.g. "default", "coding", "reasoning")
-            // is fine — they map to MiniMax which is the default provider.
+            // is fine — they map to DeepSeek which is the default provider.
             // The important thing is that cross-provider aliases DO have hints.
             let _ = NcaConfig::provider_hint_for_alias(alias);
         }
@@ -2184,12 +2213,25 @@ mod tests {
         assert_eq!(config.model.default_model, "anthropic/claude-3.7-sonnet");
     }
 
+    /// Process-global mutex that serializes all env-mutating tests.
+    ///
+    /// `env::set_var` / `env::remove_var` mutate process-global state and are
+    /// unsafe under Rust's default parallel test threads.  Locking this mutex
+    /// for the lifetime of each `EnvGuard` prevents two tests from racing on
+    /// the same environment variable.
+    static ENV_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     struct EnvGuard {
         previous: Vec<(String, Option<String>)>,
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl EnvGuard {
         fn set(vars: &[(&str, Option<&str>)]) -> Self {
+            // Block until we exclusively own the process environment.
+            let lock: std::sync::MutexGuard<'static, ()> =
+                ENV_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
             let mut previous = Vec::new();
             for (key, value) in vars {
                 previous.push((key.to_string(), env::var(key).ok()));
@@ -2198,7 +2240,10 @@ mod tests {
                     None => unsafe { env::remove_var(key) },
                 }
             }
-            Self { previous }
+            Self {
+                previous,
+                _lock: lock,
+            }
         }
     }
 
@@ -2290,6 +2335,7 @@ onboarding_completed = true
         config.provider.openai.api_key_env = "__NCA_TEST_NONE__".into();
         config.provider.anthropic.api_key_env = "__NCA_TEST_NONE__".into();
         config.provider.openrouter.api_key_env = "__NCA_TEST_NONE__".into();
+        config.provider.zhipuai.api_key_env = "__NCA_TEST_NONE__".into();
         config.provider.deepseek.api_key_env = "__NCA_TEST_NONE__".into();
         config
     }
@@ -2670,6 +2716,30 @@ global_instructions_path = "~/.nca/AGENTS.md"
         assert_eq!(result, std::path::PathBuf::from("/absolute/path"));
         let result2 = expand_tilde(std::path::Path::new("relative/path"));
         assert_eq!(result2, std::path::PathBuf::from("relative/path"));
+    }
+
+    #[test]
+    fn skill_directories_expand_tilde_on_merge() {
+        let _guard = EnvGuard::set(&[("HOME", Some("/test/home"))]);
+        let toml_str = r#"
+[harness]
+skill_directories = ["~/.config/nca/skills", "/abs/path", "rel/path"]
+"#;
+        let partial: PartialNcaConfig = toml::from_str(toml_str).expect("parse");
+        let mut config = NcaConfig::default();
+        config.merge(partial);
+
+        let dirs = &config.harness.skill_directories;
+        assert_eq!(dirs.len(), 3);
+        // ~ expanded to absolute
+        assert_eq!(
+            dirs[0],
+            std::path::PathBuf::from("/test/home/.config/nca/skills")
+        );
+        // absolute passthrough
+        assert_eq!(dirs[1], std::path::PathBuf::from("/abs/path"));
+        // relative passthrough (resolved against workspace_root at scan time)
+        assert_eq!(dirs[2], std::path::PathBuf::from("rel/path"));
     }
 
     #[test]

@@ -105,8 +105,7 @@ mod tests {
 
     #[test]
     fn response_serializes_and_deserializes() {
-        let resp =
-            PluginResponse::success("1", Some(serde_json::json!({"text": "ponytail rules"})));
+        let resp = PluginResponse::success("1", Some(serde_json::json!({"text": "plugin output"})));
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: PluginResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.id, "1");

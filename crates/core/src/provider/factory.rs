@@ -154,7 +154,7 @@ mod tests {
     #[test]
     fn build_provider_for_uses_explicit_kind_not_default() {
         let mut config = NcaConfig::default();
-        // Default is minimax, but we request openai explicitly
+        // Default is deepseek, but we request openai explicitly
         config.provider.default = ProviderKind::MiniMax;
         config.provider.minimax.api_key = Some("minimax-key".into());
         config.provider.openai.api_key = Some("openai-key".into());

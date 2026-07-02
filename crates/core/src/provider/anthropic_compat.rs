@@ -410,7 +410,7 @@ mod tests {
             },
         ])];
 
-        let body = anthropic_request_body(&messages, &[], "MiniMax-M2.5", 128, 1.0, workspace)
+        let body = anthropic_request_body(&messages, &[], "MiniMax-M2.7", 128, 1.0, workspace)
             .expect("body");
         let content = body["messages"][0]["content"].as_array().expect("array");
         assert_eq!(content.len(), 2);

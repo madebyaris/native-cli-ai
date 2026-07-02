@@ -2,6 +2,7 @@ use crate::file_mentions::expand_at_file_mentions_default;
 use crate::prompt::NcaPrompt;
 use crate::runner::{SessionRuntime, dispatch_question_answer, dispatch_tool_approval};
 use crate::slash_commands::SLASH_COMMANDS;
+
 use crate::tui::app::ApprovalAnswer;
 use crate::tui::elm::feedback::{TuiFeedback, TuiFeedbackChannel, TuiFeedbackMsg};
 use crate::tui::elm::msg::Msg;
@@ -78,119 +79,62 @@ const INPUT_PREFIXES: &[&str] = &[
     "\\", // Multiline continuation
 ];
 
-/// Agent profiles inspired by OpenCode's multi-agent system.
-/// Each profile modifies behavior and system prompt emphasis.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AgentProfile {
-    /// Default full-access agent for development work
-    #[default]
-    Build,
-    /// Read-only agent for analysis and planning - denies edits
-    Plan,
-    /// Focused code review agent
-    Review,
-    /// Bug diagnosis and fix agent
-    Fix,
-    /// Testing and validation agent
-    Test,
-}
-
-impl AgentProfile {
-    /// Get the display name for this profile (shown in prompt)
-    pub fn label(&self) -> &'static str {
-        match self {
-            AgentProfile::Build => "build",
-            AgentProfile::Plan => "plan",
-            AgentProfile::Review => "review",
-            AgentProfile::Fix => "fix",
-            AgentProfile::Test => "test",
-        }
-    }
-
-    /// Get system prompt modifier for this profile
-    #[allow(dead_code)]
-    pub fn system_modifier(&self) -> &'static str {
-        match self {
-            AgentProfile::Build => "",
-            AgentProfile::Plan => {
-                "Profile: PLAN MODE (read-only)\n- You must not modify files or run shell commands.\n\
-                 - Inspect, search, read, research the web, and propose the next steps only.\n\
-                 - If asked to change code, explain what would change instead of claiming it was done."
-            }
-            AgentProfile::Review => {
-                "Profile: REVIEW MODE\n- Focus on identifying bugs, regressions, security issues, and code quality problems.\n\
-                 - Check for missing tests, edge cases, and error handling.\n\
-                 - Be specific about severity: critical, major, minor, or suggestion."
-            }
-            AgentProfile::Fix => {
-                "Profile: FIX MODE\n- Diagnose the issue thoroughly before making changes.\n\
-                 - Prefer minimal, verified fixes over broad rewrites.\n\
-                 - Always explain the root cause and the fix."
-            }
-            AgentProfile::Test => {
-                "Profile: TEST MODE\n- Focus on validating code correctness and edge cases.\n\
-                 - Run tests, checks, or lints when tools allow.\n\
-                 - Report clearly what passed, what failed, and any issues found."
-            }
-        }
-    }
-
-    /// Get reedline suggestion color for this profile
-    #[allow(dead_code)]
-    pub fn style(&self) -> &'static str {
-        match self {
-            AgentProfile::Build => "",
-            AgentProfile::Plan => "cyan",
-            AgentProfile::Review => "yellow",
-            AgentProfile::Fix => "red",
-            AgentProfile::Test => "green",
-        }
-    }
-
-    /// Cycle to the next profile (for Tab switching)
-    pub fn next(self) -> Self {
-        match self {
-            AgentProfile::Build => AgentProfile::Plan,
-            AgentProfile::Plan => AgentProfile::Review,
-            AgentProfile::Review => AgentProfile::Fix,
-            AgentProfile::Fix => AgentProfile::Test,
-            AgentProfile::Test => AgentProfile::Build,
-        }
-    }
-
-    /// All profiles in cycle order
-    pub const ALL: [Self; 5] = [Self::Build, Self::Plan, Self::Review, Self::Fix, Self::Test];
-}
-
-impl std::fmt::Display for AgentProfile {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.label())
-    }
-}
-
 /// Session state for REPL
 pub struct Repl {
     runtime: SessionRuntime,
     prompt: NcaPrompt,
     run_mode: bool,
     history_path: std::path::PathBuf,
-    agent_profile: AgentProfile,
+    /// Index into the agent entry list (0 = "orchestrator" default, 1+ = OMO specialists).
+    agent_index: usize,
     current_agent_label: String,
 }
 
 impl Repl {
     pub fn new(runtime: SessionRuntime, safe_mode: bool, run_mode: bool) -> Self {
         let history_path = runtime.workspace_root().join(".nca/.history");
-        let agent_profile = AgentProfile::default();
-        let current_agent_label = format!("@{}", agent_profile.label());
+        let current_agent_label = "@orchestrator".to_string();
         Self {
             runtime,
             prompt: NcaPrompt::new(safe_mode, run_mode),
             run_mode,
             history_path,
-            agent_profile,
+            agent_index: 0,
             current_agent_label,
         }
+    }
+
+    /// Build the agent entry list: "orchestrator" (default) at index 0, then all
+    /// registered agent profiles (OMO specialists + user-configured agents).
+    fn agent_entries(&self) -> Vec<String> {
+        let mut entries = vec!["orchestrator".to_string()];
+        entries.extend(self.runtime.agent_profile_names());
+        entries
+    }
+
+    /// Extract the agent name (without leading @) from the current label.
+    #[allow(dead_code)]
+    fn current_agent_name(&self) -> &str {
+        self.current_agent_label.trim_start_matches('@')
+    }
+
+    /// Build (label, description) pairs for the agent picker popup.
+    /// Index 0 is always "orchestrator" (the default harness agent).
+    fn build_agent_picker_labels(&self) -> Vec<(String, String)> {
+        let entries = self.agent_entries();
+        entries
+            .iter()
+            .map(|name| {
+                let desc = if name == "orchestrator" {
+                    "Workflow manager — plan, delegate, verify".to_string()
+                } else {
+                    self.runtime
+                        .agent_profile_description(name)
+                        .unwrap_or_default()
+                };
+                (format!("@{name}"), desc)
+            })
+            .collect()
     }
 
     /// Run the interactive REPL until the user exits.
@@ -301,7 +245,7 @@ impl Repl {
 ║    ! <cmd>   Run shell command (bash mode)                    ║
 ║    @path     Inline file mentions (expanded before send)      ║
 ║    / <cmd>   Slash commands                                  ║
-║    Tab       Complete /commands or switch agent profile           ║
+║    Tab       Complete /commands or switch agent                  ║
 ║    Ctrl+D    Exit                                            ║
 ║    Ctrl+C    Cancel current request                           ║
 ║    Ctrl+L    Clear screen                                     ║
@@ -311,23 +255,28 @@ impl Repl {
         );
     }
 
-    #[allow(dead_code)] // retained for future keybinding re-enablement
-    /// Switch to the next agent profile (called on Tab press)
+    /// Switch to the next agent profile (called on Tab press in stdio mode).
     fn switch_agent(&mut self) {
-        let next = self.agent_profile.next();
-        self.agent_profile = next;
-        self.current_agent_label = format!("@{}", next.label());
+        let entries = self.agent_entries();
+        if entries.len() <= 1 {
+            return;
+        }
+        self.agent_index = (self.agent_index + 1) % entries.len();
+        let name = entries[self.agent_index].clone();
+        self.current_agent_label = format!("@{name}");
         self.prompt.set_agent(&self.current_agent_label);
 
-        // Update runtime permission mode based on profile
-        if next == AgentProfile::Plan {
-            self.runtime.set_permission_mode(PermissionMode::Plan);
+        // Apply the agent profile at runtime (None = default harness prompt).
+        let profile_name = if self.agent_index == 0 {
+            None
+        } else {
+            Some(name.as_str())
+        };
+        if let Err(e) = self.runtime.apply_agent_profile(profile_name) {
+            eprintln!("\n[agent] failed to switch: {e}");
         }
 
-        eprintln!("\n[agent] Switched to @{} mode", next.label());
-        if next == AgentProfile::Plan {
-            eprintln!("[agent] Plan mode: file edits and shell commands are disabled");
-        }
+        eprintln!("\n[agent] Switched to @{name}");
     }
 
     /// Run a shell command directly (bash mode) - Claude Code style
@@ -465,7 +414,11 @@ impl Repl {
     fn build_editor(&self) -> anyhow::Result<Reedline> {
         let mut builder = Reedline::create()
             .with_ansi_colors(true)
-            .with_hinter(Box::new(SlashHinter::default()));
+            .with_hinter(Box::new(SlashHinter {
+                skill_directories: self.runtime.config().harness.skill_directories.clone(),
+                workspace_root: self.runtime.workspace_root().to_path_buf(),
+                hint_suffix: String::new(),
+            }));
 
         // Try to load history from disk
         if let Some(parent) = self.history_path.parent() {
@@ -527,7 +480,7 @@ impl Repl {
                     "SLASH COMMANDS:".into(),
                     "  /help              Show this help".into(),
                     "  /status            Session status".into(),
-                    "  /agent [profile]   Show or switch agent profile".into(),
+                    "  /agent [name]     Show or switch agent (OMO specialists)".into(),
                     "  /plan <task>       Planning-oriented turn".into(),
                     "  /review <task>     Code review turn".into(),
                     "  /fix <task>        Bug-fix turn".into(),
@@ -539,7 +492,6 @@ impl Repl {
                     "  /thinking          Toggle thinking/reasoning visibility".into(),
                     "  /tool-output      Toggle tool output expand/collapse (TUI)".into(),
                     "  /skills            List discovered skills".into(),
-                    "  /ponytail [mode]   Toggle lazy mode (lite|full|ultra|off)".into(),
                     "  /memory [text]     Show or store memory notes".into(),
                     "  /models            Browse and select models".into(),
                     "  /connect           Connect LLM provider".into(),
@@ -559,7 +511,7 @@ impl Repl {
                     "  /exit              Exit repl".into(),
                     String::new(),
                     "KEYBOARD SHORTCUTS:".into(),
-                    "  Tab          Cycle agent profile".into(),
+                    "  Tab          Cycle agent".into(),
                     "  Ctrl+P       Command palette".into(),
                     "  Ctrl+X M     Switch model".into(),
                     "  Ctrl+X E     Open editor".into(),
@@ -588,7 +540,7 @@ impl Repl {
                 let mut lines = vec![
                     format!("Session:     {}", snapshot.id),
                     format!("Model:       {}", self.runtime.model()),
-                    format!("Agent:       @{}", self.agent_profile.label()),
+                    format!("Agent:       {}", self.current_agent_label),
                     format!("Permission:  {:?}", self.runtime.permission_mode()),
                     format!("Children:    {}", snapshot.child_session_ids.len()),
                     format!("Memory:      {}", self.runtime.memory_store_path().display()),
@@ -608,17 +560,15 @@ impl Repl {
             "/agent" => {
                 if let Some(target) = parts.next() {
                     let target_clean = target.trim_start_matches('@').to_lowercase();
-                    let matched = AgentProfile::ALL.iter().find(|p| {
-                        p.label() == target_clean
-                    });
-                    if let Some(profile) = matched {
-                        self.agent_profile = *profile;
-                        self.current_agent_label = format!("@{}", profile.label());
+                    let entries = self.agent_entries();
+                    if let Some(idx) = entries.iter().position(|e| *e == target_clean) {
+                        self.agent_index = idx;
+                        let name = entries[idx].clone();
+                        self.current_agent_label = format!("@{name}");
                         self.prompt.set_agent(&self.current_agent_label);
-                        if *profile == AgentProfile::Plan {
-                            self.runtime.set_permission_mode(PermissionMode::Plan);
-                        } else {
-                            self.runtime.set_permission_mode(PermissionMode::Default);
+                        let profile_name = if idx == 0 { None } else { Some(name.as_str()) };
+                        if let Err(e) = self.runtime.apply_agent_profile(profile_name) {
+                            out.eprintln(&format!("Failed to switch agent: {e}"));
                         }
                         if let ReplOutput::Tui(st) = &out {
                             st.set_agent_profile(self.current_agent_label.clone());
@@ -626,31 +576,26 @@ impl Repl {
                                 "{:?}",
                                 self.runtime.permission_mode()
                             ));
+                            st.set_model(self.runtime.model().to_string());
                         }
-                        out.println(&format!("Switched to @{} mode", profile.label()));
+                        out.println(&format!("Switched to @{name}"));
                     } else {
-                        out.println(&format!("Unknown agent profile: {}", target));
+                        out.println(&format!("Unknown agent: {target}"));
                         out.println(&format!(
                             "Available: {}",
-                            AgentProfile::ALL
-                                .iter()
-                                .map(|p| p.label())
-                                .collect::<Vec<_>>()
-                                .join(", ")
+                            entries.join(", ")
                         ));
                     }
                 } else if let ReplOutput::Tui(st) = &out {
-                    let current_idx = AgentProfile::ALL
-                        .iter()
-                        .position(|p| *p == self.agent_profile)
-                        .unwrap_or(0);
-                    st.open_agent_picker(current_idx);
+                    let labels = self.build_agent_picker_labels();
+                    st.open_agent_picker(labels, self.agent_index);
                 } else {
-                    out.println(&format!("Current agent: @{}", self.agent_profile.label()));
-                    out.println("Available profiles:");
-                    for profile in AgentProfile::ALL {
-                        let marker = if profile == self.agent_profile { " *" } else { "" };
-                        out.println(&format!("  @{}{}", profile.label(), marker));
+                    let entries = self.agent_entries();
+                    out.println(&format!("Current agent: {}", self.current_agent_label));
+                    out.println("Available agents:");
+                    for (i, name) in entries.iter().enumerate() {
+                        let marker = if i == self.agent_index { " *" } else { "" };
+                        out.println(&format!("  @{name}{marker}"));
                     }
                 }
             }
@@ -782,7 +727,7 @@ impl Repl {
                 let lines = vec![
                     format!("Session:     {}", snapshot.id),
                     format!("Model:       {}", self.runtime.model()),
-                    format!("Agent:       @{}", self.agent_profile.label()),
+                    format!("Agent:       {}", self.current_agent_label),
                     format!("Permission:  {:?}", self.runtime.permission_mode()),
                     format!("Context:     {}% ({} / {} tokens)", cs.usage_percent, cs.estimated_tokens, cs.context_window),
                     format!("Tokens:      {} in + {} out", snapshot.total_input_tokens, snapshot.total_output_tokens),
@@ -845,54 +790,6 @@ impl Repl {
                         self.runtime.permission_mode()
                     ));
                     out.println("(shortcut: /permissions bypass toggles bypass ↔ default)");
-                }
-            }
-            "/ponytail" => {
-                // Read/write ponytail mode via its state file.
-                // The plugin reads this file on every system-prompt build.
-                let mode = rest.trim();
-                if mode.is_empty() {
-                    // Show current mode
-                    let state_dir = nca_common::config::xdg_config_dir()
-                        .map(|d| d.join("nca/state/ponytail"))
-                        .unwrap_or_else(|| {
-                            std::path::PathBuf::from(
-                                &std::env::var("HOME").unwrap_or_else(|_| ".".into()),
-                            )
-                            .join(".nca/state/ponytail")
-                        });
-                    let current = std::fs::read_to_string(state_dir.join("mode"))
-                        .map(|s| s.trim().to_string())
-                        .unwrap_or_else(|_| "full".to_string());
-                    out.println(&format!("ponytail mode is: {current}"));
-                    out.println("usage: /ponytail lite|full|ultra|off");
-                } else {
-                    // Write mode directly to the state file (the plugin process reads this).
-                    let state_dir = nca_common::config::xdg_config_dir()
-                        .map(|d| d.join("nca/state/ponytail"))
-                        .unwrap_or_else(|| {
-                            std::path::PathBuf::from(
-                                &std::env::var("HOME").unwrap_or_else(|_| ".".into()),
-                            )
-                            .join(".nca/state/ponytail")
-                        });
-                    let valid_modes = ["lite", "full", "ultra", "off"];
-                    let normalized = mode.trim().to_ascii_lowercase();
-                    if valid_modes.contains(&normalized.as_str()) {
-                        let path = state_dir.join("mode");
-                        if let Some(parent) = path.parent()
-                            && let Err(e) = std::fs::create_dir_all(parent)
-                        {
-                            out.eprintln(&format!("ponytail: failed to create state dir: {e}"));
-                            return Ok(true);
-                        }
-                        match std::fs::write(&path, &normalized) {
-                            Ok(()) => out.println(&format!("ponytail mode set to: {normalized}")),
-                            Err(e) => out.eprintln(&format!("ponytail: failed to write mode: {e}")),
-                        }
-                    } else {
-                        out.eprintln(&format!("ponytail: invalid mode '{mode}'; valid: lite, full, ultra, off"));
-                    }
                 }
             }
             "/skills" => {
@@ -1742,7 +1639,7 @@ impl Repl {
         let cancel_flag = self.runtime.cancel_handle();
 
         // Elm NcaModel params
-        let skill_dirs = vec![std::path::PathBuf::from(".nca/skills")];
+        let skill_dirs = self.runtime.config().harness.skill_directories.clone();
         let params = crate::tui::elm::run::NcaModelParams {
             session_id: session_id.clone(),
             model: model.clone(),
@@ -1779,17 +1676,26 @@ impl Repl {
                         break;
                     }
                     TuiCmd::CycleAgent => {
-                        let next = self.agent_profile.next();
-                        self.agent_profile = next;
-                        self.current_agent_label = format!("@{}", next.label());
-                        if next == AgentProfile::Plan {
-                            self.runtime.set_permission_mode(PermissionMode::Plan);
-                        } else {
-                            self.runtime.set_permission_mode(PermissionMode::Default);
+                        let entries = self.agent_entries();
+                        if entries.len() > 1 {
+                            self.agent_index = (self.agent_index + 1) % entries.len();
+                            let name = entries[self.agent_index].clone();
+                            self.current_agent_label = format!("@{name}");
+                            let profile_name = if self.agent_index == 0 {
+                                None
+                            } else {
+                                Some(name.as_str())
+                            };
+                            if let Err(e) = self.runtime.apply_agent_profile(profile_name) {
+                                tui_feedback.push_error(format!("Failed to switch agent: {e}"));
+                            }
+                            tui_feedback.set_agent_profile(self.current_agent_label.clone());
+                            tui_feedback.set_permission_mode(format!(
+                                "{:?}",
+                                self.runtime.permission_mode()
+                            ));
+                            tui_feedback.set_model(self.runtime.model().to_string());
                         }
-                        tui_feedback.set_agent_profile(self.current_agent_label.clone());
-                        tui_feedback
-                            .set_permission_mode(format!("{:?}", self.runtime.permission_mode()));
                     }
                     TuiCmd::CancelTurn => {
                         self.runtime.request_cancel();
@@ -1876,20 +1782,22 @@ impl Repl {
                         tui_feedback.push_system(format!("permission mode set to {mode:?}"));
                     }
                     TuiCmd::SwitchAgent(idx) => {
-                        if let Some(&profile) = AgentProfile::ALL.get(idx) {
-                            self.agent_profile = profile;
-                            self.current_agent_label = format!("@{}", profile.label());
-                            if profile == AgentProfile::Plan {
-                                self.runtime.set_permission_mode(PermissionMode::Plan);
-                            } else {
-                                self.runtime.set_permission_mode(PermissionMode::Default);
+                        let entries = self.agent_entries();
+                        if let Some(name) = entries.get(idx) {
+                            self.agent_index = idx;
+                            let name = name.clone();
+                            self.current_agent_label = format!("@{name}");
+                            let profile_name = if idx == 0 { None } else { Some(name.as_str()) };
+                            if let Err(e) = self.runtime.apply_agent_profile(profile_name) {
+                                tui_feedback.push_error(format!("Failed to switch agent: {e}"));
                             }
                             tui_feedback.set_agent_profile(self.current_agent_label.clone());
                             tui_feedback.set_permission_mode(format!(
                                 "{:?}",
                                 self.runtime.permission_mode()
                             ));
-                            tui_feedback.push_system(format!("switched to @{}", profile.label()));
+                            tui_feedback.set_model(self.runtime.model().to_string());
+                            tui_feedback.push_system(format!("switched to @{name}"));
                         }
                     }
                     TuiCmd::OpenEditor => {
@@ -1917,11 +1825,8 @@ impl Repl {
                             .await?;
                     }
                     TuiCmd::OpenAgentPicker => {
-                        let current_idx = AgentProfile::ALL
-                            .iter()
-                            .position(|p| *p == self.agent_profile)
-                            .unwrap_or(0);
-                        tui_feedback.open_agent_picker(current_idx);
+                        let labels = self.build_agent_picker_labels();
+                        tui_feedback.open_agent_picker(labels, self.agent_index);
                     }
                     TuiCmd::OpenSessions => {
                         self.handle_command("/sessions", ReplOutput::Tui(tui_feedback.as_ref()))
@@ -2147,8 +2052,11 @@ impl Repl {
 /// Inline hint provider for slash commands.
 /// Shows the first matching command as greyed-out text; Tab accepts it.
 /// When no slash command is being typed, returns empty (Tab falls through to agent switch).
-#[derive(Default)]
 struct SlashHinter {
+    /// Skill directories from config — used to discover skills for `/` completion.
+    skill_directories: Vec<std::path::PathBuf>,
+    /// Workspace root for resolving relative skill directories.
+    workspace_root: std::path::PathBuf,
     hint_suffix: String,
 }
 
@@ -2178,10 +2086,9 @@ impl Hinter for SlashHinter {
             }
         }
 
-        // Also check discovered skills
-        if let Ok(skills) =
-            SkillCatalog::discover(&std::env::current_dir().unwrap_or_default(), &[])
-        {
+        // Also check discovered skills (using config's skill_directories so
+        // user-configured paths are respected, not just XDG defaults).
+        if let Ok(skills) = SkillCatalog::discover(&self.workspace_root, &self.skill_directories) {
             let mut skill_match: Option<String> = None;
             for skill in &skills {
                 let skill_cmd = format!("/{}", skill.command);

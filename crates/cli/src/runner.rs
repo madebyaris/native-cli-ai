@@ -162,6 +162,36 @@ impl SessionRuntime {
         self.supervisor.agent_mut().approval.set_mode(mode);
     }
 
+    /// Switch the active agent profile at runtime.
+    ///
+    /// Pass `None` to restore the default (no-profile) agent.
+    /// Pass `Some("explorer")` to activate the explorer specialist, etc.
+    pub fn apply_agent_profile(&mut self, name: Option<&str>) -> Result<(), ProviderError> {
+        self.supervisor.apply_agent_profile(name)?;
+        // Keep SessionRuntime's config snapshot in sync.
+        self.config = self.supervisor.config().clone();
+        Ok(())
+    }
+
+    /// List all registered agent profile names (from the supervisor's config,
+    /// which includes OMO specialists auto-registered at startup).
+    pub fn agent_profile_names(&self) -> Vec<String> {
+        self.supervisor
+            .config()
+            .agent_profile_names()
+            .into_iter()
+            .map(String::from)
+            .collect()
+    }
+
+    /// Get the description for a named agent profile (for display in pickers).
+    pub fn agent_profile_description(&self, name: &str) -> Option<String> {
+        self.supervisor
+            .config()
+            .agent_profile(name)
+            .and_then(|p| p.description.clone())
+    }
+
     /// Switch the active LLM provider and optionally override the model.
     /// Rebuilds the underlying provider connection.
     /// Returns the effective model name after the switch.
@@ -329,6 +359,7 @@ pub async fn build_session_runtime(
         session_id,
         approval_handler,
         orchestration_context,
+        agent_name: None,
     })
     .await?;
 

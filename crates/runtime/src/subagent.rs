@@ -24,6 +24,9 @@ pub struct ChildSessionConfig {
     pub provider_override: Option<ProviderKind>,
     /// Override the model name for this child session.
     pub model_override: Option<String>,
+    /// Optional specialist agent name. When set, the matching agent profile is
+    /// loaded to override provider/model/system prompt for this child.
+    pub specialist: Option<String>,
 }
 
 /// Result of a spawned child session.
@@ -99,6 +102,25 @@ pub async fn spawn_child_session(
     child_config.permissions.mode = nca_common::config::PermissionMode::BypassPermissions;
 
     // Apply provider/model overrides from parent agent/skill routing.
+    // If a specialist is set and has an agent profile, it takes precedence
+    // (unless explicit provider_override/model_override is also given).
+    if let Some(ref specialist) = cfg.specialist
+        && let Some(profile) = child_config.agent_profile(specialist).cloned()
+    {
+        // Profile overrides: only apply if explicit overrides are not already set.
+        if cfg.provider_override.is_none()
+            && let Some(provider) = profile.resolve_provider()
+        {
+            child_config.set_default_provider(provider);
+        }
+        if cfg.model_override.is_none()
+            && let Some(ref model) = profile.model
+        {
+            let resolved = child_config.model.resolve_alias(model);
+            child_config.provider.set_model_for_default(resolved);
+            child_config.sync_default_model_from_provider();
+        }
+    }
     if let Some(provider) = cfg.provider_override {
         child_config.set_default_provider(provider);
     }
@@ -109,6 +131,13 @@ pub async fn spawn_child_session(
         child_config.sync_default_model_from_provider();
     }
 
+    // Save specialist system_prompt for context injection (before config is moved).
+    let specialist_persona = cfg
+        .specialist
+        .as_deref()
+        .and_then(|s| child_config.agent_profile(s))
+        .and_then(|p| p.system_prompt.clone());
+
     let mut sup = Supervisor::create(SupervisorConfig {
         config: child_config,
         workspace_root: cfg.workspace_root.clone(),
@@ -117,6 +146,7 @@ pub async fn spawn_child_session(
         session_id: None,
         approval_handler: Some(Arc::new(AutoDenyHandler) as Arc<dyn ApprovalHandler>),
         orchestration_context: None,
+        agent_name: cfg.specialist.clone(),
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -166,6 +196,18 @@ pub async fn spawn_child_session(
          ## Your Task\n{}",
         cfg.parent_summary, cfg.task
     );
+
+    // If a specialist was requested, inject its persona at the beginning.
+    if let Some(ref specialist) = cfg.specialist
+        && let Some(ref persona) = specialist_persona
+        && !persona.trim().is_empty()
+    {
+        context_prompt = format!(
+            "## Specialist Persona: {specialist}\n\n\
+             {}\n\n---\n\n{context_prompt}",
+            persona.trim()
+        );
+    }
 
     if !cfg.focus_files.is_empty() {
         context_prompt.push_str("\n\n## Focus Files\n");
@@ -243,6 +285,7 @@ pub fn spawn_subagent_consumer(
                 focus_files: req.focus_files,
                 provider_override: req.provider_override,
                 model_override: req.model_override.clone(),
+                specialist: req.specialist.clone(),
             };
 
             tokio::spawn(async move {

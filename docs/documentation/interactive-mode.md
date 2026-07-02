@@ -85,7 +85,7 @@ Available agent profiles:
 
 | Profile | Description |
 |---------|-------------|
-| `@build` | Default full-access agent for development work |
+| `@orchestrator` | Workflow manager — plan, delegate, verify |
 | `@plan` | Read-only agent for analysis and planning |
 | `@review` | Focused code review agent |
 | `@fix` | Bug diagnosis and fix agent |
@@ -169,7 +169,7 @@ Available agent profiles:
 
 | Shortcut | Action |
 |----------|--------|
-| `Tab` | Cycle agent profile (build → plan → review → fix → test) |
+| `Tab` | Cycle agent profile (orchestrator → plan → review → fix → test) |
 | `F2` | Cycle through recent models (forward) |
 | `Shift+F2` | Cycle through recent models (backward) |
 

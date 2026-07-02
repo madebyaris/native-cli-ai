@@ -1,3 +1,4 @@
+pub mod builtin_skills;
 pub mod config;
 pub mod event;
 pub mod message;

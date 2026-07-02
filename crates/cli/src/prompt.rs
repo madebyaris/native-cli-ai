@@ -11,11 +11,11 @@ impl NcaPrompt {
         Self {
             safe_mode,
             run_mode,
-            agent_label: "@build".to_string(),
+            agent_label: "@orchestrator".to_string(),
         }
     }
 
-    /// Set the current agent label (e.g., "@build", "@plan", "@review")
+    /// Set the current agent label (e.g., "@orchestrator", "@plan", "@review")
     pub fn set_agent(&mut self, label: &str) {
         self.agent_label = label.to_string();
     }
@@ -23,7 +23,7 @@ impl NcaPrompt {
     pub fn prompt_string(&self) -> String {
         let mut parts = vec!["nca"];
 
-        if !self.agent_label.is_empty() && self.agent_label != "@build" {
+        if !self.agent_label.is_empty() && self.agent_label != "@orchestrator" {
             parts.push(&self.agent_label);
         }
         if self.safe_mode {

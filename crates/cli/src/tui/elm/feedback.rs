@@ -55,6 +55,7 @@ pub enum TuiFeedbackMsg {
     },
     /// Open the agent profile picker popup, pre-selecting `current_index`.
     OpenAgentPicker {
+        labels: Vec<(String, String)>,
         current_index: usize,
     },
     /// Open the permission mode picker popup, pre-selecting `current_index`.
@@ -136,7 +137,7 @@ pub trait TuiFeedback: Send + Sync {
     // ── Phase 3b-1 additions ──
     fn open_info_modal(&self, title: String, lines: Vec<String>);
     fn open_model_picker(&self, entries: Vec<ModelPickerEntry>);
-    fn open_agent_picker(&self, current_index: usize);
+    fn open_agent_picker(&self, labels: Vec<(String, String)>, current_index: usize);
     fn open_permission_picker(&self, current_index: usize);
     fn open_provider_picker(&self, for_api_key: bool);
     fn open_session_picker(&self, entries: Vec<SessionSnapshot>, current: String);
@@ -302,10 +303,11 @@ impl TuiFeedback for TuiFeedbackChannel {
     fn open_model_picker(&self, entries: Vec<ModelPickerEntry>) {
         let _ = self.tx.send(TuiFeedbackMsg::OpenModelPicker { entries });
     }
-    fn open_agent_picker(&self, current_index: usize) {
-        let _ = self
-            .tx
-            .send(TuiFeedbackMsg::OpenAgentPicker { current_index });
+    fn open_agent_picker(&self, labels: Vec<(String, String)>, current_index: usize) {
+        let _ = self.tx.send(TuiFeedbackMsg::OpenAgentPicker {
+            labels,
+            current_index,
+        });
     }
     fn open_permission_picker(&self, current_index: usize) {
         let _ = self
