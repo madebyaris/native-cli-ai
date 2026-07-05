@@ -86,6 +86,7 @@ pub struct Supervisor {
     context_manager: ContextManager,
     last_summary_at_tokens: usize,
     fs: Arc<dyn WorkspaceFs>,
+    pty: Arc<PtyManager>,
 }
 
 /// Configuration for creating a new supervised session.
@@ -227,6 +228,7 @@ impl Supervisor {
         }
 
         let pty = Arc::new(PtyManager::new(&workspace_root));
+        let pty_for_supervisor = pty.clone();
         tools.register(Box::new(crate::bash_tool::RuntimeBashTool::new(pty)));
 
         let (spawn_tx, spawn_rx) = mpsc::channel::<SpawnRequest>(16);
@@ -385,6 +387,7 @@ impl Supervisor {
             context_manager,
             last_summary_at_tokens: 0,
             fs: fs_for_supervisor,
+            pty: pty_for_supervisor,
         };
         sup.save().await.map_err(ProviderError::Other)?;
         sup.update_last_session()
@@ -1056,6 +1059,36 @@ impl Supervisor {
         self.worktree_path = Some(worktree_path);
         self.branch = Some(branch);
         self.base_branch = Some(base_branch);
+    }
+
+    /// Switch the supervisor to use a worktree as its workspace root.
+    /// Updates the filesystem adapter and PTY manager to point to the new root,
+    /// so all file operations and shell commands run inside the worktree directory.
+    pub fn switch_to_worktree(
+        &mut self,
+        worktree_path: PathBuf,
+        branch: String,
+        base_branch: String,
+    ) {
+        // Update worktree metadata.
+        self.worktree_path = Some(worktree_path.clone());
+        self.branch = Some(branch);
+        self.base_branch = Some(base_branch);
+
+        // Sync the filesystem root to the worktree path.
+        // Since all file tools (write_file, edit_file, etc.) share the same
+        // Arc<dyn WorkspaceFs> through their own clones, updating the root in-place
+        // immediately redirects all subsequent file operations to the worktree.
+        if let Err(e) = self.fs.set_root(worktree_path.clone()) {
+            tracing::warn!("failed to update fs root to worktree: {e}");
+        }
+
+        // Sync the PTY root so shell commands (execute_bash) also run
+        // inside the worktree directory.
+        self.pty.set_root(&worktree_path);
+
+        // Update the supervisor's own record of the workspace root.
+        self.workspace_root = worktree_path;
     }
 
     pub fn set_parent(

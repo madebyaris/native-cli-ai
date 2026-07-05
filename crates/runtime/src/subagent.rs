@@ -164,12 +164,11 @@ pub async fn spawn_child_session(
         if wt_mgr.is_git_repo() {
             match wt_mgr.create_worktree(&child_id) {
                 Ok(info) => {
-                    sup.set_worktree_info(
+                    sup.switch_to_worktree(
                         info.worktree_path.clone(),
                         info.branch_name.clone(),
                         info.base_branch.clone(),
                     );
-                    sup.workspace_root = info.worktree_path;
                 }
                 Err(e) => {
                     tracing::warn!("Failed to create worktree for child session: {e}");

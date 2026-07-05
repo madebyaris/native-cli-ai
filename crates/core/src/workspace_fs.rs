@@ -12,7 +12,7 @@
 
 use async_trait::async_trait;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{OnceLock, RwLock};
+use std::sync::RwLock;
 
 /// Errors produced by workspace filesystem operations.
 #[derive(Debug, thiserror::Error)]
@@ -64,7 +64,7 @@ pub struct DirEntry {
 pub trait WorkspaceFs: Send + Sync {
     /// The workspace root path. Used by tools that shell out to external
     /// processes and need a `current_dir`.
-    fn root(&self) -> &Path;
+    fn root(&self) -> PathBuf;
 
     /// Resolve an **existing** path inside the workspace.
     ///
@@ -107,6 +107,17 @@ pub trait WorkspaceFs: Send + Sync {
     /// Copy a file.
     async fn copy(&self, from: &str, to: &str) -> Result<(), SandboxError>;
 
+    // ── Root management ────────────────────────────────────────────
+
+    /// Overwrite the workspace root with a new path.
+    /// All subsequent file operations will use the new root.
+    /// Default implementation returns an error.
+    fn set_root(&self, _path: PathBuf) -> Result<(), SandboxError> {
+        Err(SandboxError::InvalidPath(
+            "set_root not supported by this implementation".into(),
+        ))
+    }
+
     // ── Mount management ─────────────────────────────────────────────
 
     /// Mount an additional directory as an allowed root for file operations.
@@ -132,8 +143,8 @@ pub trait WorkspaceFs: Send + Sync {
 
 /// Production filesystem adapter that enforces workspace-sandbox boundaries.
 pub struct RealFs {
-    root: PathBuf,
-    canonical_cache: OnceLock<PathBuf>,
+    root: RwLock<PathBuf>,
+    canonical_cache: RwLock<Option<PathBuf>>,
     /// Additional directories mounted as allowed roots (canonicalized).
     extra_allowed: RwLock<Vec<PathBuf>>,
 }
@@ -147,18 +158,20 @@ impl RealFs {
     pub fn new(root: PathBuf) -> Self {
         let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
         Self {
-            root,
-            canonical_cache: OnceLock::from(canonical),
+            root: RwLock::new(root),
+            canonical_cache: RwLock::new(Some(canonical)),
             extra_allowed: RwLock::new(Vec::new()),
         }
     }
 
     /// Return the cached canonical workspace root.
-    fn cached_canonical_root(&self) -> &Path {
+    fn cached_canonical_root(&self) -> PathBuf {
         self.canonical_cache
-            .get()
-            .map(|p| p.as_path())
-            .unwrap_or(&self.root)
+            .read()
+            .expect("canonical_cache lock poisoned")
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| self.root.read().expect("root lock poisoned").clone())
     }
 
     /// Check whether a canonical path is within the workspace root or any mounted extra root.
@@ -177,7 +190,7 @@ impl RealFs {
     /// the workspace root or any mounted extra root.
     fn is_allowed_normalized(&self, normalized: &Path) -> bool {
         let root = self.cached_canonical_root();
-        if normalized.starts_with(root) {
+        if normalized.starts_with(&root) {
             return true;
         }
         let extra = self
@@ -190,22 +203,32 @@ impl RealFs {
 
 #[async_trait]
 impl WorkspaceFs for RealFs {
-    fn root(&self) -> &Path {
-        &self.root
+    fn root(&self) -> PathBuf {
+        self.root.read().expect("root lock poisoned").clone()
+    }
+
+    fn set_root(&self, path: PathBuf) -> Result<(), SandboxError> {
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+        *self.root.write().expect("root lock poisoned") = path;
+        *self
+            .canonical_cache
+            .write()
+            .expect("canonical_cache lock poisoned") = Some(canonical);
+        Ok(())
     }
 
     fn resolve(&self, path: &str) -> Result<PathBuf, SandboxError> {
-        let full = self.root.join(path);
+        let root = self.root.read().expect("root lock poisoned");
+        let full = root.join(path);
         let canonical = full.canonicalize().map_err(|e| SandboxError::NotFound {
             path: full.display().to_string(),
             source: e,
         })?;
         // Re-canonicalize root in case it was initially unavailable.
-        let root = self
-            .root
+        let root_canonical = root
             .canonicalize()
-            .unwrap_or_else(|_| self.cached_canonical_root().to_path_buf());
-        if self.is_allowed(&canonical, &root) {
+            .unwrap_or_else(|_| self.cached_canonical_root());
+        if self.is_allowed(&canonical, &root_canonical) {
             Ok(canonical)
         } else {
             Err(SandboxError::OutsideWorkspace {
@@ -215,7 +238,8 @@ impl WorkspaceFs for RealFs {
     }
 
     fn validate_prefix(&self, path: &str) -> Result<PathBuf, SandboxError> {
-        let full = self.root.join(path);
+        let root = self.root.read().expect("root lock poisoned");
+        let full = root.join(path);
         let normalized = logical_normalize(&full);
         if self.is_allowed_normalized(&normalized) {
             Ok(normalized)
@@ -234,8 +258,10 @@ impl WorkspaceFs for RealFs {
         // Reject if it's already inside the workspace root (redundant).
         let root = self
             .root
+            .read()
+            .expect("root lock poisoned")
             .canonicalize()
-            .unwrap_or_else(|_| self.cached_canonical_root().to_path_buf());
+            .unwrap_or_else(|_| self.cached_canonical_root());
         if canonical.starts_with(&root) {
             return Ok(());
         }
@@ -283,7 +309,8 @@ impl WorkspaceFs for RealFs {
     }
 
     async fn write_file(&self, path: &str, content: &str) -> Result<(), SandboxError> {
-        let full = self.root.join(path);
+        let root = self.root.read().expect("root lock poisoned").clone();
+        let full = root.join(path);
         let parent = full
             .parent()
             .ok_or_else(|| SandboxError::InvalidPath(path.to_string()))?;
@@ -298,11 +325,10 @@ impl WorkspaceFs for RealFs {
             path: parent.display().to_string(),
             source: e,
         })?;
-        let root = self
-            .root
+        let root_canonical = root
             .canonicalize()
-            .unwrap_or_else(|_| self.cached_canonical_root().to_path_buf());
-        if !self.is_allowed(&canonical_parent, &root) {
+            .unwrap_or_else(|_| self.cached_canonical_root());
+        if !self.is_allowed(&canonical_parent, &root_canonical) {
             return Err(SandboxError::OutsideWorkspace {
                 path: path.to_string(),
             });
@@ -348,8 +374,10 @@ impl WorkspaceFs for RealFs {
             .unwrap_or_else(|_| validated.clone());
         let root = self
             .root
+            .read()
+            .expect("root lock poisoned")
             .canonicalize()
-            .unwrap_or_else(|_| self.cached_canonical_root().to_path_buf());
+            .unwrap_or_else(|_| self.cached_canonical_root());
         if !self.is_allowed(&canonical, &root) {
             return Err(SandboxError::OutsideWorkspace {
                 path: path.to_string(),
@@ -387,7 +415,8 @@ impl WorkspaceFs for RealFs {
         // Source must exist and be in workspace.
         let canonical_from = self.resolve(from)?;
         // Destination parent must be in workspace (create if needed).
-        let full_to = self.root.join(to);
+        let root = self.root.read().expect("root lock poisoned").clone();
+        let full_to = root.join(to);
         if let Some(parent) = full_to.parent().filter(|p| !p.as_os_str().is_empty()) {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -399,11 +428,10 @@ impl WorkspaceFs for RealFs {
                 path: parent.display().to_string(),
                 source: e,
             })?;
-            let root = self
-                .root
+            let root_canonical = root
                 .canonicalize()
-                .unwrap_or_else(|_| self.cached_canonical_root().to_path_buf());
-            if !self.is_allowed(&canonical_parent, &root) {
+                .unwrap_or_else(|_| self.cached_canonical_root());
+            if !self.is_allowed(&canonical_parent, &root_canonical) {
                 return Err(SandboxError::OutsideWorkspace {
                     path: to.to_string(),
                 });
@@ -421,7 +449,8 @@ impl WorkspaceFs for RealFs {
         // Source must exist and be in workspace.
         let canonical_from = self.resolve(from)?;
         // Destination parent must be in workspace (create if needed).
-        let full_to = self.root.join(to);
+        let root = self.root.read().expect("root lock poisoned").clone();
+        let full_to = root.join(to);
         if let Some(parent) = full_to.parent().filter(|p| !p.as_os_str().is_empty()) {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -433,11 +462,10 @@ impl WorkspaceFs for RealFs {
                 path: parent.display().to_string(),
                 source: e,
             })?;
-            let root = self
-                .root
+            let root_canonical = root
                 .canonicalize()
-                .unwrap_or_else(|_| self.cached_canonical_root().to_path_buf());
-            if !self.is_allowed(&canonical_parent, &root) {
+                .unwrap_or_else(|_| self.cached_canonical_root());
+            if !self.is_allowed(&canonical_parent, &root_canonical) {
                 return Err(SandboxError::OutsideWorkspace {
                     path: to.to_string(),
                 });

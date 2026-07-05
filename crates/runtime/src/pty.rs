@@ -1,29 +1,47 @@
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::Mutex;
 use tokio::time::{Duration, timeout};
 
 /// Manages PTY sessions for sandboxed command execution.
 pub struct PtyManager {
-    workspace_root: std::path::PathBuf,
+    workspace_root: Mutex<std::path::PathBuf>,
 }
 
 impl PtyManager {
     pub fn new(workspace_root: impl AsRef<Path>) -> Self {
         Self {
-            workspace_root: workspace_root.as_ref().to_path_buf(),
+            workspace_root: Mutex::new(workspace_root.as_ref().to_path_buf()),
         }
     }
 
-    pub fn workspace_root(&self) -> &Path {
-        &self.workspace_root
+    pub fn workspace_root(&self) -> std::path::PathBuf {
+        self.workspace_root
+            .lock()
+            .expect("workspace_root lock poisoned")
+            .clone()
+    }
+
+    /// Update the workspace root for this PTY manager.
+    /// All subsequent shell commands will use the new root as their working directory.
+    pub fn set_root(&self, path: &Path) {
+        *self
+            .workspace_root
+            .lock()
+            .expect("workspace_root lock poisoned") = path.to_path_buf();
     }
 
     /// Spawn a command in a new PTY, capture output, and return it.
     pub async fn exec(&self, command: &str, timeout_secs: u64) -> Result<PtyOutput, PtyError> {
+        let root = self
+            .workspace_root
+            .lock()
+            .expect("workspace_root lock poisoned")
+            .clone();
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-lc")
             .arg(command)
-            .current_dir(&self.workspace_root)
+            .current_dir(&root)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
