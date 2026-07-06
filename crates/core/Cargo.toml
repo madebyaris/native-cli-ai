@@ -25,6 +25,10 @@ rmcp = { version = "1.7", default-features = false, features = ["client", "trans
 regex = "1"
 chrono = { version = "0.4", features = ["serde", "clock"] }
 tempfile = "3"
+capnp = "0.26"
+
+[build-dependencies]
+capnpc = "0.26"
 
 [dev-dependencies]
 tiny_http = "0.12.0"

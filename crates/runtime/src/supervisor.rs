@@ -320,7 +320,12 @@ impl Supervisor {
                 PluginRegistry::new()
             } else {
                 let mut host = PluginHost::new();
-                let errors = host.start_all(&descriptors).await;
+                let perm_mode = serde_json::to_string(&config.permissions.mode)
+                    .unwrap_or_else(|_| "\"default\"".into());
+                let perm_mode = perm_mode.trim_matches('"');
+                let errors = host
+                    .start_all(&descriptors, &workspace_root, &session_id, perm_mode)
+                    .await;
                 for err in &errors {
                     tracing::warn!("plugin startup error: {err}");
                 }

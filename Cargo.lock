@@ -280,6 +280,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
+name = "capnp"
+version = "0.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7436c94a2012ebd7847d2a3b5756f02603ddda4026faae19d01df6a3e37084db"
+dependencies = [
+ "embedded-io",
+]
+
+[[package]]
+name = "capnpc"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13aea06b902f885cb0313b11e900e96cd57fef775e9e601a96e14e1d655f3cd3"
+dependencies = [
+ "capnp",
+]
+
+[[package]]
 name = "cargo-husky"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -838,6 +856,12 @@ name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
+
+[[package]]
+name = "embedded-io"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9eb1aa714776b75c7e67e1da744b81a129b3ff919c8712b5e1b32252c1f07cc7"
 
 [[package]]
 name = "encode_unicode"
@@ -1995,7 +2019,7 @@ dependencies = [
 
 [[package]]
 name = "nca-autoresearch"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2015,7 +2039,7 @@ dependencies = [
 
 [[package]]
 name = "nca-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2052,7 +2076,7 @@ dependencies = [
 
 [[package]]
 name = "nca-common"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "serde",
@@ -2066,10 +2090,12 @@ dependencies = [
 
 [[package]]
 name = "nca-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "base64",
+ "capnp",
+ "capnpc",
  "chrono",
  "futures-util",
  "genai",
@@ -2092,10 +2118,11 @@ dependencies = [
 
 [[package]]
 name = "nca-runtime"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "capnp",
  "chrono",
  "ignore",
  "libc",

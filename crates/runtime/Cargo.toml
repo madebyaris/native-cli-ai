@@ -21,6 +21,7 @@ portable-pty = "0.9"
 ignore = "0.4"
 walkdir = "2"
 async-trait = "0.1"
+capnp = "0.26"
 
 [dev-dependencies]
 tempfile = "3"

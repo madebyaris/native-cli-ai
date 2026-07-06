@@ -129,6 +129,19 @@ This document records every dependency choice, the rationale behind it, and the 
 | `serde_json` | 1.x | JSON for API payloads, session files, IPC messages |
 | `toml` | 0.9.x | TOML for config files |
 
+## Plugin Wire Protocol
+
+| Crate | Version | Role |
+|-------|---------|------|
+| `capnp` | 0.26.x | Cap'n Proto runtime — zero-copy binary serialization for plugin IPC |
+| `capnpc` | 0.26.x | Cap'n Proto codegen — build-time schema compilation (`schema/plugin.capnp`) |
+
+**Why Cap'n Proto**: Self-delimiting streaming frames over stdin/stdout pipes. Zero-copy reads, schema evolution (new fields are backward-compatible), and cross-language codegen for polyglot plugins. No JS execution — pure binary protocol.
+
+**Transport**: stdin/stdout pipes for Cap'n Proto framing, stderr inherited for plugin diagnostics.
+
+**Rejected**: JSON-NDJSON (text overhead, no schema enforcement), Protobuf (requires separate framing layer), FlatBuffers (weaker Rust ecosystem).
+
 ---
 
 ## Local Persistence
@@ -208,9 +221,10 @@ Session state and event streams are stored as JSON and JSONL under `<workspace>/
 ```
 crates/common   -> serde, serde_json, toml, thiserror, tracing
 crates/core     -> common, genai, anthropic-async, async-openai, reqwest,
-                   serde_json, thiserror, tracing, tokio, similar, globset
+                   serde_json, thiserror, tracing, tokio, similar, globset,
+                   capnp, capnpc (build-dep)
 crates/cli      -> common, core, runtime, clap, ratatui, crossterm, reedline,
                    syntect, pulldown-cmark, colored, anyhow, tracing, tokio
 crates/runtime  -> common, core, portable-pty, tokio, serde_json, tracing,
-                   thiserror, ignore, walkdir
+                   thiserror, ignore, walkdir, capnp
 ```
