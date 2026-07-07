@@ -66,29 +66,32 @@ pub fn spawn_openai_stream(
             let chunk = match item {
                 Ok(chunk) => chunk,
                 Err(err) => {
-                    // Log the full error chain for diagnostics — the Display
-                    // message alone (e.g. "error decoding response body") is
-                    // often too vague to diagnose intermittent stream
-                    // disruptions.
+                    // The Display message alone (e.g. "error decoding response
+                    // body") is too vague to diagnose intermittent stream
+                    // disruptions. Walk the full source chain and include any
+                    // buffered response data for diagnostics.
+                    let chain = super::format_error_chain(&err);
+                    let buffer_preview = if buffer.is_empty() {
+                        String::from("(none)")
+                    } else {
+                        buffer.chars().take(500).collect()
+                    };
+
                     tracing::error!(
                         provider = provider_name,
                         error = %err,
+                        error_chain = %chain,
                         is_timeout = err.is_timeout(),
                         is_connect = err.is_connect(),
                         is_request = err.is_request(),
                         is_body = err.is_body(),
+                        buffer_preview = %buffer_preview,
                         "stream_byte_error"
                     );
-                    if let Some(src) = std::error::Error::source(&err) {
-                        tracing::error!(
-                            provider = provider_name,
-                            source = %src,
-                            "stream_byte_error_source"
-                        );
-                    }
+
                     let _ = tx
                         .send(StreamChunk::TextDelta(format!(
-                            "\n[{provider_name} stream error: {err}]"
+                            "\n[{provider_name} stream error: {chain}\nBuffered data before error: {buffer_preview}]"
                         )))
                         .await;
                     break;
@@ -538,24 +541,19 @@ impl Provider for OpenAiCompatProvider {
             .send()
             .await
             .map_err(|err| {
+                let chain = super::format_error_chain(&err);
                 tracing::error!(
                     provider = self.name,
                     model = %model,
                     error = %err,
+                    error_chain = %chain,
                     is_timeout = err.is_timeout(),
                     is_connect = err.is_connect(),
                     is_request = err.is_request(),
                     is_body = err.is_body(),
                     "provider_request_failed"
                 );
-                if let Some(src) = std::error::Error::source(&err) {
-                    tracing::error!(
-                        provider = self.name,
-                        source = %src,
-                        "provider_request_failed_source"
-                    );
-                }
-                ProviderError::RequestFailed(err.to_string())
+                ProviderError::RequestFailed(chain)
             })?;
 
         let status = response.status();

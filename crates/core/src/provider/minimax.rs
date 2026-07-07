@@ -141,24 +141,19 @@ impl Provider for MiniMaxProvider {
             .send()
             .await
             .map_err(|err| {
+                let chain = super::format_error_chain(&err);
                 tracing::error!(
                     provider = "minimax",
                     model = %model,
                     error = %err,
+                    error_chain = %chain,
                     is_timeout = err.is_timeout(),
                     is_connect = err.is_connect(),
                     is_request = err.is_request(),
                     is_body = err.is_body(),
                     "provider_request_failed"
                 );
-                if let Some(src) = std::error::Error::source(&err) {
-                    tracing::error!(
-                        provider = "minimax",
-                        source = %src,
-                        "provider_request_failed_source"
-                    );
-                }
-                ProviderError::RequestFailed(err.to_string())
+                ProviderError::RequestFailed(chain)
             })?;
 
         let status = response.status();

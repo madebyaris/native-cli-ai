@@ -64,25 +64,32 @@ pub fn spawn_anthropic_stream(
             let chunk = match item {
                 Ok(chunk) => chunk,
                 Err(err) => {
+                    // The Display message alone (e.g. "error decoding response
+                    // body") is too vague to diagnose intermittent stream
+                    // disruptions. Walk the full source chain and include any
+                    // buffered response data for diagnostics.
+                    let chain = super::format_error_chain(&err);
+                    let buffer_preview = if buffer.is_empty() {
+                        String::from("(none)")
+                    } else {
+                        buffer.chars().take(500).collect()
+                    };
+
                     tracing::error!(
                         provider = provider_name,
                         error = %err,
+                        error_chain = %chain,
                         is_timeout = err.is_timeout(),
                         is_connect = err.is_connect(),
                         is_request = err.is_request(),
                         is_body = err.is_body(),
+                        buffer_preview = %buffer_preview,
                         "stream_byte_error"
                     );
-                    if let Some(src) = std::error::Error::source(&err) {
-                        tracing::error!(
-                            provider = provider_name,
-                            source = %src,
-                            "stream_byte_error_source"
-                        );
-                    }
+
                     let _ = tx
                         .send(StreamChunk::TextDelta(format!(
-                            "\n[{provider_name} stream error: {err}]"
+                            "\n[{provider_name} stream error: {chain}\nBuffered data before error: {buffer_preview}]"
                         )))
                         .await;
                     break;

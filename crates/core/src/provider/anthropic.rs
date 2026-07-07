@@ -87,7 +87,21 @@ impl Provider for AnthropicProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|err| ProviderError::RequestFailed(err.to_string()))?;
+            .map_err(|err| {
+                let chain = super::format_error_chain(&err);
+                tracing::error!(
+                    provider = "anthropic",
+                    model = %model,
+                    error = %err,
+                    error_chain = %chain,
+                    is_timeout = err.is_timeout(),
+                    is_connect = err.is_connect(),
+                    is_request = err.is_request(),
+                    is_body = err.is_body(),
+                    "provider_request_failed"
+                );
+                ProviderError::RequestFailed(chain)
+            })?;
 
         let status = response.status();
         if !status.is_success() {

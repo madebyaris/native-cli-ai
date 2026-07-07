@@ -18,6 +18,25 @@ use async_trait::async_trait;
 use nca_common::message::Message;
 use nca_common::tool::{ToolCall, ToolDefinition};
 
+/// Format an error's full source chain as "msg → source → …" for diagnostics.
+///
+/// The top-level `Display` of reqwest/hyper errors is often too vague (e.g.
+/// "error decoding response body"); the real root cause lives in the source
+/// chain.
+pub(crate) fn format_error_chain(err: &dyn std::error::Error) -> String {
+    let mut parts = vec![err.to_string()];
+    let mut current = err.source();
+    while let Some(source) = current {
+        let msg = source.to_string();
+        // Skip duplicate messages that add no information.
+        if msg != *parts.last().unwrap() {
+            parts.push(msg);
+        }
+        current = source.source();
+    }
+    parts.join(" → ")
+}
+
 /// A streamed chunk from the provider.
 #[derive(Debug, Clone)]
 pub enum StreamChunk {
