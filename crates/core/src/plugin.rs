@@ -73,6 +73,14 @@ pub struct ToolExecAfter {
     pub output: String,
 }
 
+/// Result of a slash-command interception hook.
+pub struct CommandIntercept {
+    /// Whether the plugin handled the command (host should stop processing).
+    pub handled: bool,
+    /// User-facing text to display.
+    pub text: String,
+}
+
 /// A Rust-native plugin that extends nca's behavior.
 ///
 /// Each hook has a default `None`/`Pass` return — plugins only implement
@@ -127,7 +135,11 @@ pub trait NcaPlugin: Send + Sync {
     fn on_tool_execute_after(&self, _after: &mut ToolExecAfter) {}
 
     /// Intercept before a slash command executes.
-    fn on_command_execute_before(&self, _command: &str, _arguments: &str) -> Option<String> {
+    fn on_command_execute_before(
+        &self,
+        _command: &str,
+        _arguments: &str,
+    ) -> Option<CommandIntercept> {
         None
     }
 
@@ -135,6 +147,12 @@ pub trait NcaPlugin: Send + Sync {
 
     /// Observe an event from the AgentEvent stream (read-only, fire-and-forget).
     fn on_event(&self, _event: &serde_json::Value) {}
+
+    /// Slash commands contributed by this plugin.
+    /// Each string becomes a `/command` entry in the CLI slash panel and REPL hinter.
+    fn commands(&self) -> Vec<String> {
+        Vec::new()
+    }
 
     /// Tool declarations contributed by this plugin.
     /// Each declaration becomes a `RemoteTool` registered in the `ToolRegistry`.
@@ -276,7 +294,11 @@ impl PluginRegistry {
     }
 
     /// Run `command.execute.before` hooks. First non-`None` result wins.
-    pub fn check_command_before(&self, command: &str, arguments: &str) -> Option<(String, String)> {
+    pub fn check_command_before(
+        &self,
+        command: &str,
+        arguments: &str,
+    ) -> Option<(String, CommandIntercept)> {
         for plugin in &self.plugins {
             if let Some(result) = plugin.on_command_execute_before(command, arguments) {
                 return Some((plugin.name().to_string(), result));
@@ -290,6 +312,22 @@ impl PluginRegistry {
         for plugin in &self.plugins {
             plugin.on_event(event);
         }
+    }
+
+    /// Collect slash commands from all plugins.
+    /// Returns `(plugin_name, commands)` pairs for the CLI slash panel.
+    pub fn collect_commands(&self) -> Vec<(String, Vec<String>)> {
+        self.plugins
+            .iter()
+            .filter_map(|plugin| {
+                let cmds = plugin.commands();
+                if cmds.is_empty() {
+                    None
+                } else {
+                    Some((plugin.name().to_string(), cmds))
+                }
+            })
+            .collect()
     }
 
     /// Collect tool declarations from all plugins.

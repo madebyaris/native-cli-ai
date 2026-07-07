@@ -43,7 +43,11 @@ impl SlashEntry {
     }
 }
 
-fn load_slash_entries(workspace_root: &Path, skill_dirs: &[PathBuf]) -> Vec<SlashEntry> {
+fn load_slash_entries(
+    workspace_root: &Path,
+    skill_dirs: &[PathBuf],
+    plugin_commands: &[(String, Vec<String>)],
+) -> Vec<SlashEntry> {
     let mut entries: Vec<SlashEntry> = SLASH_COMMANDS
         .iter()
         .map(|c| SlashEntry {
@@ -66,6 +70,16 @@ fn load_slash_entries(workspace_root: &Path, skill_dirs: &[PathBuf]) -> Vec<Slas
             entries.push(SlashEntry {
                 display,
                 command: format!("/{}", s.command),
+            });
+        }
+    }
+
+    // Add plugin-contributed slash commands
+    for (plugin_name, cmds) in plugin_commands {
+        for cmd in cmds {
+            entries.push(SlashEntry {
+                display: format!("/{cmd} ({plugin_name})"),
+                command: format!("/{cmd}"),
             });
         }
     }
@@ -450,8 +464,13 @@ impl ComposerState {
         self.workspace_files = file_mentions::discover_workspace_files(workspace_root);
     }
 
-    pub(crate) fn load_slash_entries(&mut self, workspace_root: &Path, skill_dirs: &[PathBuf]) {
-        self.slash_entries = load_slash_entries(workspace_root, skill_dirs);
+    pub(crate) fn load_slash_entries(
+        &mut self,
+        workspace_root: &Path,
+        skill_dirs: &[PathBuf],
+        plugin_commands: &[(String, Vec<String>)],
+    ) {
+        self.slash_entries = load_slash_entries(workspace_root, skill_dirs, plugin_commands);
     }
 
     // ── History management ──

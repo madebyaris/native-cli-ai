@@ -21,6 +21,7 @@ pub(crate) struct NcaModelParams {
     pub permission_mode: String,
     pub workspace_root: std::path::PathBuf,
     pub skill_dirs: Vec<std::path::PathBuf>,
+    pub plugin_commands: Vec<(String, Vec<String>)>,
 }
 
 /// Run the NcaModel-based TUI event loop.
@@ -64,7 +65,11 @@ pub(crate) fn run_nca_model(
         .components
         .composer
         .state_mut()
-        .load_slash_entries(&params.workspace_root, &params.skill_dirs);
+        .load_slash_entries(
+            &params.workspace_root,
+            &params.skill_dirs,
+            &params.plugin_commands,
+        );
     nca_model
         .components
         .composer

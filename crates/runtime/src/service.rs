@@ -51,7 +51,12 @@ pub fn spawn_service_session(
 ) -> Result<ServiceSessionHandle, String> {
     let (startup_tx, startup_rx) = std_mpsc::channel::<Result<ServiceSessionInfo, String>>();
     let join_handle = std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        // multi_thread is required because plugin RPC (`RemotePlugin::rpc_sync`)
+        // bridges sync trait hooks to async IO via `block_in_place` + `block_on`,
+        // which panics on a current_thread runtime. Two workers keep the runtime
+        // alive while one worker is parked in `block_in_place`.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
             .enable_all()
             .build();
 

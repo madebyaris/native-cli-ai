@@ -1047,6 +1047,21 @@ impl Supervisor {
         self.fs.mounted_paths()
     }
 
+    /// Collect slash commands contributed by plugins (for CLI slash panel).
+    pub fn plugin_commands(&self) -> Vec<(String, Vec<String>)> {
+        self.plugins.collect_commands()
+    }
+
+    /// Dispatch a slash command to plugins (command interception).
+    /// Returns `Some((plugin_name, result))` if a plugin handled the command.
+    pub fn check_command_before(
+        &self,
+        command: &str,
+        arguments: &str,
+    ) -> Option<(String, nca_core::plugin::CommandIntercept)> {
+        self.plugins.check_command_before(command, arguments)
+    }
+
     pub fn request_cancel(&self) {
         self.agent.request_cancel();
     }

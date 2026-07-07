@@ -338,6 +338,20 @@ impl SessionRuntime {
     pub fn mounted_paths(&self) -> Vec<std::path::PathBuf> {
         self.supervisor.mounted_paths()
     }
+
+    /// Slash commands contributed by plugins (for CLI slash panel and REPL hinter).
+    pub fn plugin_commands(&self) -> Vec<(String, Vec<String>)> {
+        self.supervisor.plugin_commands()
+    }
+
+    /// Dispatch a slash command to plugins (command interception).
+    pub fn check_command_before(
+        &self,
+        command: &str,
+        arguments: &str,
+    ) -> Option<(String, nca_core::plugin::CommandIntercept)> {
+        self.supervisor.check_command_before(command, arguments)
+    }
 }
 
 pub async fn build_session_runtime(

@@ -417,6 +417,12 @@ impl Repl {
             .with_hinter(Box::new(SlashHinter {
                 skill_directories: self.runtime.config().harness.skill_directories.clone(),
                 workspace_root: self.runtime.workspace_root().to_path_buf(),
+                plugin_commands: self
+                    .runtime
+                    .plugin_commands()
+                    .into_iter()
+                    .flat_map(|(_, cmds)| cmds)
+                    .collect(),
                 hint_suffix: String::new(),
             }));
 
@@ -1417,6 +1423,16 @@ impl Repl {
                 }
             }
             _ => {
+                if command.starts_with('/') {
+                    let cmd_name = command.trim_start_matches('/');
+                    if let Some((plugin_name, intercept)) =
+                        self.runtime.check_command_before(cmd_name, rest)
+                        && intercept.handled
+                    {
+                        out.println(&format!("[{plugin_name}] {}", intercept.text));
+                        return Ok(true);
+                    }
+                }
                 if command.starts_with('/')
                     && self
                         .try_run_skill(command.trim_start_matches('/'), rest, &out)
@@ -1647,6 +1663,7 @@ impl Repl {
             permission_mode: perm.clone(),
             workspace_root: self.runtime.workspace_root().to_path_buf(),
             skill_dirs,
+            plugin_commands: self.runtime.plugin_commands(),
         };
 
         let ui = tokio::task::spawn_blocking(move || {
@@ -2057,6 +2074,8 @@ struct SlashHinter {
     skill_directories: Vec<std::path::PathBuf>,
     /// Workspace root for resolving relative skill directories.
     workspace_root: std::path::PathBuf,
+    /// Slash commands contributed by plugins.
+    plugin_commands: Vec<String>,
     hint_suffix: String,
 }
 
@@ -2101,6 +2120,16 @@ impl Hinter for SlashHinter {
             if let Some(suffix) = skill_match {
                 self.hint_suffix = suffix.clone();
                 return suffix;
+            }
+        }
+
+        // Also check plugin-contributed slash commands.
+        for cmd in &self.plugin_commands {
+            let full = format!("/{cmd}");
+            if full.starts_with(command) && full != command {
+                let suffix = &full[command.len()..];
+                self.hint_suffix = suffix.to_string();
+                return suffix.to_string();
             }
         }
 

@@ -23,7 +23,7 @@ use nca_common::tool::ToolDefinition;
 use nca_core::plugin::NcaPlugin;
 use nca_core::plugin_capnp::{ParamType, body, hello};
 use nca_core::plugin_protocol::{self, PROTOCOL_MAJOR, WireError};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 
@@ -124,21 +124,19 @@ fn plugins_dir() -> PathBuf {
 ///
 /// Cap'n Proto streaming format: framing words + payload. This reads the raw
 /// bytes, then parses via capnp's sync reader.
-async fn read_capnp_message(reader: &mut ChildStdout) -> Result<Vec<u8>, WireError> {
+async fn read_capnp_message<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Vec<u8>, WireError> {
     // Read the first word (8 bytes): segment count - 1 in low 32 bits.
     let mut header = [0u8; 8];
     reader.read_exact(&mut header).await?;
 
-    let segment_count_plus_one =
-        u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
-    let segment_count = segment_count_plus_one;
-    if segment_count == 0 {
-        return Err(WireError::Protocol("invalid segment count".into()));
-    }
+    // Stored value is `segment_count - 1` per Cap'n Proto spec; add 1 to
+    // recover the true count.
+    let stored_count = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
+    let segment_count = stored_count + 1;
 
     // Calculate header size (1 word for count + segment_count words for sizes,
     // padded to even total).
-    let header_words = (1 + segment_count).div_ceil(2) * 2;
+    let header_words = (1 + segment_count).div_ceil(2);
     let mut full_header = Vec::with_capacity(header_words * 8);
     full_header.extend_from_slice(&header);
 
@@ -246,7 +244,7 @@ impl PluginHost {
         // Read Hello message with timeout.
         let hello_result = tokio::time::timeout(tokio::time::Duration::from_secs(10), async {
             let mut stdout_guard = stdout.lock().await;
-            let raw = read_capnp_message(&mut stdout_guard).await?;
+            let raw = read_capnp_message(&mut *stdout_guard).await?;
             parse_hello(&raw)
         })
         .await;
@@ -501,7 +499,12 @@ impl RemotePlugin {
     }
 
     /// Send a Cap'n Proto wire message and read the response.
-    /// Uses block_on — must be called from a sync context within a tokio runtime.
+    ///
+    /// This is called from sync `NcaPlugin` trait hooks, which may run on a
+    /// tokio worker thread. `block_in_place` moves the worker into the blocking
+    /// pool so the inner `handle.block_on` runs on a non-driver thread — without
+    /// it, `block_on` would panic ("Cannot start a runtime from within a
+    /// runtime"). Requires a multi_thread runtime.
     fn rpc_sync(&self, wire: Vec<u8>, timeout_secs: u64) -> Result<Vec<u8>, String> {
         if self.is_disabled() {
             return Err(format!("plugin {} is disabled", self.name));
@@ -514,34 +517,36 @@ impl RemotePlugin {
         let stdout = self.stdout.clone();
         let disabled = self.disabled.clone();
 
-        handle.block_on(async move {
-            // Write request.
-            {
-                let mut stdin = stdin.lock().await;
-                write_capnp_message(&mut stdin, &wire)
-                    .await
-                    .map_err(|e| format!("write: {e}"))?;
-            }
-
-            // Read response with timeout.
-            let result =
-                tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), async {
-                    let mut stdout = stdout.lock().await;
-                    read_capnp_message(&mut stdout).await
-                })
-                .await;
-
-            match result {
-                Ok(Ok(data)) => Ok(data),
-                Ok(Err(e)) => {
-                    disabled.store(true, Ordering::SeqCst);
-                    Err(format!("read: {e}"))
+        tokio::task::block_in_place(|| {
+            handle.block_on(async move {
+                // Write request.
+                {
+                    let mut stdin = stdin.lock().await;
+                    write_capnp_message(&mut stdin, &wire)
+                        .await
+                        .map_err(|e| format!("write: {e}"))?;
                 }
-                Err(_) => {
-                    disabled.store(true, Ordering::SeqCst);
-                    Err(format!("plugin timed out after {timeout_secs}s"))
+
+                // Read response with timeout.
+                let result =
+                    tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), async {
+                        let mut stdout = stdout.lock().await;
+                        read_capnp_message(&mut *stdout).await
+                    })
+                    .await;
+
+                match result {
+                    Ok(Ok(data)) => Ok(data),
+                    Ok(Err(e)) => {
+                        disabled.store(true, Ordering::SeqCst);
+                        Err(format!("read: {e}"))
+                    }
+                    Err(_) => {
+                        disabled.store(true, Ordering::SeqCst);
+                        Err(format!("plugin timed out after {timeout_secs}s"))
+                    }
                 }
-            }
+            })
         })
     }
 }
@@ -594,6 +599,53 @@ impl NcaPlugin for RemotePlugin {
         }
         self.capabilities.tools.clone()
     }
+
+    fn commands(&self) -> Vec<String> {
+        if self.is_disabled() {
+            return Vec::new();
+        }
+        self.capabilities.commands.clone()
+    }
+
+    fn on_command_execute_before(
+        &self,
+        command: &str,
+        arguments: &str,
+    ) -> Option<nca_core::plugin::CommandIntercept> {
+        if self.is_disabled() {
+            return None;
+        }
+
+        let id = self.alloc_id();
+        let wire = plugin_protocol::build_message(&id, |body| {
+            let mut req = body.reborrow().init_command_execute_before();
+            req.set_command(command);
+            req.set_session_id("");
+            req.set_arguments(arguments);
+        });
+
+        let raw = self.rpc_sync(wire, 10).ok()?;
+
+        let mut reader = std::io::BufReader::new(&raw[..]);
+        let result = plugin_protocol::read_message_then(&mut reader, |msg| {
+            let body = msg.get_body()?;
+            match body.which() {
+                Ok(body::CommandExecuteBeforeResult(r)) => {
+                    let r = r?;
+                    Ok(Some(nca_core::plugin::CommandIntercept {
+                        handled: r.get_handled(),
+                        text: r.get_text()?.to_string()?,
+                    }))
+                }
+                _ => Ok(None),
+            }
+        });
+
+        match result {
+            Ok(Some(intercept)) => Some(intercept),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -605,5 +657,34 @@ mod tests {
         let dir = plugins_dir();
         assert!(dir.to_string_lossy().contains("nca"));
         assert!(dir.to_string_lossy().contains("plugins"));
+    }
+
+    // Regression: real plugin frames (Hello/Shutdown/Config/...) are standard
+    // Cap'n Proto streaming messages produced by `serialize::write_message`.
+    // `read_capnp_message` hand-parses them; any drift from the spec silently
+    // breaks the plugin handshake. The original bug treated the stored
+    // `segment_count - 1` as the true count, so every single-segment Hello was
+    // rejected with "invalid segment count" and all plugins got disabled.
+    //
+    // This round-trip pins the hand parser against capnp's own serializer +
+    // deserializer: build a real frame, feed the exact bytes a plugin emits,
+    // then confirm the returned buffer is re-readable by capnp's reader.
+    #[tokio::test]
+    async fn read_capnp_message_round_trips_standard_frame() {
+        let wire = plugin_protocol::build_shutdown("42");
+        let mut reader = wire.as_slice();
+        let raw = read_capnp_message(&mut reader)
+            .await
+            .expect("must parse a standard Cap'n Proto streaming frame");
+        // The returned bytes must be re-readable by capnp's own reader.
+        let mut buf = std::io::BufReader::new(&raw[..]);
+        let parsed = plugin_protocol::read_message_then(&mut buf, |msg| {
+            assert_eq!(msg.get_id()?, "42");
+            assert!(matches!(msg.get_body()?.which(), Ok(body::Shutdown(_))));
+            Ok(())
+        });
+        assert!(parsed.is_ok(), "round-trip failed: {parsed:?}");
+        // Parser must consume exactly the full frame — no trailing bytes.
+        assert_eq!(reader.len(), 0);
     }
 }

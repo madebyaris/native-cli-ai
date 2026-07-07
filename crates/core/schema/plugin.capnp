@@ -215,7 +215,8 @@ struct CommandExecuteBeforeRequest {
     arguments @2 :Text;
 }
 struct CommandExecuteBeforeResult {
-    partsJson @0 :Text;
+    handled @0 :Bool;
+    text    @1 :Text;
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
