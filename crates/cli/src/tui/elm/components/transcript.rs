@@ -160,7 +160,10 @@ impl TranscriptState {
     pub(crate) fn apply_event(&mut self, e: &AgentEvent) -> TranscriptAction {
         match e {
             AgentEvent::SessionStarted { .. } => {
-                // Model/session/branch are StatusBar concerns
+                // Model/session/branch are StatusBar concerns. No `blocks`
+                // change, so skip the cache-invalidation bump below — it would
+                // force an O(transcript) line-height rebuild for nothing.
+                return TranscriptAction::None;
             }
             AgentEvent::MessageReceived { role, content } => {
                 if role == "user" {
@@ -184,10 +187,20 @@ impl TranscriptState {
                 self.streaming_assistant
                     .get_or_insert_with(String::new)
                     .push_str(delta);
+                // Streaming text is measured via `streaming_assistant_line_count`
+                // (outside the BlockLineCache), so committed blocks/cached
+                // heights are unaffected. Returning here skips the generation
+                // bump — without this, every token during streaming rebuilds the
+                // entire committed-blocks line-height cache at O(total
+                // transcript text), which is the dominant per-frame cost in long
+                // sessions and starves the input loop.
+                return TranscriptAction::None;
             }
             AgentEvent::ReasoningStreamed { delta } => {
                 let s = self.streaming_reasoning.get_or_insert(String::new());
                 s.push_str(delta);
+                // See TokensStreamed: reasoning is measured outside the cache.
+                return TranscriptAction::None;
             }
             AgentEvent::ToolCallStarted {
                 call_id,
@@ -356,11 +369,14 @@ impl TranscriptState {
             | AgentEvent::ContextStatsUpdated { .. }
             | AgentEvent::BusyStateChanged { .. }
             | AgentEvent::Checkpoint { .. } => {
-                // StatusBar concerns — ignore
+                // StatusBar concerns. No `blocks` change — skip cache bump.
+                return TranscriptAction::None;
             }
             _ => {}
         }
-        // Bump generation so cached block-line-heights are invalidated.
+        // Reaching here means the matched branch mutated `self.blocks` (the
+        // non-mutating branches early-return above), so invalidate the cached
+        // committed-block line heights.
         self.blocks_generation = self.blocks_generation.wrapping_add(1);
         TranscriptAction::None
     }
@@ -878,5 +894,75 @@ impl TranscriptState {
                     .title(Span::styled(title, Style::default().fg(theme::MUTED))),
             )
             .style(Style::default().bg(theme::BG))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nca_common::event::{AgentEvent, BusyState};
+
+    // The BlockLineCache rebuild is O(total committed transcript text). During
+    // streaming the agent emits one TokensStreamed/ReasoningStreamed per token,
+    // and these only append to `streaming_assistant`/`streaming_reasoning`
+    // (measured outside the cache). If they bump `blocks_generation`, every
+    // token forces a full rebuild — the dominant per-frame cost in long
+    // sessions, which starves the input loop and makes typing feel frozen.
+    // This invariant pins the fix: streaming/status events must NOT invalidate
+    // the committed-blocks cache, while real block mutations still must.
+    #[test]
+    fn streaming_and_status_events_skip_block_cache_invalidation() {
+        let mut t = TranscriptState::new();
+
+        // Seed one committed block so the cache has something to track.
+        t.apply_event(&AgentEvent::MessageReceived {
+            role: "assistant".into(),
+            content: "hello world".into(),
+        });
+        let gen_after_commit = t.blocks_generation;
+        assert!(
+            !t.blocks.is_empty(),
+            "fixture setup: a committed message must produce a block"
+        );
+
+        // None of these mutate `blocks` → generation must stay put.
+        t.apply_event(&AgentEvent::SessionStarted {
+            session_id: "s".into(),
+            workspace: "/tmp".into(),
+            model: "m".into(),
+        });
+        t.apply_event(&AgentEvent::TokensStreamed {
+            delta: "foo ".into(),
+        });
+        t.apply_event(&AgentEvent::TokensStreamed {
+            delta: "bar".into(),
+        });
+        t.apply_event(&AgentEvent::ReasoningStreamed {
+            delta: "hmm".into(),
+        });
+        t.apply_event(&AgentEvent::CostUpdated {
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_read_tokens: 0,
+            estimated_cost_usd: 0.0,
+        });
+        t.apply_event(&AgentEvent::BusyStateChanged {
+            state: BusyState::Thinking,
+        });
+        assert_eq!(
+            t.blocks_generation, gen_after_commit,
+            "streaming/status events must not invalidate the blocks line-height cache"
+        );
+
+        // A real committed block must still invalidate the cache.
+        t.apply_event(&AgentEvent::MessageReceived {
+            role: "user".into(),
+            content: "next turn".into(),
+        });
+        assert_eq!(
+            t.blocks_generation,
+            gen_after_commit.wrapping_add(1),
+            "committed block changes must still invalidate the cache"
+        );
     }
 }
