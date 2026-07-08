@@ -276,11 +276,16 @@ impl PluginHost {
         };
 
         // Send Config message.
+        let global_skills_dir = nca_common::config::xdg_config_dir()
+            .map(|d| d.join("nca").join("skills"))
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let config_wire = plugin_protocol::build_config(
             "0",
             workspace_root.to_str().unwrap_or("."),
             session_id,
             permission_mode,
+            &global_skills_dir,
         );
         {
             let mut stdin_guard = stdin.lock().await;

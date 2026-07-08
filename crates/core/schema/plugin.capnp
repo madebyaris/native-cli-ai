@@ -65,9 +65,10 @@ struct Hello {
 
 # Host → Plugin: sent after validating Hello.
 struct Config {
-    workspaceRoot  @0 :Text;
-    sessionId      @1 :Text;
-    permissionMode @2 :Text;
+    workspaceRoot   @0 :Text;
+    sessionId       @1 :Text;
+    permissionMode  @2 :Text;
+    globalSkillsDir @3 :Text;   # $XDG_CONFIG_HOME/nca/skills, empty if unresolved
 }
 
 # ═══════════════════════════════════════════════════════════════════════════

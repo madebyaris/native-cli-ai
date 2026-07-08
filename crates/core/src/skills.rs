@@ -41,17 +41,23 @@ impl SkillCatalog {
         skill_directories: &[PathBuf],
     ) -> Result<Vec<Skill>, String> {
         let mut roots = Vec::new();
-        if let Some(config_dir) = nca_common::config::xdg_config_dir() {
-            roots.push(config_dir.join("nca/skills"));
-            roots.push(config_dir.join("claude/skills"));
-        }
 
+        // Workspace-local skill directories take precedence over the global
+        // fallback so per-project skills override the shared defaults. The
+        // scan below keeps the first skill seen for a given command, so order
+        // here defines priority (AGENTS.md, parsed earlier, wins overall).
         for dir in skill_directories {
             if dir.is_absolute() {
                 roots.push(dir.clone());
             } else {
                 roots.push(workspace_root.join(dir));
             }
+        }
+
+        // Global fallback: ~/.config/nca/skills and ~/.config/claude/skills.
+        if let Some(config_dir) = nca_common::config::xdg_config_dir() {
+            roots.push(config_dir.join("nca/skills"));
+            roots.push(config_dir.join("claude/skills"));
         }
 
         let mut skills = Vec::new();

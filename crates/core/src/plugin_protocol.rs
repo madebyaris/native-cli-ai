@@ -148,12 +148,14 @@ pub fn build_config(
     workspace_root: &str,
     session_id: &str,
     permission_mode: &str,
+    global_skills_dir: &str,
 ) -> Vec<u8> {
     build_message(id, |body| {
         let mut cfg = body.reborrow().init_config();
         cfg.set_workspace_root(workspace_root);
         cfg.set_session_id(session_id);
         cfg.set_permission_mode(permission_mode);
+        cfg.set_global_skills_dir(global_skills_dir);
     })
 }
 
@@ -203,7 +205,13 @@ mod tests {
 
     #[test]
     fn config_message_round_trip() {
-        let wire = build_config("1", "/workspace", "session-1", "default");
+        let wire = build_config(
+            "1",
+            "/workspace",
+            "session-1",
+            "default",
+            "/home/user/.config/nca/skills",
+        );
         let mut reader = io::BufReader::new(&wire[..]);
         let result = read_message_then(&mut reader, |msg| {
             assert_eq!(msg.get_id()?, "1");
@@ -214,6 +222,7 @@ mod tests {
                     assert_eq!(c.get_workspace_root()?, "/workspace");
                     assert_eq!(c.get_session_id()?, "session-1");
                     assert_eq!(c.get_permission_mode()?, "default");
+                    assert_eq!(c.get_global_skills_dir()?, "/home/user/.config/nca/skills");
                 }
                 _ => panic!("expected Config"),
             }
