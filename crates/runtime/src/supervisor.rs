@@ -163,6 +163,31 @@ fn persist_allow_pattern(workspace_root: &Path, pattern: String) {
     }));
 }
 
+/// Persist the current set of mounted paths to the workspace config file.
+///
+/// Mirrors [`persist_allow_pattern`]: loads the freshest config from disk,
+/// updates `extra_paths` to match the live `RealFs` state, and writes back
+/// via the diff algorithm so only the workspace-local file is touched.
+fn persist_mounted_paths(workspace_root: &Path, paths: Vec<PathBuf>) {
+    let root = workspace_root.to_path_buf();
+    std::mem::drop(tokio::runtime::Handle::current().spawn_blocking(move || {
+        match nca_common::config::NcaConfig::load_for_workspace(&root) {
+            Ok(mut config) => {
+                if config.extra_paths != paths {
+                    config.extra_paths = paths;
+                    tracing::debug!("persisted mounted paths to workspace config");
+                    if let Err(e) = config.save_workspace_file(&root) {
+                        tracing::warn!("failed to persist mounted paths: {e}");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("failed to load config for mount persistence: {e}");
+            }
+        }
+    }));
+}
+
 impl Supervisor {
     /// Create a new supervised session. This sets up the agent loop, IPC server,
     /// event channels, and persists initial session metadata.
@@ -211,6 +236,14 @@ impl Supervisor {
         let provider = build_provider(&config)?;
         let fs: Arc<dyn WorkspaceFs> = Arc::new(RealFs::new(workspace_root.clone()));
         let fs_for_supervisor = fs.clone();
+        // Restore mounts persisted in the workspace-local config. A missing or
+        // inaccessible path is logged but does not abort startup — the user can
+        // re-run `/mount` once the path is available again.
+        for extra in &config.extra_paths {
+            if let Err(e) = fs_for_supervisor.mount_path(extra) {
+                tracing::warn!("failed to restore mount {}: {e}", extra.display());
+            }
+        }
         let mut tools = if cfg.safe_mode {
             ToolRegistry::with_default_readonly_tools(fs.clone(), config.web.clone())
         } else {
@@ -1034,12 +1067,16 @@ impl Supervisor {
 
     /// Mount an additional directory so tools can access files outside the workspace root.
     pub fn mount_path(&self, path: &Path) -> Result<(), String> {
-        self.fs.mount_path(path).map_err(|e| e.to_string())
+        self.fs.mount_path(path).map_err(|e| e.to_string())?;
+        persist_mounted_paths(&self.workspace_root, self.fs.mounted_paths());
+        Ok(())
     }
 
     /// Unmount a previously mounted directory.
     pub fn unmount_path(&self, path: &Path) -> Result<(), String> {
-        self.fs.unmount_path(path).map_err(|e| e.to_string())
+        self.fs.unmount_path(path).map_err(|e| e.to_string())?;
+        persist_mounted_paths(&self.workspace_root, self.fs.mounted_paths());
+        Ok(())
     }
 
     /// List currently mounted extra paths.

@@ -22,6 +22,11 @@ pub struct NcaConfig {
     /// system prompt, and tool gating.  Keyed by profile name (e.g. "code-reviewer").
     #[serde(default)]
     pub agents: BTreeMap<String, AgentProfileConfig>,
+    /// Directories mounted as additional allowed roots via `/mount`. Persisted
+    /// to the workspace-local config so mounts survive restarts. Paths are
+    /// canonical (symlinks resolved) at the time they were mounted.
+    #[serde(default)]
+    pub extra_paths: Vec<PathBuf>,
 }
 
 impl NcaConfig {
@@ -190,6 +195,10 @@ impl NcaConfig {
         }
         if let Some(agents) = partial.agents {
             self.merge_agents(agents);
+        }
+
+        if let Some(extra_paths) = partial.extra_paths {
+            self.extra_paths = extra_paths;
         }
 
         if provider_changed {
@@ -1822,6 +1831,7 @@ struct PartialNcaConfig {
     web: Option<PartialWebConfig>,
     ui: Option<PartialUiConfig>,
     agents: Option<BTreeMap<String, PartialAgentProfileConfig>>,
+    extra_paths: Option<Vec<PathBuf>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -2851,5 +2861,128 @@ provider = "deepseek"
         let tester = config.agent_profile("tester").unwrap();
         assert_eq!(tester.provider, Some(ProviderKind::DeepSeek));
         assert!(tester.model.is_none());
+    }
+
+    #[test]
+    fn extra_paths_parse_and_merge() {
+        let toml_str = r#"
+extra_paths = ["/home/user/projects", "/opt/data"]
+"#;
+        let partial: PartialNcaConfig = toml::from_str(toml_str).expect("parse");
+        let mut config = NcaConfig::default();
+        assert!(config.extra_paths.is_empty(), "default has no extra paths");
+        config.merge(partial);
+
+        assert_eq!(
+            config.extra_paths,
+            vec![
+                PathBuf::from("/home/user/projects"),
+                PathBuf::from("/opt/data"),
+            ]
+        );
+    }
+
+    #[test]
+    fn extra_paths_roundtrip_via_workspace_file() {
+        let tmp_home = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::set(&[
+            ("HOME", Some(tmp_home.path().to_str().unwrap())),
+            ("MINIMAX_API_KEY", None),
+            ("OPENAI_API_KEY", None),
+            ("NCA_EDITOR", None),
+            ("EDITOR", None),
+        ]);
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Save config with extra_paths set.
+        let mut config = NcaConfig::default();
+        config.extra_paths = vec![
+            PathBuf::from("/home/user/projects"),
+            PathBuf::from("/opt/data"),
+        ];
+        config.save_workspace_file(dir.path()).expect("save");
+
+        // The local file should contain extra_paths (diff against empty default).
+        let local_path = workspace_config_path(dir.path());
+        let raw = std::fs::read_to_string(&local_path).expect("read local config");
+        assert!(
+            raw.contains("extra_paths"),
+            "persisted config should contain extra_paths: {raw}"
+        );
+
+        // Reload and verify the mount list survives the roundtrip.
+        let reloaded = NcaConfig::load_for_workspace(dir.path()).expect("reload");
+        assert_eq!(reloaded.extra_paths, config.extra_paths);
+    }
+
+    #[test]
+    fn empty_extra_paths_not_persisted() {
+        let tmp_home = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::set(&[
+            ("HOME", Some(tmp_home.path().to_str().unwrap())),
+            ("MINIMAX_API_KEY", None),
+            ("OPENAI_API_KEY", None),
+            ("NCA_EDITOR", None),
+            ("EDITOR", None),
+        ]);
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Default config has empty extra_paths — diff against defaults is empty.
+        let config = NcaConfig::default();
+        config.save_workspace_file(dir.path()).expect("save");
+
+        let local_path = workspace_config_path(dir.path());
+        assert!(
+            !local_path.exists(),
+            "empty extra_paths should not be persisted"
+        );
+    }
+
+    /// Regression: `/unmount` must remove the path from the persisted config,
+    /// not just from the in-memory `RealFs` state. `persist_mounted_paths`
+    /// replaces `extra_paths` wholesale (not append), so a subsequent save
+    /// with a shorter list must overwrite — not accumulate.
+    #[test]
+    fn extra_paths_unmount_removes_from_persisted_config() {
+        let tmp_home = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::set(&[
+            ("HOME", Some(tmp_home.path().to_str().unwrap())),
+            ("MINIMAX_API_KEY", None),
+            ("OPENAI_API_KEY", None),
+            ("NCA_EDITOR", None),
+            ("EDITOR", None),
+        ]);
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Step 1: simulate /mount of two paths.
+        let mut config = NcaConfig::default();
+        config.extra_paths = vec![
+            PathBuf::from("/home/user/projects"),
+            PathBuf::from("/opt/data"),
+        ];
+        config.save_workspace_file(dir.path()).expect("save");
+
+        // Step 2: simulate /unmount of one path — load fresh, overwrite the
+        // field with the live mounted_paths() snapshot, save back.
+        let mut reloaded = NcaConfig::load_for_workspace(dir.path()).expect("reload");
+        reloaded.extra_paths = vec![PathBuf::from("/home/user/projects")];
+        reloaded
+            .save_workspace_file(dir.path())
+            .expect("save after unmount");
+
+        // Step 3: reload and verify the unmounted path is gone, not lingering.
+        let after = NcaConfig::load_for_workspace(dir.path()).expect("reload after unmount");
+        assert_eq!(
+            after.extra_paths,
+            vec![PathBuf::from("/home/user/projects")],
+            "unmounted path must be removed from persisted config"
+        );
+
+        // And the local file must no longer reference the unmounted path.
+        let raw = std::fs::read_to_string(workspace_config_path(dir.path())).expect("read");
+        assert!(
+            !raw.contains("/opt/data"),
+            "unmounted path must not linger in config file: {raw}"
+        );
     }
 }
