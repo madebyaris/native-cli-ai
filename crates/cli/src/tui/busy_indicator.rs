@@ -10,6 +10,13 @@ const STREAMING_FRAMES: &[&str] = &["▌▌", "▍▍", "▎▎", "▏▏"];
 const TOOL_FRAMES: &[&str] = &["⚙", "⚙", "⚙", "⚙"];
 const APPROVAL_FRAMES: &[&str] = &["◆", "◆", "◆", "◆"];
 
+/// Cadence at which the busy indicator advances one frame.
+///
+/// Also the redraw cadence for an Animation Frame while busy (see
+/// `NcaModel::tick`): spinner frame rate and redraw rate share this single
+/// source of truth so they can never drift apart.
+pub(crate) const ANIMATION_FRAME: std::time::Duration = std::time::Duration::from_millis(120);
+
 /// Get the color for a given busy state.
 pub fn color_for_state(state: BusyState) -> Color {
     match state {
@@ -32,7 +39,7 @@ pub fn frame_for_state(state: BusyState, elapsed_ms: u128) -> &'static str {
         _ => return "●",
     };
 
-    let frame_idx = (elapsed_ms / 120) as usize % frames.len();
+    let frame_idx = (elapsed_ms / ANIMATION_FRAME.as_millis()) as usize % frames.len();
     frames[frame_idx]
 }
 

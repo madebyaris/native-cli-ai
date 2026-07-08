@@ -20,9 +20,11 @@ use super::components::{
 use super::feedback::TuiFeedbackMsg;
 use super::msg::Msg;
 use crate::tui::app::TuiCmd;
+use crate::tui::busy_indicator;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 
 // ── Side-effect channels ─────────────────────────────────────────
@@ -69,6 +71,8 @@ pub(crate) struct NcaModel {
     pub(crate) popup_open: bool,
     /// Terminal size (updated on Resize events).
     pub(crate) size: (u16, u16),
+    /// Timestamp of the last Animation Frame redraw (time-based dirty source).
+    pub(crate) last_animation_draw: Instant,
 }
 
 impl NcaModel {
@@ -87,6 +91,7 @@ impl NcaModel {
             quit: false,
             popup_open: false,
             size: (80, 24),
+            last_animation_draw: Instant::now(),
         }
     }
 
@@ -140,7 +145,19 @@ impl NcaModel {
             return Ok(());
         }
 
-        // 5. Render if dirty
+        // 5. Animation Frame: while busy, the Turn Timer and busy indicator
+        //    are time-dependent widgets. When no events arrive (e.g. the LLM
+        //    is thinking with no tokens yet), redraw at the spinner cadence so
+        //    they keep animating. Idle is static — no periodic redraw, keeping
+        //    idle CPU under the <1% target.
+        if self.components.status_bar.is_busy()
+            && self.last_animation_draw.elapsed() >= busy_indicator::ANIMATION_FRAME
+        {
+            self.redraw = true;
+            self.last_animation_draw = Instant::now();
+        }
+
+        // 6. Render if dirty
         if self.redraw {
             self.view(terminal);
         }

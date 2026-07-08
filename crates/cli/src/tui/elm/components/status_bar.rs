@@ -33,7 +33,9 @@ pub(crate) struct StatusBarData {
     pub busy_state_since: Instant,
     pub active_approval: bool,
     pub active_question: bool,
-    pub started: Instant,
+    /// Start of the current busy period (stamped on Idle→non-Idle). Drives the
+    /// Turn Timer; distinct from `busy_state_since` (per-state, for the spinner).
+    pub busy_since: Instant,
 }
 
 impl Default for StatusBarData {
@@ -52,7 +54,7 @@ impl Default for StatusBarData {
             busy_state_since: Instant::now(),
             active_approval: false,
             active_question: false,
-            started: Instant::now(),
+            busy_since: Instant::now(),
         }
     }
 }
@@ -104,10 +106,21 @@ impl StatusBar {
     }
 
     pub(crate) fn set_busy(&mut self, state: BusyState) {
+        let was_idle = self.data.current_busy_state == BusyState::Idle;
+        let now = std::time::Instant::now();
         self.data.current_busy_state = state;
         if state == BusyState::Idle {
-            self.data.busy_state_since = std::time::Instant::now();
+            self.data.busy_state_since = now;
+        } else if was_idle {
+            // Idle → non-Idle: a new busy period begins; stamp the Turn Timer.
+            self.data.busy_since = now;
         }
+    }
+
+    /// Whether the UI is currently busy (non-Idle) — drives the Animation Frame
+    /// cadence in `NcaModel::tick`.
+    pub(crate) fn is_busy(&self) -> bool {
+        self.data.current_busy_state != BusyState::Idle
     }
 
     pub(crate) fn update_cost(&mut self, input: u64, output: u64, cost: f64) {
@@ -169,8 +182,12 @@ impl StatusBar {
             )
         };
 
-        // Timer
-        let elapsed = d.started.elapsed().as_secs();
+        // Turn Timer: elapsed in the current busy period; 00:00 while idle.
+        let elapsed = if d.current_busy_state == BusyState::Idle {
+            0
+        } else {
+            d.busy_since.elapsed().as_secs()
+        };
         let time_span = Span::styled(
             format!("{:02}:{:02}", elapsed / 60, elapsed % 60),
             Style::default().fg(theme::MUTED),
