@@ -5,7 +5,7 @@
 //! - **Direct**: built-in Rust extensions (zero overhead).
 //! - **`RemotePlugin`** (in `runtime::plugin_host`): external Cap'n Proto RPC adapter.
 //!
-//! Hook composition semantics (see `CONTEXT.md`):
+//! Hook composition semantics (see `docs/context/plugin-system/CONTEXT.md`):
 //! - **Transformation hooks**: sequential accumulation — all plugins run in order,
 //!   each receives the output from the previous.
 //! - **Decision hooks**: first-responder wins — first definitive answer short-circuits.

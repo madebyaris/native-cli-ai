@@ -28,3 +28,7 @@ Thumbs.db
 
 # for testing agent build stuff
 for-test/
+
+docs/context/
+CONTEXT-MAP.md
+CONTEXT.md
