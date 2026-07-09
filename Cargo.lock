@@ -2019,7 +2019,7 @@ dependencies = [
 
 [[package]]
 name = "nca-autoresearch"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2039,7 +2039,7 @@ dependencies = [
 
 [[package]]
 name = "nca-cli"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2076,7 +2076,7 @@ dependencies = [
 
 [[package]]
 name = "nca-common"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "chrono",
  "serde",
@@ -2090,7 +2090,7 @@ dependencies = [
 
 [[package]]
 name = "nca-core"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "async-trait",
  "base64",
@@ -2118,7 +2118,7 @@ dependencies = [
 
 [[package]]
 name = "nca-runtime"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "async-trait",
