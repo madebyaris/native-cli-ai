@@ -7,6 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthChar;
 
+use crate::format::format_duration;
 use crate::tui::state::DisplayBlock;
 
 use super::searchable_list::theme;
@@ -182,7 +183,11 @@ pub(super) fn block_line_count(block: &DisplayBlock, width: usize) -> usize {
     match block {
         DisplayBlock::User(content) => 2 + wrap_text(content, w).len() + 1,
         DisplayBlock::Assistant(content) => 2 + wrap_text(content, w).len() + 1,
-        DisplayBlock::Thinking { content, expanded } => {
+        DisplayBlock::Thinking {
+            content,
+            expanded,
+            duration_ms: _,
+        } => {
             let all = wrap_text(content, w);
             let total = all.len();
             let preview = 3usize;
@@ -251,6 +256,7 @@ pub(super) fn block_line_count(block: &DisplayBlock, width: usize) -> usize {
             n
         }
         DisplayBlock::ErrorLine(_s) => 1, // truncated to width in render
+        DisplayBlock::TurnInfo { .. } => 1,
     }
 }
 
@@ -676,6 +682,7 @@ pub(super) fn emit_block_lines(
             detail,
             full_output,
             expanded,
+            duration_ms,
         } => {
             let icon = "✓";
             let st = Style::default().fg(theme::SUCCESS);
@@ -701,6 +708,10 @@ pub(super) fn emit_block_lines(
                     ),
                     Span::styled(
                         format!(" — {}", truncate_to_width(detail, detail_budget)),
+                        Style::default().fg(theme::MUTED),
+                    ),
+                    Span::styled(
+                        format!(" · {}", format_duration(*duration_ms)),
                         Style::default().fg(theme::MUTED),
                     ),
                 ]),
@@ -843,7 +854,11 @@ pub(super) fn emit_block_lines(
             );
             push(Line::default(), None);
         }
-        DisplayBlock::Thinking { content, expanded } => {
+        DisplayBlock::Thinking {
+            content,
+            expanded,
+            duration_ms,
+        } => {
             let all_l: Vec<String> = wrap_text(content, w);
             let total = all_l.len();
             let is_exp = *expanded;
@@ -853,13 +868,17 @@ pub(super) fn emit_block_lines(
             } else {
                 preview
             };
-            push(
-                Line::from(Span::styled(
-                    " 💭 thinking ",
+            let mut title_spans = vec![Span::styled(
+                " 💭 thinking ",
+                Style::default().fg(theme::MUTED),
+            )];
+            if let Some(ms) = duration_ms {
+                title_spans.push(Span::styled(
+                    format!(" · {}", format_duration(*ms)),
                     Style::default().fg(theme::MUTED),
-                )),
-                None,
-            );
+                ));
+            }
+            push(Line::from(title_spans), None);
             for tl in &all_l[..show] {
                 push(
                     Line::from(Span::styled(tl.clone(), Style::default().fg(theme::MUTED))),
@@ -888,6 +907,15 @@ pub(super) fn emit_block_lines(
                 Line::from(Span::styled(
                     format!(" ✗ {}", truncate_to_width(s, budget)),
                     Style::default().fg(theme::ERROR),
+                )),
+                None,
+            );
+        }
+        DisplayBlock::TurnInfo { duration_ms } => {
+            push(
+                Line::from(Span::styled(
+                    format!("⏱ turn completed · {}", format_duration(*duration_ms)),
+                    Style::default().fg(theme::MUTED),
                 )),
                 None,
             );
@@ -927,13 +955,19 @@ pub(super) fn emit_streaming_reasoning_lines(
         hits.push(hit);
         emitted += 1;
     };
-    push(
-        Line::from(vec![
-            Span::styled(" 💭 thinking ", Style::default().fg(theme::MUTED)),
-            Span::styled("…", Style::default().fg(theme::MUTED)),
-        ]),
-        None,
-    );
+    let mut title = vec![
+        Span::styled(" 💭 thinking ", Style::default().fg(theme::MUTED)),
+        Span::styled("…", Style::default().fg(theme::MUTED)),
+    ];
+    // Live elapsed timer while thinking; redrawn at the busy animation cadence.
+    if let Some(start) = state.reasoning_started_at {
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        title.push(Span::styled(
+            format!(" · {}", format_duration(elapsed_ms)),
+            Style::default().fg(theme::MUTED),
+        ));
+    }
+    push(Line::from(title), None);
     for rl in &all_rl[..show_rl] {
         push(
             Line::from(Span::styled(rl.clone(), Style::default().fg(theme::MUTED))),

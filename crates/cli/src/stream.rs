@@ -2,6 +2,7 @@
 //!
 //! This module provides streaming event rendering with Claude Code-inspired styling.
 
+use crate::format::format_duration;
 use crate::ipc_pending::{ApprovalPendingMap, QuestionPendingMap};
 use colored::Colorize;
 use nca_common::event::{AgentEvent, EventEnvelope, InteractiveQuestionPayload, QuestionSelection};
@@ -76,13 +77,25 @@ pub enum StreamMode {
 }
 
 /// Real-time streaming stats
-#[derive(Clone)]
 struct StreamStats {
     input_tokens: Arc<AtomicU64>,
     output_tokens: Arc<AtomicU64>,
     estimated_cost: Arc<AtomicU64>,
-    #[allow(dead_code)]
     start_time: Instant,
+    reasoning_started_at: std::sync::Mutex<Option<Instant>>,
+}
+
+impl Clone for StreamStats {
+    fn clone(&self) -> Self {
+        Self {
+            input_tokens: self.input_tokens.clone(),
+            output_tokens: self.output_tokens.clone(),
+            estimated_cost: self.estimated_cost.clone(),
+            start_time: self.start_time,
+            // Mutex is not Clone; each clone starts with its own None.
+            reasoning_started_at: std::sync::Mutex::new(None),
+        }
+    }
 }
 
 impl StreamStats {
@@ -92,6 +105,7 @@ impl StreamStats {
             output_tokens: Arc::new(AtomicU64::new(0)),
             estimated_cost: Arc::new(AtomicU64::new(0)),
             start_time: Instant::now(),
+            reasoning_started_at: std::sync::Mutex::new(None),
         }
     }
 
@@ -117,6 +131,7 @@ impl StreamStats {
         self.estimated_cost.load(Ordering::Relaxed) as f64 / 100.0
     }
 
+    #[allow(dead_code)]
     #[allow(dead_code)]
     fn elapsed_secs(&self) -> u64 {
         self.start_time.elapsed().as_secs()
@@ -292,6 +307,17 @@ mod theme {
 
 /// Render a single event with Claude Code-like styling
 fn render_event(event: &AgentEvent, stats: &StreamStats) {
+    // Flush pending reasoning duration when a non-reasoning event arrives.
+    if !matches!(event, AgentEvent::ReasoningStreamed { .. })
+        && let Some(start) = stats.reasoning_started_at.lock().unwrap().take()
+    {
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        println!(
+            "  {}",
+            format!("thought · {}", format_duration(elapsed_ms)).color(theme::TEXT_DIM)
+        );
+    }
+
     match event {
         AgentEvent::SessionStarted {
             session_id: _,
@@ -312,6 +338,11 @@ fn render_event(event: &AgentEvent, stats: &StreamStats) {
             stats.record_output_token();
         }
         AgentEvent::ReasoningStreamed { delta } => {
+            // Record start time on first reasoning delta for UI-level timing.
+            let mut guard = stats.reasoning_started_at.lock().unwrap();
+            if guard.is_none() {
+                *guard = Some(Instant::now());
+            }
             // Dim reasoning output in human mode (not counted as output tokens).
             print!("{}", delta.color(theme::TEXT_DIM));
         }
@@ -331,14 +362,20 @@ fn render_event(event: &AgentEvent, stats: &StreamStats) {
                 tool.to_uppercase().color(theme::TOOL_BG)
             );
         }
-        AgentEvent::ToolCallCompleted { call_id: _, output } => {
+        AgentEvent::ToolCallCompleted {
+            call_id: _,
+            output,
+            duration_ms,
+        } => {
             print!("{}", theme::CLEAR_LINE);
             println!();
+            let dur = format_duration(*duration_ms);
             if output.success {
                 println!(
-                    "  {} {}",
+                    "  {} {} {}",
                     "✓".color(theme::SUCCESS),
-                    "Tool completed".color(theme::TEXT_DIM)
+                    "Tool completed".color(theme::TEXT_DIM),
+                    format!("· {dur}").color(theme::TEXT_DIM)
                 );
             } else {
                 let label = output
@@ -361,9 +398,10 @@ fn render_event(event: &AgentEvent, stats: &StreamStats) {
                         }
                     });
                 println!(
-                    "  {} {}",
+                    "  {} {} {}",
                     "✗".color(theme::ERROR),
-                    label.color(theme::ERROR)
+                    label.color(theme::ERROR),
+                    format!("· {dur}").color(theme::TEXT_DIM)
                 );
             }
         }
@@ -576,6 +614,13 @@ fn render_event(event: &AgentEvent, stats: &StreamStats) {
                     println!("{}", line.color(theme::TEXT));
                 }
             }
+        }
+        AgentEvent::TurnCompleted { duration_ms } => {
+            let dur = format_duration(*duration_ms);
+            println!(
+                "  {}",
+                format!("turn completed · {dur}").color(theme::TEXT_DIM)
+            );
         }
         _ => {}
     }

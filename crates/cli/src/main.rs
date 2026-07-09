@@ -1,6 +1,7 @@
 mod approval_prompts;
 mod cli_index;
 mod file_mentions;
+mod format;
 mod image_attach;
 mod ipc_pending;
 mod prompt;

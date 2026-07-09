@@ -1,6 +1,8 @@
 //! Transcript component — renders DisplayBlock items with virtual scrolling,
 //! text selection, streaming text, and collapsible blocks.
 
+use std::time::Instant;
+
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -133,6 +135,9 @@ pub(crate) struct TranscriptState {
 
     // ── Active question for answer routing ──
     pub(crate) _active_question: Option<InteractiveQuestionPayload>,
+
+    // ── UI-layer timer for reasoning/thinking blocks ──
+    pub(crate) reasoning_started_at: Option<Instant>,
 }
 
 impl TranscriptState {
@@ -151,6 +156,7 @@ impl TranscriptState {
             line_cache: BlockLineCache::new(),
             last_visible_hits: Vec::new(),
             _active_question: None,
+            reasoning_started_at: None,
         }
     }
 
@@ -175,9 +181,14 @@ impl TranscriptState {
                     if let Some(reasoning) = self.streaming_reasoning.take()
                         && !reasoning.trim().is_empty()
                     {
+                        let duration_ms = self
+                            .reasoning_started_at
+                            .take()
+                            .map(|t| t.elapsed().as_millis() as u64);
                         self.blocks.push(DisplayBlock::Thinking {
                             content: reasoning,
                             expanded: false,
+                            duration_ms,
                         });
                     }
                     self.blocks.push(DisplayBlock::Assistant(content.clone()));
@@ -197,8 +208,12 @@ impl TranscriptState {
                 return TranscriptAction::None;
             }
             AgentEvent::ReasoningStreamed { delta } => {
-                let s = self.streaming_reasoning.get_or_insert(String::new());
+                let is_start = self.streaming_reasoning.is_none();
+                let s = self.streaming_reasoning.get_or_insert_with(String::new);
                 s.push_str(delta);
+                if is_start {
+                    self.reasoning_started_at = Some(Instant::now());
+                }
                 // See TokensStreamed: reasoning is measured outside the cache.
                 return TranscriptAction::None;
             }
@@ -214,7 +229,11 @@ impl TranscriptState {
                     input: format_tool_input_for_display(tool, input),
                 });
             }
-            AgentEvent::ToolCallCompleted { call_id, output } => {
+            AgentEvent::ToolCallCompleted {
+                call_id,
+                output,
+                duration_ms,
+            } => {
                 let ok = output.success;
                 // On failure, prefer the explicit error string; fall back to the
                 // tool's stdout/stderr output (e.g. run_validation leaves error
@@ -249,6 +268,7 @@ impl TranscriptState {
                         detail,
                         full_output,
                         expanded: false,
+                        duration_ms: *duration_ms,
                     };
                 } else {
                     self.blocks.push(DisplayBlock::ToolDone {
@@ -258,6 +278,7 @@ impl TranscriptState {
                         detail,
                         full_output,
                         expanded: false,
+                        duration_ms: *duration_ms,
                     });
                 }
             }
@@ -365,6 +386,11 @@ impl TranscriptState {
                     "Sub-agent {short}… done: {status}"
                 )));
             }
+            AgentEvent::TurnCompleted { duration_ms } => {
+                self.blocks.push(DisplayBlock::TurnInfo {
+                    duration_ms: *duration_ms,
+                });
+            }
             AgentEvent::CostUpdated { .. }
             | AgentEvent::ContextStatsUpdated { .. }
             | AgentEvent::BusyStateChanged { .. }
@@ -385,9 +411,14 @@ impl TranscriptState {
         if let Some(reasoning) = self.streaming_reasoning.take()
             && !reasoning.trim().is_empty()
         {
+            let duration_ms = self
+                .reasoning_started_at
+                .take()
+                .map(|t| t.elapsed().as_millis() as u64);
             self.blocks.push(DisplayBlock::Thinking {
                 content: reasoning,
                 expanded: false,
+                duration_ms,
             });
         }
         if let Some(s) = self.streaming_assistant.take()

@@ -12,6 +12,8 @@ pub enum DisplayBlock {
         content: String,
         /// Whether this thinking block is expanded (true = show full content).
         expanded: bool,
+        /// Elapsed wall-clock time for this thinking block (UI-layer timer).
+        duration_ms: Option<u64>,
     },
     ToolRunning {
         name: String,
@@ -33,11 +35,17 @@ pub enum DisplayBlock {
         full_output: String,
         /// Whether this tool block is expanded (true = show full output).
         expanded: bool,
+        /// Wall-clock duration of the tool call (from ToolCallCompleted event).
+        duration_ms: u64,
     },
     /// Interactive `ask_question` prompt (options + suggested answer).
     Question(InteractiveQuestionPayload),
     System(String),
     ErrorLine(String),
+    /// One-line turn-completion summary showing total turn duration.
+    TurnInfo {
+        duration_ms: u64,
+    },
 }
 
 #[derive(Debug, Clone)]

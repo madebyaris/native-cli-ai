@@ -85,6 +85,9 @@ pub enum AgentEvent {
     ToolCallCompleted {
         call_id: String,
         output: ToolResult,
+        /// Wall-clock execution time of this tool call in milliseconds.
+        #[serde(default)]
+        duration_ms: u64,
     },
     ApprovalRequested {
         call_id: String,
@@ -167,6 +170,12 @@ pub enum AgentEvent {
     /// Busy state transition (for animated indicator rendering).
     BusyStateChanged {
         state: BusyState,
+    },
+    /// A full turn completed — emitted once at the end of `run_turn` with the
+    /// total wall-clock duration (user input → final reply) in milliseconds.
+    TurnCompleted {
+        #[serde(default)]
+        duration_ms: u64,
     },
 }
 

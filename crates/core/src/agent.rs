@@ -2,11 +2,11 @@ use nca_common::event::{AgentEvent, BusyState};
 use nca_common::message::{ContentPart, ImageAttachment, Message, MessageToolCall};
 use nca_common::tool::{ToolCall, ToolDefinition};
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::approval::ApprovalPolicy;
 use crate::cost::CostTracker;
@@ -29,6 +29,8 @@ pub struct AgentLoop {
     checkpoint_interval: u32,
     cancel_flag: Arc<AtomicBool>,
     hooks: Option<HookRunner>,
+    /// Start instant per pending tool call_id, for duration tracking.
+    tool_start_times: HashMap<String, Instant>,
 }
 
 impl AgentLoop {
@@ -57,6 +59,7 @@ impl AgentLoop {
             checkpoint_interval,
             cancel_flag: Arc::new(AtomicBool::new(false)),
             hooks,
+            tool_start_times: HashMap::new(),
         }
     }
 
@@ -78,6 +81,7 @@ impl AgentLoop {
         workspace_root: &Path,
         attachments: &[ImageAttachment],
     ) -> Result<String, ProviderError> {
+        let turn_start = Instant::now();
         self.cancel_flag.store(false, Ordering::SeqCst);
         let user_msg = if attachments.is_empty() {
             Message::user(user_input)
@@ -119,6 +123,10 @@ impl AgentLoop {
             self.messages.pop();
         }
 
+        self.emit(AgentEvent::TurnCompleted {
+            duration_ms: turn_start.elapsed().as_millis() as u64,
+        })
+        .await;
         self.emit(AgentEvent::BusyStateChanged {
             state: BusyState::Idle,
         })
@@ -227,6 +235,8 @@ impl AgentLoop {
                         self.emit(AgentEvent::ReasoningStreamed { delta }).await;
                     }
                     StreamChunk::ToolUse(call) => {
+                        self.tool_start_times
+                            .insert(call.id.clone(), Instant::now());
                         self.emit(AgentEvent::ToolCallStarted {
                             call_id: call.id.clone(),
                             tool: call.name.clone(),
@@ -375,6 +385,11 @@ impl AgentLoop {
             }
 
             for result in pipeline.results {
+                let duration_ms = self
+                    .tool_start_times
+                    .remove(&result.call_id)
+                    .map(|t| t.elapsed().as_millis() as u64)
+                    .unwrap_or(0);
                 self.messages.push(Message::tool(
                     result.call_id.clone(),
                     format_tool_result(&result),
@@ -382,6 +397,7 @@ impl AgentLoop {
                 self.emit(AgentEvent::ToolCallCompleted {
                     call_id: result.call_id.clone(),
                     output: result,
+                    duration_ms,
                 })
                 .await;
             }
