@@ -8,6 +8,7 @@ use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 
 use super::anthropic_compat::{anthropic_request_body, map_provider_error, spawn_anthropic_stream};
 use super::minimax_vlm::{materialize_minimax_user_images, minimax_api_origin};
+use super::openai_compat::truncate_bytes_safe;
 use super::{Provider, ProviderError, StreamChunk};
 
 /// MiniMax provider using the Anthropic-compatible endpoint.
@@ -163,7 +164,7 @@ impl Provider for MiniMaxProvider {
                 provider = "minimax",
                 model = %model,
                 http_status = %status,
-                response_preview = %&body_text[..body_text.len().min(500)],
+                response_preview = %truncate_bytes_safe(&body_text, 500),
                 "provider_http_error"
             );
             return Err(map_provider_error(status, body_text));

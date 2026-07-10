@@ -1,5 +1,5 @@
 use nca_common::event::{AgentEvent, BusyState};
-use nca_common::message::{ContentPart, ImageAttachment, Message, MessageToolCall};
+use nca_common::message::{ContentPart, ImageAttachment, Message, MessageToolCall, Role};
 use nca_common::tool::{ToolCall, ToolDefinition};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -185,6 +185,11 @@ impl AgentLoop {
             self.provider
                 .prepare_messages_for_request(&mut self.messages, workspace_root)
                 .await?;
+            // Repair any orphaned `tool_calls` left by a previously interrupted
+            // turn (budget/pipeline error) so strict providers like DeepSeek don't
+            // reject the request with "tool_calls must be followed by tool
+            // messages". Persisted to `self.messages` so resumed sessions stay valid.
+            sanitize_tool_call_pairs(&mut self.messages);
             let mut stream = self
                 .provider
                 .chat(
@@ -479,6 +484,65 @@ impl AgentLoop {
     }
 }
 
+/// Ensure every assistant message carrying `tool_calls` is followed by a
+/// matching `tool` message for *each* `tool_call_id`.
+///
+/// A run interrupted mid-turn — after the assistant message was already pushed
+/// but before its tools executed (turn/tool-call budget exceeded, pipeline
+/// error, or cancellation) — can leave the history with an assistant message
+/// whose `tool_calls` have no corresponding tool results. OpenAI-compatible
+/// providers (DeepSeek especially) reject such sequences with:
+/// "an assistant message with 'tool_calls' must be followed by tool messages".
+///
+/// This repairs the history in-place by injecting a synthetic error tool
+/// message for every missing `tool_call_id`. The repair is persisted to
+/// `self.messages`, so resumed sessions stay valid.
+fn sanitize_tool_call_pairs(messages: &mut Vec<Message>) {
+    const SYNTHETIC_RESULT: &str = "[tool execution interrupted — a budget or \
+        pipeline limit was reached before this call ran; synthetic result \
+        inserted to keep the message history valid for the provider]";
+
+    let mut out: Vec<Message> = Vec::with_capacity(messages.len() + 4);
+    let mut i = 0;
+    while i < messages.len() {
+        let expected: Option<Vec<String>> = if messages[i].role == Role::Assistant {
+            messages[i]
+                .tool_calls
+                .as_ref()
+                .filter(|calls| !calls.is_empty())
+                .map(|calls| calls.iter().map(|c| c.id.clone()).collect())
+        } else {
+            None
+        };
+
+        out.push(messages[i].clone());
+
+        if let Some(expected) = expected {
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut j = i + 1;
+            while j < messages.len() && messages[j].role == Role::Tool {
+                if let Some(id) = messages[j].tool_call_id.as_ref()
+                    && expected.iter().any(|e| e == id)
+                {
+                    seen.insert(id.clone());
+                }
+                out.push(messages[j].clone());
+                j += 1;
+            }
+            for id in &expected {
+                if !seen.contains(id) {
+                    out.push(Message::tool(id.clone(), SYNTHETIC_RESULT));
+                }
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+
+    *messages = out;
+}
+
 /// Truncate a string to `max_chars` characters, appending "…" if truncated.
 fn truncate_str(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
@@ -582,4 +646,76 @@ fn format_tool_result(result: &nca_common::tool::ToolResult) -> String {
             .unwrap_or_else(|| "tool failed".to_string())
     };
     truncate_tool_output(&raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tc(id: &str) -> MessageToolCall {
+        MessageToolCall {
+            id: id.to_string(),
+            name: "read".to_string(),
+            arguments: json!({}),
+        }
+    }
+
+    #[test]
+    fn sanitize_is_noop_when_tool_pairs_complete() {
+        let mut msgs = vec![
+            Message::user("hi"),
+            Message::assistant_with_tool_calls("checking", vec![tc("a"), tc("b")]),
+            Message::tool("a", "ra"),
+            Message::tool("b", "rb"),
+        ];
+        let before = msgs.clone();
+        sanitize_tool_call_pairs(&mut msgs);
+        assert_eq!(msgs, before, "complete pairs must be left untouched");
+    }
+
+    #[test]
+    fn sanitize_fills_all_missing_tool_results() {
+        // assistant emitted 2 tool_calls but a budget error fired before any ran.
+        let mut msgs = vec![
+            Message::assistant_with_tool_calls("checking", vec![tc("a"), tc("b")]),
+            Message::user("continue"),
+        ];
+        sanitize_tool_call_pairs(&mut msgs);
+        // [assistant, synthetic(a), synthetic(b), user]
+        assert_eq!(msgs.len(), 4);
+        assert_eq!(msgs[1].role, Role::Tool);
+        assert_eq!(msgs[1].tool_call_id.as_deref(), Some("a"));
+        assert_eq!(msgs[2].role, Role::Tool);
+        assert_eq!(msgs[2].tool_call_id.as_deref(), Some("b"));
+        assert_eq!(msgs[3].role, Role::User);
+    }
+
+    #[test]
+    fn sanitize_fills_only_missing_tool_results() {
+        // 2 calls, only "a" got a result before interruption.
+        let mut msgs = vec![
+            Message::assistant_with_tool_calls("checking", vec![tc("a"), tc("b")]),
+            Message::tool("a", "ra"),
+            Message::assistant("done?"),
+        ];
+        sanitize_tool_call_pairs(&mut msgs);
+        // [assistant+tc, tool(a), synthetic(b), assistant]
+        assert_eq!(msgs.len(), 4);
+        assert_eq!(msgs[1].tool_call_id.as_deref(), Some("a"));
+        assert_eq!(msgs[2].role, Role::Tool);
+        assert_eq!(msgs[2].tool_call_id.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn sanitize_repairs_trailing_orphaned_assistant() {
+        // assistant with tool_calls at the very end, no results at all.
+        let mut msgs = vec![
+            Message::user("do it"),
+            Message::assistant_with_tool_calls("running", vec![tc("x")]),
+        ];
+        sanitize_tool_call_pairs(&mut msgs);
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[2].role, Role::Tool);
+        assert_eq!(msgs[2].tool_call_id.as_deref(), Some("x"));
+    }
 }

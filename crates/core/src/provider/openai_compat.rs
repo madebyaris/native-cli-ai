@@ -283,7 +283,7 @@ async fn flush_openai_tool_calls(
                 tool = %call.name,
                 call_id = %call.id,
                 index,
-                arguments_preview = %&call.arguments[..call.arguments.len().min(200)],
+                arguments_preview = %truncate_bytes_safe(&call.arguments, 200),
                 "tool_input_unparseable"
             );
             let _ = tx
@@ -297,13 +297,30 @@ async fn flush_openai_tool_calls(
                     input: json!({
                         "_error": format!(
                             "Failed to parse tool arguments as JSON. Raw input: {}",
-                            &call.arguments[..call.arguments.len().min(500)]
+                            truncate_bytes_safe(&call.arguments, 500)
                         )
                     }),
                 }))
                 .await;
         }
     }
+}
+
+/// Truncate `s` to at most `max_bytes` bytes, landing on a UTF-8 char boundary.
+///
+/// Naive `&s[..len.min(N)]` panics when `N` falls inside a multi-byte
+/// character (e.g. an em dash or CJK glyph in tool arguments). This backs off
+/// to the nearest preceding boundary so preview snippets never panic on
+/// non-ASCII input.
+pub(crate) fn truncate_bytes_safe(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 fn tool_content_string(content: &MessageContent) -> String {
@@ -563,7 +580,7 @@ impl Provider for OpenAiCompatProvider {
                 provider = self.name,
                 model = %model,
                 http_status = %status,
-                response_preview = %&body_text[..body_text.len().min(500)],
+                response_preview = %truncate_bytes_safe(&body_text, 500),
                 "provider_http_error"
             );
             return Err(map_provider_error(status, body_text));
@@ -597,5 +614,23 @@ mod tests {
             "I was thinking..."
         );
         assert_eq!(assistant["content"], "response");
+    }
+
+    #[test]
+    fn truncate_bytes_safe_never_panics_on_multibyte() {
+        // A 500-byte cut lands inside the em dash (bytes 498..501) and panics
+        // with a naive `&s[..500]`. Must back off to a char boundary instead.
+        let s = format!("{}—{}", "a".repeat(498), "b".repeat(10));
+        assert_eq!(s.len(), 511);
+        let truncated = truncate_bytes_safe(&s, 500);
+        assert!(truncated.len() <= 500);
+        assert_eq!(truncated.len(), 498);
+        assert_eq!(truncated, "a".repeat(498));
+    }
+
+    #[test]
+    fn truncate_bytes_safe_returns_input_under_limit() {
+        assert_eq!(truncate_bytes_safe("hello", 200), "hello");
+        assert_eq!(truncate_bytes_safe("", 500), "");
     }
 }

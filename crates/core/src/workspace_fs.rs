@@ -670,8 +670,6 @@ mod tests {
         let fs = RealFs::new(ws.path().to_path_buf());
 
         // Before mount: reading external file fails.
-        // (Can't resolve a relative path to outside, but we test resolve directly)
-        let full = ws.path().join(external.path());
         // resolve only takes relative paths; the external dir won't be under ws.
         // Instead, test mount + validate_prefix for new files, and mount + read.
         // We need to test by mounting the external dir.
