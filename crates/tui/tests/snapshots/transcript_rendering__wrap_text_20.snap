@@ -1,0 +1,14 @@
+---
+source: crates/tui/tests/transcript_rendering.rs
+expression: wrapped_narrow
+---
+[
+    "Rust is a systems",
+    "programming language",
+    "focused on safety,",
+    "speed, and",
+    "concurrency —",
+    "featuring zero-cost",
+    "abstractions and a",
+    "friendly compiler.",
+]

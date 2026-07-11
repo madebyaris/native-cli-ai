@@ -31,3 +31,8 @@ cli-prompts = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
 insta = "1"
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "tui_text"
+harness = false
