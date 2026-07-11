@@ -441,6 +441,7 @@ impl Repl {
                     && let Ok(mut g) = st.lock()
                 {
                     g.model = self.runtime.model().to_string();
+                    g.mark_dirty();
                 }
                 match self
                     .runtime
@@ -502,6 +503,7 @@ impl Repl {
                     && let Ok(mut g) = st.lock()
                 {
                     g.model = self.runtime.model().to_string();
+                    g.mark_dirty();
                 }
             }
             Err(e) => out.eprintln(&format!("[custom] {e}")),
@@ -770,6 +772,7 @@ impl Repl {
                                 && let Ok(mut g) = st.lock()
                             {
                                 g.model = self.runtime.model().to_string();
+                                g.mark_dirty();
                             }
                         }
                         Err(e) => out.eprintln(&format!("[model] {e}")),
@@ -1121,6 +1124,7 @@ impl Repl {
                             let path = att.path.clone();
                             let n = if let Ok(mut g) = st.lock() {
                                 g.staged_image_attachments.push(att);
+                                g.mark_dirty();
                                 g.staged_image_attachments.len()
                             } else {
                                 0
@@ -1134,6 +1138,7 @@ impl Repl {
                 } else if rest_trim.eq_ignore_ascii_case("clear") {
                     if let Ok(mut g) = st.lock() {
                         g.staged_image_attachments.clear();
+                        g.mark_dirty();
                     }
                     out.println("[image] cleared staged images");
                 } else {
@@ -1143,6 +1148,7 @@ impl Repl {
                             let path = att.path.clone();
                             let n = if let Ok(mut g) = st.lock() {
                                 g.staged_image_attachments.push(att);
+                                g.mark_dirty();
                                 g.staged_image_attachments.len()
                             } else {
                                 0
@@ -1377,6 +1383,7 @@ impl Repl {
                             if let Ok(mut g) = st.lock() {
                                 g.input_buffer = text;
                                 g.cursor_char_idx = g.input_buffer.chars().count();
+                                g.mark_dirty();
                             }
                             out.println("[editor] loaded into composer — press Enter to send");
                         } else {
@@ -1523,6 +1530,7 @@ impl Repl {
                     g.output_tokens = 0;
                     g.cost_usd = 0.0;
                     g.started = std::time::Instant::now();
+                    g.mark_transcript_dirty();
                 }
                 out.println(&format!("new session started: {new_id}"));
             }
@@ -1811,6 +1819,7 @@ impl Repl {
                 TuiCmd::Exit => {
                     if let Ok(mut g) = tui_state.lock() {
                         g.should_exit = true;
+                        g.mark_dirty();
                     }
                     break;
                 }
@@ -1860,6 +1869,7 @@ impl Repl {
                                 "Switched to branch: {}",
                                 name
                             )));
+                            g.mark_transcript_dirty();
                         }
                     } else if let Ok(mut g) = tui_state.lock() {
                         g.push_error(format!("Failed to switch to branch: {}", name));
@@ -1878,6 +1888,7 @@ impl Repl {
                                 "Created and switched to branch: {}",
                                 name
                             )));
+                            g.mark_transcript_dirty();
                         }
                     } else if let Ok(mut g) = tui_state.lock() {
                         g.push_error(format!("Failed to create branch: {}", name));
@@ -1924,6 +1935,7 @@ impl Repl {
                             g.blocks.push(DisplayBlock::System(
                                 "[provider] add custom provider wizard opened".into(),
                             ));
+                            g.mark_transcript_dirty();
                         }
                     } else {
                         self.apply_provider_in_session(p, ReplOutput::Tui(&tui_state))
@@ -1948,6 +1960,7 @@ impl Repl {
                         g.blocks.push(DisplayBlock::System(
                             "[custom] provider saved and set as default".into(),
                         ));
+                        g.mark_transcript_dirty();
                     }
                 }
                 TuiCmd::PromptApiKey(p, connect_after_save) => {
@@ -1966,6 +1979,7 @@ impl Repl {
                             g.blocks.push(DisplayBlock::System(
                                 "[apikey] configure custom endpoint first (wizard opened)".into(),
                             ));
+                            g.mark_transcript_dirty();
                         } else {
                             g.open_api_key_modal(
                                 p,
@@ -1996,6 +2010,7 @@ impl Repl {
                                     "[model] switched to {} (saved)",
                                     self.runtime.model()
                                 )));
+                                g.mark_transcript_dirty();
                             }
                         }
                         Err(e) => {
@@ -2017,6 +2032,7 @@ impl Repl {
                         g.blocks.push(DisplayBlock::System(format!(
                             "permission mode set to {mode:?}"
                         )));
+                        g.mark_transcript_dirty();
                     }
                 }
                 TuiCmd::SwitchAgent(idx) => {
@@ -2035,6 +2051,7 @@ impl Repl {
                                 "switched to @{}",
                                 profile.label()
                             )));
+                            g.mark_transcript_dirty();
                         }
                     }
                 }
@@ -2087,6 +2104,7 @@ impl Repl {
                         if let Ok(mut g) = tui_state.lock() {
                             g.blocks
                                 .push(DisplayBlock::System("Already on this session.".into()));
+                            g.mark_transcript_dirty();
                         }
                     } else {
                         // Save current, then attempt resume
@@ -2096,6 +2114,7 @@ impl Repl {
                                 "Resuming session {} is not yet fully supported in-process. Please restart nca with: nca resume {session_id}",
                                 session_id
                             )));
+                            g.mark_transcript_dirty();
                         }
                     }
                 }
@@ -2123,6 +2142,7 @@ impl Repl {
                                     "[F2] switched to {}",
                                     self.runtime.model()
                                 )));
+                                g.mark_transcript_dirty();
                             }
                         }
                     } else if let Ok(mut g) = tui_state.lock() {
@@ -2130,6 +2150,7 @@ impl Repl {
                             "[F2] no recent models to cycle (need 2+ in model.recent_models)"
                                 .into(),
                         ));
+                        g.mark_transcript_dirty();
                     }
                 }
                 TuiCmd::ValidateApiKey(provider, api_key) => {
@@ -2137,6 +2158,7 @@ impl Repl {
                     if let Ok(mut g) = tui_state.lock() {
                         g.validation_status =
                             Some(crate::tui::state::OnboardingValidation::Validating);
+                        g.mark_dirty();
                     }
                     // Look up base_url from config
                     let base_url = self
@@ -2168,11 +2190,13 @@ impl Repl {
                                 g.validation_status = Some(
                                     crate::tui::state::OnboardingValidation::Failed(msg.clone()),
                                 );
+                                g.mark_dirty();
                             }
                             nca_core::provider::validate::ValidationResult::NetworkError(msg) => {
                                 g.validation_status = Some(
                                     crate::tui::state::OnboardingValidation::Failed(msg.clone()),
                                 );
+                                g.mark_dirty();
                             }
                         }
                     }
@@ -2193,12 +2217,14 @@ impl Repl {
                                         "Failed to apply provider: {e}"
                                     )));
                                 g.onboarding_mode = true;
+                                g.mark_dirty();
                             }
                             continue;
                         }
                         // Sync TUI model display
                         if let Ok(mut g) = tui_state.lock() {
                             g.model = self.runtime.model().to_string();
+                            g.mark_dirty();
                         }
                         // Persist onboarding flag to global config only (not workspace)
                         let mut cfg = self.runtime.config().clone();
@@ -2262,6 +2288,7 @@ impl Repl {
                                         "[apikey] keeping existing key for {}",
                                         p.display_name()
                                     )));
+                                    g.mark_transcript_dirty();
                                 }
                                 if connect_after_save {
                                     self.apply_provider_in_session(p, ReplOutput::Tui(&tui_state))
@@ -2294,6 +2321,7 @@ impl Repl {
                             g.blocks.push(DisplayBlock::System(
                                 "[apikey] entry cancelled (empty line)".into(),
                             ));
+                            g.mark_transcript_dirty();
                         }
                         continue;
                     }
@@ -2323,6 +2351,7 @@ impl Repl {
                                             "[apikey] saved for {}",
                                             p.display_name()
                                         )));
+                                        g.mark_transcript_dirty();
                                     }
                                 }
                                 Err(e) => {
@@ -2335,6 +2364,7 @@ impl Repl {
                         }
                         if let Ok(mut g) = tui_state.lock() {
                             g.pending_api_key_provider = None;
+                            g.mark_dirty();
                         }
                     }
                     if line.starts_with('!') {
@@ -2349,6 +2379,7 @@ impl Repl {
                         {
                             if let Ok(mut g) = tui_state.lock() {
                                 g.should_exit = true;
+                                g.mark_dirty();
                             }
                             break;
                         }
@@ -2369,7 +2400,9 @@ impl Repl {
                         g.set_busy(true);
                     }
                     let attachments = if let Ok(mut g) = tui_state.lock() {
-                        std::mem::take(&mut g.staged_image_attachments)
+                        let attachments = std::mem::take(&mut g.staged_image_attachments);
+                        g.mark_dirty();
+                        attachments
                     } else {
                         Vec::new()
                     };
@@ -2401,6 +2434,7 @@ impl Repl {
         fn log(st: &Arc<Mutex<TuiSessionState>>, s: &str) {
             if let Ok(mut g) = st.lock() {
                 g.blocks.push(DisplayBlock::System(s.to_string()));
+                g.mark_transcript_dirty();
             }
         }
         if cmd.is_empty() {
@@ -2425,6 +2459,7 @@ impl Repl {
                     for line in stdout.lines() {
                         g.blocks.push(DisplayBlock::System(line.to_string()));
                     }
+                    g.mark_transcript_dirty();
                 }
                 if !stderr.is_empty() {
                     log(st, &format!("[stderr] {stderr}"));
