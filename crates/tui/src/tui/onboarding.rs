@@ -15,9 +15,9 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
-use super::app::{restore_terminal, setup_terminal};
 use super::connect_modal::{ConnectRow, build_connect_rows, selectable_row_indices};
 use super::state::OnboardingValidation;
+use super::terminal::{restore_terminal, setup_terminal};
 
 /// Shared validation state updated by the background task.
 type ValidationState = Arc<Mutex<Option<OnboardingValidation>>>;

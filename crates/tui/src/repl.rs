@@ -4,12 +4,11 @@ use crate::file_mentions::{
 };
 use crate::prompt::NcaPrompt;
 use crate::runner::{SessionRuntime, dispatch_question_answer, dispatch_tool_approval};
-use crate::slash_commands::SLASH_COMMANDS;
-use crate::tui::app::ApprovalAnswer;
+use crate::slash_commands::{help_lines as registry_help_lines, visible_commands};
 use crate::tui::{
-    DisplayBlock, ModelPickerAction, ModelPickerEntry, TuiCmd, TuiSessionState, git_create_branch,
-    git_current_branch, git_list_branches, git_switch_branch, replay_event_log_into_state,
-    run_blocking, spawn_tui_bridge,
+    ApprovalAnswer, DisplayBlock, ModelPickerAction, ModelPickerEntry, SharedTuiState, TuiCmd,
+    TuiSessionState, git_create_branch, git_current_branch, git_list_branches, git_switch_branch,
+    replay_event_log_into_state, run_blocking, spawn_tui_bridge,
 };
 use nca_common::config::{PermissionMode, ProviderCompatibility, ProviderKind};
 use nca_common::event::{EndReason, QuestionSelection};
@@ -39,6 +38,7 @@ impl ReplOutput<'_> {
                     for line in s.split('\n') {
                         g.blocks.push(DisplayBlock::System(line.to_string()));
                     }
+                    g.mark_transcript_dirty();
                 }
             }
         }
@@ -54,6 +54,7 @@ impl ReplOutput<'_> {
             ReplOutput::Tui(st) => {
                 if let Ok(mut g) = st.lock() {
                     g.blocks.push(DisplayBlock::System(format!("[!] {s}")));
+                    g.mark_transcript_dirty();
                 }
             }
         }
@@ -70,6 +71,8 @@ impl ReplOutput<'_> {
                     g.blocks.clear();
                     g.streaming_assistant = None;
                     g.scroll_lines = 0;
+                    g.transcript_follow_tail = true;
+                    g.mark_transcript_dirty();
                 }
             }
         }
@@ -560,11 +563,17 @@ impl Repl {
 
     async fn handle_command(&mut self, input: &str, out: ReplOutput<'_>) -> anyhow::Result<bool> {
         let mut parts = input.split_whitespace();
-        let command = parts.next().unwrap_or_default();
+        let raw_command = parts.next().unwrap_or_default();
         let rest = input
-            .strip_prefix(command)
+            .strip_prefix(raw_command)
             .map(str::trim)
             .unwrap_or_default();
+        let command = match raw_command {
+            "/models" => "/model",
+            "/stats" | "/cost" | "/doctor" => "/status",
+            "/settings" => "/config",
+            other => other,
+        };
 
         match command {
             "/q" | "/quit" | "/exit" => return Ok(false),
@@ -573,7 +582,7 @@ impl Repl {
                 out.println("[stop] cancelling current turn…");
             }
             "/help" => {
-                let help_lines = vec![
+                let mut help_lines = vec![
                     "nca Interactive Mode".into(),
                     String::new(),
                     "INPUT MODES:".into(),
@@ -583,38 +592,9 @@ impl Repl {
                     "  \\           Multiline input (end line with \\ to continue)".into(),
                     String::new(),
                     "SLASH COMMANDS:".into(),
-                    "  /help              Show this help".into(),
-                    "  /status            Session status".into(),
-                    "  /agent [profile]   Show or switch agent profile".into(),
-                    "  /plan <task>       Planning-oriented turn".into(),
-                    "  /review <task>     Code review turn".into(),
-                    "  /fix <task>        Bug-fix turn".into(),
-                    "  /test <task>       Validation turn".into(),
-                    "  /clear             Clear the screen".into(),
-                    "  /compact           Compact session summary".into(),
-                    "  /new               Start a new session".into(),
-                    "  /export            Export session to markdown".into(),
-                    "  /thinking          Toggle thinking/reasoning visibility".into(),
-                    "  /skills            List discovered skills".into(),
-                    "  /memory [text]     Show or store memory notes".into(),
-                    "  /models            Browse and select models".into(),
-                    "  /connect           Connect LLM provider".into(),
-                    "  /provider [name]   Default provider".into(),
-                    "  /custom            Configure custom endpoint".into(),
-                    "  /apikey <p> <key>  Store provider API key".into(),
-                    "  /model [name]      Set active model".into(),
-                    "  /editor [seed]     Open external editor".into(),
-                    "  /set-editor <cmd>  Persist editor command".into(),
-                    "  /mcp               List MCP servers".into(),
-                    "  /sessions          List/switch sessions".into(),
-                    "  /permissions [m]   Show or set permission mode".into(),
-                    "  /config            Show runtime config".into(),
-                    "  /doctor            Run config checks".into(),
-                    "  /diff              Show recent file changes".into(),
-                    "  /cost              Show token usage".into(),
-                    "  /stats             Session statistics".into(),
-                    "  /exit              Exit repl".into(),
-                    String::new(),
+                ];
+                help_lines.extend(registry_help_lines());
+                help_lines.extend([
                     "KEYBOARD SHORTCUTS:".into(),
                     "  Tab          Cycle agent profile".into(),
                     "  Ctrl+P       Command palette".into(),
@@ -631,7 +611,7 @@ impl Repl {
                     "  Ctrl+L       Clear screen".into(),
                     "  Ctrl+V       Paste image (TUI)".into(),
                     "  F2           Cycle recent models".into(),
-                ];
+                ]);
                 if let ReplOutput::Tui(st) = &out {
                     if let Ok(mut g) = st.lock() {
                         g.open_info_modal("help", help_lines);
@@ -651,7 +631,20 @@ impl Repl {
                     format!("Permission:  {:?}", self.runtime.permission_mode()),
                     format!("Children:    {}", snapshot.child_session_ids.len()),
                     format!("Memory:      {}", self.runtime.memory_store_path().display()),
+                    String::new(),
+                    "Provider health:".into(),
                 ];
+                for provider in ProviderKind::ALL {
+                    lines.push(format!(
+                        "  {:<12} key {}",
+                        provider.display_name(),
+                        if self.runtime.config().provider.api_key_present_for(provider) {
+                            "configured"
+                        } else {
+                            "missing"
+                        }
+                    ));
+                }
                 if let Some(summary) = &snapshot.session_summary {
                     lines.push(String::new());
                     lines.push(format!("Summary: {}", summary.replace('\n', " ")));
@@ -801,7 +794,6 @@ impl Repl {
             }
             "/clear" => {
                 out.clear_screen();
-                out.println("[screen cleared]");
             }
             "/undo" => {
                 out.eprintln("[undo] Not yet implemented - use /compact to save session state");
@@ -1119,7 +1111,12 @@ impl Repl {
                 let sid = self.runtime.session_id().to_string();
                 let rest_trim = rest.trim();
                 if rest_trim.is_empty() || rest_trim.eq_ignore_ascii_case("paste") {
-                    match crate::image_attach::paste_clipboard_image(&workspace, &sid) {
+                    out.println("[image] reading clipboard…");
+                    let result = tokio::task::spawn_blocking(move || {
+                        crate::image_attach::paste_clipboard_image(&workspace, &sid)
+                    })
+                    .await?;
+                    match result {
                         Ok(att) => {
                             let path = att.path.clone();
                             let n = if let Ok(mut g) = st.lock() {
@@ -1687,20 +1684,23 @@ impl Repl {
         let session_id = self.runtime.session_id().to_string();
         let model = self.runtime.model().to_string();
         let perm = format!("{:?}", self.runtime.permission_mode());
-        let tui_state: Arc<Mutex<TuiSessionState>> = Arc::new(Mutex::new(TuiSessionState::new(
+        let shared_state = SharedTuiState::new(TuiSessionState::new(
             session_id,
             model,
             self.current_agent_label.clone(),
             perm,
             self.runtime.workspace_root().to_path_buf(),
-        )));
+        ));
+        let tui_state = shared_state.arc();
 
         let log_path = self.runtime.event_log_path();
         replay_event_log_into_state(&log_path, &tui_state).await;
 
         // Populate the git branch name immediately so it appears on first render.
-        let workspace = self.runtime.workspace_root();
-        if let Some(branch) = git_current_branch(workspace)
+        let workspace = self.runtime.workspace_root().to_path_buf();
+        let initial_branch =
+            tokio::task::spawn_blocking(move || git_current_branch(&workspace)).await?;
+        if let Some(branch) = initial_branch
             && let Ok(mut g) = tui_state.lock()
         {
             g.set_current_branch(&branch);
@@ -1720,6 +1720,7 @@ impl Repl {
             approval.clone(),
             question.clone(),
             tui_state.clone(),
+            Some(shared_state.version_tx()),
         );
 
         let _spawn_task = {
@@ -1742,7 +1743,7 @@ impl Repl {
         // Answers must bypass the main `cmd_rx` loop: while `run_turn` is blocked inside
         // `ask_question`, that task never receives `TuiCmd::Submit` or `QuestionAnswer`.
         let (answer_tx, mut answer_rx) =
-            tokio::sync::mpsc::unbounded_channel::<(String, QuestionSelection)>();
+            tokio::sync::mpsc::channel::<(String, QuestionSelection)>(16);
         let qp_dispatch = question.clone();
         tokio::spawn(async move {
             while let Some((qid, sel)) = answer_rx.recv().await {
@@ -1752,8 +1753,7 @@ impl Repl {
         let answer_for_tui = answer_tx.clone();
         drop(answer_tx);
 
-        let (approval_tx, mut approval_rx) =
-            tokio::sync::mpsc::unbounded_channel::<ApprovalAnswer>();
+        let (approval_tx, mut approval_rx) = tokio::sync::mpsc::channel::<ApprovalAnswer>(16);
         let approval_dispatch = approval.clone();
         let approval_state = tui_state.clone();
         tokio::spawn(async move {
@@ -1785,13 +1785,17 @@ impl Repl {
         let approval_for_tui = approval_tx.clone();
         drop(approval_tx);
 
-        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<TuiCmd>();
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<TuiCmd>(64);
         let st = tui_state.clone();
+        let version_rx = shared_state.version_rx();
+        let version_tx = shared_state.version_tx();
         let banner = self.run_mode;
         let cancel_flag = self.runtime.cancel_handle();
         let ui = tokio::task::spawn_blocking(move || {
             run_blocking(
                 st,
+                version_rx,
+                version_tx,
                 cmd_tx,
                 Some(answer_for_tui),
                 Some(approval_for_tui),
@@ -1828,17 +1832,28 @@ impl Repl {
                     self.runtime.request_cancel();
                 }
                 TuiCmd::OpenBranchPicker => {
-                    let workspace = self.runtime.workspace_root();
-                    let branches = git_list_branches(workspace);
-                    let current = git_current_branch(workspace).unwrap_or_default();
+                    if let Ok(mut g) = tui_state.lock() {
+                        g.open_branch_picker(Vec::new(), "");
+                    }
+                    let workspace = self.runtime.workspace_root().to_path_buf();
+                    let (branches, current) = tokio::task::spawn_blocking(move || {
+                        let branches = git_list_branches(&workspace);
+                        let current = git_current_branch(&workspace).unwrap_or_default();
+                        (branches, current)
+                    })
+                    .await?;
                     if let Ok(mut g) = tui_state.lock() {
                         g.open_branch_picker(branches, &current);
                         g.set_current_branch(&current);
                     }
                 }
                 TuiCmd::SwitchBranch(name) => {
-                    let workspace = self.runtime.workspace_root();
-                    if git_switch_branch(workspace, &name) {
+                    let workspace = self.runtime.workspace_root().to_path_buf();
+                    let branch = name.clone();
+                    let switched =
+                        tokio::task::spawn_blocking(move || git_switch_branch(&workspace, &branch))
+                            .await?;
+                    if switched {
                         if let Ok(mut g) = tui_state.lock() {
                             g.set_current_branch(&name);
                             g.blocks.push(DisplayBlock::System(format!(
@@ -1851,8 +1866,12 @@ impl Repl {
                     }
                 }
                 TuiCmd::CreateBranch(name) => {
-                    let workspace = self.runtime.workspace_root();
-                    if git_create_branch(workspace, &name) {
+                    let workspace = self.runtime.workspace_root().to_path_buf();
+                    let branch = name.clone();
+                    let created =
+                        tokio::task::spawn_blocking(move || git_create_branch(&workspace, &branch))
+                            .await?;
+                    if created {
                         if let Ok(mut g) = tui_state.lock() {
                             g.set_current_branch(&name);
                             g.blocks.push(DisplayBlock::System(format!(
@@ -1862,6 +1881,31 @@ impl Repl {
                         }
                     } else if let Ok(mut g) = tui_state.lock() {
                         g.push_error(format!("Failed to create branch: {}", name));
+                    }
+                }
+                TuiCmd::PasteClipboard => {
+                    let workspace = self.runtime.workspace_root().to_path_buf();
+                    let session_id = self.runtime.session_id().to_string();
+                    let result = tokio::task::spawn_blocking(move || {
+                        crate::image_attach::paste_clipboard_image(&workspace, &session_id)
+                    })
+                    .await?;
+                    match result {
+                        Ok(attachment) => {
+                            let label = attachment.path.clone();
+                            if let Ok(mut g) = tui_state.lock() {
+                                g.staged_image_attachments.push(attachment);
+                                g.blocks.push(DisplayBlock::System(format!(
+                                    "[image] staged {label} — Enter to send"
+                                )));
+                                g.mark_transcript_dirty();
+                            }
+                        }
+                        Err(error) => {
+                            if let Ok(mut g) = tui_state.lock() {
+                                g.push_error(format!("[image] {error}"));
+                            }
+                        }
                     }
                 }
                 TuiCmd::ApplyDefaultProvider(p) => {
@@ -2193,10 +2237,10 @@ impl Repl {
                 TuiCmd::Submit(line) => {
                     let line = line.trim().to_string();
                     let api_key_modal_state = tui_state.lock().ok().and_then(|g| {
-                        g.api_key_modal_open.then_some((
-                            g.api_key_target_provider,
-                            g.api_key_input.clone(),
-                            g.api_key_connect_after_save,
+                        g.api_key_modal_open().then_some((
+                            g.api_key_target_provider(),
+                            g.api_key_input().to_string(),
+                            g.api_key_connect_after_save(),
                         ))
                     });
                     if let Some((Some(p), key_input, connect_after_save)) = api_key_modal_state {
@@ -2426,11 +2470,11 @@ impl Completer for Repl {
 
         // Complete REPL commands starting with /
         if line.starts_with('/') {
-            for cmd in SLASH_COMMANDS {
-                if cmd.starts_with(line) {
+            for spec in visible_commands() {
+                if spec.name.starts_with(line) {
                     suggestions.push(Suggestion {
-                        value: cmd.to_string(),
-                        description: Some("REPL command".to_string()),
+                        value: spec.name.to_string(),
+                        description: Some(spec.description.to_string()),
                         extra: None,
                         span: reedline::Span { start: 0, end: 0 },
                         append_whitespace: true,

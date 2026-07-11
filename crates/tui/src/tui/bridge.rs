@@ -20,6 +20,7 @@ pub fn spawn_tui_bridge(
     approval_pending: Option<ApprovalPendingMap>,
     question_pending: Option<QuestionPendingMap>,
     state: Arc<Mutex<TuiSessionState>>,
+    version_tx: Option<tokio::sync::watch::Sender<u64>>,
 ) -> tokio::task::JoinHandle<()> {
     let (event_tx_ipc, command_rx) = match ipc_handle {
         Some(h) => {
@@ -61,7 +62,13 @@ pub fn spawn_tui_bridge(
             }
 
             if let Ok(mut g) = state.lock() {
+                let before = g.state_version;
                 g.apply_event(&event);
+                if g.state_version != before
+                    && let Some(tx) = &version_tx
+                {
+                    let _ = tx.send(g.state_version);
+                }
             }
         }
     })
