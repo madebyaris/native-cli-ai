@@ -1,14 +1,6 @@
 mod approval_prompts;
 mod cli_index;
-mod file_mentions;
-mod image_attach;
-mod ipc_pending;
-mod prompt;
-mod repl;
-mod runner;
-mod slash_commands;
 mod stream;
-mod tui;
 
 use crate::approval_prompts::InteractiveIpcApprovalHandler;
 use clap::CommandFactory;
@@ -20,8 +12,8 @@ use nca_common::event::{AgentCommand, EventEnvelope};
 use nca_common::session::{OrchestrationContext, SessionSnapshot, SessionStatus};
 use nca_core::skills::SkillCatalog;
 use nca_runtime::memory_store::{MemoryNote, MemoryStore};
-use repl::Repl;
-use runner::{build_resumed_session_runtime, build_session_runtime};
+use nca_tui::Repl;
+use nca_tui::{build_resumed_session_runtime, build_session_runtime};
 use std::io::{IsTerminal, stdin, stdout};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -654,7 +646,7 @@ async fn try_main() -> anyhow::Result<()> {
                     && stdin().is_terminal()
                     && matches!(cli.stream, StreamMode::Human);
                 if config.needs_onboarding() && onboarding_tui {
-                    config = crate::tui::onboarding::run_onboarding(config).await?;
+                    config = nca_tui::tui::onboarding::run_onboarding(config).await?;
                 }
 
                 if cli.resume {

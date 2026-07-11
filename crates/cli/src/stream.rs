@@ -2,11 +2,11 @@
 //!
 //! This module provides streaming event rendering with Claude Code-inspired styling.
 
-use crate::ipc_pending::{ApprovalPendingMap, QuestionPendingMap};
 use colored::Colorize;
 use nca_common::event::{AgentEvent, EventEnvelope, InteractiveQuestionPayload, QuestionSelection};
 use nca_runtime::ipc::IpcHandle;
 use nca_runtime::supervisor;
+use nca_tui::ipc_pending::{ApprovalPendingMap, QuestionPendingMap};
 use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

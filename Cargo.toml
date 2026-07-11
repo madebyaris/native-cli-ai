@@ -4,6 +4,7 @@ members = [
     "crates/common",
     "crates/core",
     "crates/runtime",
+    "crates/tui",
     "crates/cli",
     "crates/autoresearch",
 ]
@@ -46,4 +47,5 @@ cli-prompts = "0.1"
 nca-common = { path = "crates/common" }
 nca-core = { path = "crates/core" }
 nca-runtime = { path = "crates/runtime" }
+nca-tui = { path = "crates/tui" }
 nca-autoresearch = { path = "crates/autoresearch" }

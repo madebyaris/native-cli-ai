@@ -2095,7 +2095,6 @@ name = "nca-cli"
 version = "0.3.0"
 dependencies = [
  "anyhow",
- "arboard",
  "assert_cmd",
  "async-trait",
  "cargo-husky",
@@ -2104,22 +2103,17 @@ dependencies = [
  "clap_complete",
  "cli-prompts",
  "colored",
- "crossterm 0.29.0",
  "futures",
- "image",
  "insta",
  "nca-autoresearch",
  "nca-common",
  "nca-core",
  "nca-runtime",
+ "nca-tui",
  "predicates",
- "pulldown-cmark",
- "ratatui",
- "reedline",
  "serde",
  "serde_json",
  "similar",
- "syntect",
  "tempfile",
  "tokio",
  "tracing",
@@ -2186,6 +2180,35 @@ dependencies = [
  "tokio",
  "tracing",
  "walkdir",
+]
+
+[[package]]
+name = "nca-tui"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "async-trait",
+ "chrono",
+ "cli-prompts",
+ "colored",
+ "crossterm 0.29.0",
+ "futures",
+ "image",
+ "insta",
+ "nca-common",
+ "nca-core",
+ "nca-runtime",
+ "pulldown-cmark",
+ "ratatui",
+ "reedline",
+ "serde",
+ "serde_json",
+ "similar",
+ "syntect",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
