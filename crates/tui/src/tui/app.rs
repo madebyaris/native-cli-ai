@@ -125,6 +125,42 @@ fn escape_cancels_active_turn(state: &TuiSessionState) -> bool {
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrimaryInputMode {
+    Approval,
+    QuestionModal,
+    Normal,
+}
+
+fn primary_input_mode(active_approval: bool, question_modal_open: bool) -> PrimaryInputMode {
+    if active_approval {
+        PrimaryInputMode::Approval
+    } else if question_modal_open {
+        PrimaryInputMode::QuestionModal
+    } else {
+        PrimaryInputMode::Normal
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApprovalShortcutAction {
+    Approve,
+    Deny,
+    AllowPattern,
+}
+
+fn approval_shortcut_action(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> Option<ApprovalShortcutAction> {
+    match (code, modifiers) {
+        (KeyCode::Char('y'), KeyModifiers::CONTROL) => Some(ApprovalShortcutAction::Approve),
+        (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(ApprovalShortcutAction::Deny),
+        (KeyCode::Char('u'), KeyModifiers::CONTROL) => Some(ApprovalShortcutAction::AllowPattern),
+        _ => None,
+    }
+}
+
 /// `question_answer_tx`: when `Some`, answers are sent there so they unblock `ask_question` while
 /// the async loop is stuck in `run_turn` (that task does not poll `cmd_rx` until the turn ends).
 #[allow(clippy::too_many_arguments)]
@@ -2237,7 +2273,10 @@ pub fn run_blocking(
 
                     // Phase 0 invariant: approval hotkeys own Ctrl+Y/N/U even
                     // when a question modal is also active.
-                    if g.active_approval.is_some()
+                    let primary_mode =
+                        primary_input_mode(g.active_approval.is_some(), g.question_modal_open());
+                    if matches!(primary_mode, PrimaryInputMode::Approval)
+                        && approval_shortcut_action(key.code, key.modifiers).is_some()
                         && let Some(answer) = handle_approval_key(&mut g, key)
                     {
                         g.mark_transcript_dirty();
@@ -2249,7 +2288,7 @@ pub fn run_blocking(
                     }
 
                     // Question modal keyboard handling.
-                    if g.question_modal_open() {
+                    if matches!(primary_mode, PrimaryInputMode::QuestionModal) {
                         if let Some(ref q) = g.active_question.clone() {
                             // Total items: 1 (suggested) + options.len() + (1 if allow_custom for "Chat about this")
                             let total = 1 + q.options.len() + if q.allow_custom { 1 } else { 0 };
@@ -2857,13 +2896,15 @@ pub fn run_blocking(
 #[cfg(test)]
 mod approval_parse_tests {
     use super::{
-        TuiCmd, apply_selected_at_completion, branch_picker_enter_command, composer_line,
+        ApprovalShortcutAction, PrimaryInputMode, TuiCmd, apply_selected_at_completion,
+        approval_shortcut_action, branch_picker_enter_command, composer_line,
         delete_completed_at_mention, escape_cancels_active_turn, filter_slash_entries,
-        filtered_branch_indices, load_slash_entries,
+        filtered_branch_indices, load_slash_entries, primary_input_mode,
     };
     use crate::tui::composer::completed_at_mention_range_before_cursor;
     use crate::tui::state::TuiSessionState;
     use crate::tui::transcript::parse_approval_verdict;
+    use crossterm::event::{KeyCode, KeyModifiers};
     use nca_common::event::BusyState;
     use std::path::PathBuf;
 
@@ -2890,6 +2931,23 @@ mod approval_parse_tests {
         assert_eq!(parse_approval_verdict("maybe"), None);
         assert_eq!(parse_approval_verdict("nope"), None);
         assert_eq!(parse_approval_verdict(""), None);
+    }
+
+    #[test]
+    fn approval_priority_survives_question_modal() {
+        assert_eq!(primary_input_mode(true, true), PrimaryInputMode::Approval);
+        assert_eq!(
+            approval_shortcut_action(KeyCode::Char('y'), KeyModifiers::CONTROL),
+            Some(ApprovalShortcutAction::Approve)
+        );
+        assert_eq!(
+            approval_shortcut_action(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            Some(ApprovalShortcutAction::Deny)
+        );
+        assert_eq!(
+            approval_shortcut_action(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            Some(ApprovalShortcutAction::AllowPattern)
+        );
     }
 
     #[test]
