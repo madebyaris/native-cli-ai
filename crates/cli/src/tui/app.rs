@@ -1328,6 +1328,42 @@ fn parse_approval_verdict(line: &str) -> Option<bool> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrimaryInputMode {
+    Approval,
+    QuestionModal,
+    Normal,
+}
+
+fn primary_input_mode(active_approval: bool, question_modal_open: bool) -> PrimaryInputMode {
+    if active_approval {
+        PrimaryInputMode::Approval
+    } else if question_modal_open {
+        PrimaryInputMode::QuestionModal
+    } else {
+        PrimaryInputMode::Normal
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApprovalShortcutAction {
+    Approve,
+    Deny,
+    AllowPattern,
+}
+
+fn approval_shortcut_action(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> Option<ApprovalShortcutAction> {
+    match (code, modifiers) {
+        (KeyCode::Char('y'), KeyModifiers::CONTROL) => Some(ApprovalShortcutAction::Approve),
+        (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(ApprovalShortcutAction::Deny),
+        (KeyCode::Char('u'), KeyModifiers::CONTROL) => Some(ApprovalShortcutAction::AllowPattern),
+        _ => None,
+    }
+}
+
 fn parse_md_line(line: &str) -> Line<'static> {
     if line.starts_with("```") {
         return Line::from(Span::styled(
@@ -3519,8 +3555,55 @@ pub fn run_blocking(
                         continue;
                     }
 
+                    let primary_mode =
+                        primary_input_mode(g.active_approval.is_some(), g.question_modal_open);
+
+                    // Approval shortcuts take precedence over question-modal handling.
+                    if matches!(primary_mode, PrimaryInputMode::Approval)
+                        && let Some(req) = g.active_approval.clone()
+                        && let Some(action) = approval_shortcut_action(key.code, key.modifiers)
+                    {
+                        let call_id = req.call_id.clone();
+                        g.input_buffer.clear();
+                        g.cursor_char_idx = 0;
+                        match action {
+                            ApprovalShortcutAction::Approve => {
+                                drop(g);
+                                if let Some(ref tx) = approval_answer_tx {
+                                    let _ = tx.send(ApprovalAnswer::Verdict {
+                                        call_id,
+                                        approved: true,
+                                    });
+                                }
+                            }
+                            ApprovalShortcutAction::Deny => {
+                                drop(g);
+                                if let Some(ref tx) = approval_answer_tx {
+                                    let _ = tx.send(ApprovalAnswer::Verdict {
+                                        call_id,
+                                        approved: false,
+                                    });
+                                }
+                            }
+                            ApprovalShortcutAction::AllowPattern => {
+                                let input_json: serde_json::Value =
+                                    serde_json::from_str(&req.input).unwrap_or_default();
+                                let pattern = suggest_allow_pattern(&req.tool, &input_json);
+                                g.blocks.push(DisplayBlock::System(format!(
+                                    "Always allowing: {pattern}"
+                                )));
+                                drop(g);
+                                if let Some(ref tx) = approval_answer_tx {
+                                    let _ =
+                                        tx.send(ApprovalAnswer::AllowPattern { call_id, pattern });
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
                     // Question modal keyboard handling.
-                    if g.question_modal_open {
+                    if matches!(primary_mode, PrimaryInputMode::QuestionModal) {
                         if let Some(ref q) = g.active_question.clone() {
                             // Total items: 1 (suggested) + options.len() + (1 if allow_custom for "Chat about this")
                             let total = 1 + q.options.len() + if q.allow_custom { 1 } else { 0 };
@@ -3813,55 +3896,6 @@ pub fn run_blocking(
                             drop(g);
                             let _ = cmd_tx.send(TuiCmd::CycleModel(false));
                         }
-                        (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
-                            if let Some(req) = g.active_approval.clone() {
-                                let call_id = req.call_id.clone();
-                                g.input_buffer.clear();
-                                g.cursor_char_idx = 0;
-                                drop(g);
-                                if let Some(ref tx) = approval_answer_tx {
-                                    let _ = tx.send(ApprovalAnswer::Verdict {
-                                        call_id,
-                                        approved: true,
-                                    });
-                                }
-                                continue;
-                            }
-                        }
-                        (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
-                            if let Some(req) = g.active_approval.clone() {
-                                let call_id = req.call_id.clone();
-                                g.input_buffer.clear();
-                                g.cursor_char_idx = 0;
-                                drop(g);
-                                if let Some(ref tx) = approval_answer_tx {
-                                    let _ = tx.send(ApprovalAnswer::Verdict {
-                                        call_id,
-                                        approved: false,
-                                    });
-                                }
-                                continue;
-                            }
-                        }
-                        (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
-                            if let Some(req) = g.active_approval.clone() {
-                                let input_json: serde_json::Value =
-                                    serde_json::from_str(&req.input).unwrap_or_default();
-                                let pattern = suggest_allow_pattern(&req.tool, &input_json);
-                                let call_id = req.call_id.clone();
-                                g.input_buffer.clear();
-                                g.cursor_char_idx = 0;
-                                g.blocks.push(DisplayBlock::System(format!(
-                                    "Always allowing: {pattern}"
-                                )));
-                                drop(g);
-                                if let Some(ref tx) = approval_answer_tx {
-                                    let _ =
-                                        tx.send(ApprovalAnswer::AllowPattern { call_id, pattern });
-                                }
-                                continue;
-                            }
-                        }
                         (KeyCode::Enter, _) => {
                             if let Some((buf, cidx)) = apply_selected_at_completion(
                                 &workspace_files,
@@ -4128,12 +4162,14 @@ pub fn run_blocking(
 #[cfg(test)]
 mod approval_parse_tests {
     use super::{
-        TuiCmd, apply_selected_at_completion, branch_picker_enter_command,
+        ApprovalShortcutAction, PrimaryInputMode, TuiCmd, apply_selected_at_completion,
+        approval_shortcut_action, branch_picker_enter_command,
         completed_at_mention_range_before_cursor, composer_line, delete_completed_at_mention,
         escape_cancels_active_turn, filter_slash_entries, filtered_branch_indices,
-        load_slash_entries, parse_approval_verdict,
+        load_slash_entries, parse_approval_verdict, primary_input_mode,
     };
     use crate::tui::state::TuiSessionState;
+    use crossterm::event::{KeyCode, KeyModifiers};
     use nca_common::event::BusyState;
     use std::path::PathBuf;
 
@@ -4282,5 +4318,61 @@ mod approval_parse_tests {
 
         state.set_busy_state(BusyState::ApprovalPending);
         assert!(!escape_cancels_active_turn(&state));
+    }
+
+    #[test]
+    fn primary_input_mode_prefers_approval_when_both_active() {
+        assert_eq!(primary_input_mode(true, true), PrimaryInputMode::Approval);
+    }
+
+    #[test]
+    fn primary_input_mode_uses_question_modal_without_approval() {
+        assert_eq!(
+            primary_input_mode(false, true),
+            PrimaryInputMode::QuestionModal
+        );
+    }
+
+    #[test]
+    fn primary_input_mode_falls_back_to_normal() {
+        assert_eq!(primary_input_mode(false, false), PrimaryInputMode::Normal);
+    }
+
+    #[test]
+    fn approval_hotkeys_map_ctrl_y_and_ctrl_n() {
+        assert_eq!(
+            approval_shortcut_action(KeyCode::Char('y'), KeyModifiers::CONTROL),
+            Some(ApprovalShortcutAction::Approve)
+        );
+        assert_eq!(
+            approval_shortcut_action(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            Some(ApprovalShortcutAction::Deny)
+        );
+    }
+
+    #[test]
+    fn approval_hotkeys_map_ctrl_u() {
+        assert_eq!(
+            approval_shortcut_action(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            Some(ApprovalShortcutAction::AllowPattern)
+        );
+    }
+
+    #[test]
+    fn approval_shortcuts_stay_active_when_question_modal_open() {
+        let mode = primary_input_mode(true, true);
+        assert_eq!(mode, PrimaryInputMode::Approval);
+        assert_eq!(
+            approval_shortcut_action(KeyCode::Char('y'), KeyModifiers::CONTROL),
+            Some(ApprovalShortcutAction::Approve)
+        );
+        assert_eq!(
+            approval_shortcut_action(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            Some(ApprovalShortcutAction::Deny)
+        );
+        assert_eq!(
+            approval_shortcut_action(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            Some(ApprovalShortcutAction::AllowPattern)
+        );
     }
 }
