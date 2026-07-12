@@ -198,6 +198,10 @@ impl SessionRuntime {
         self.supervisor.snapshot()
     }
 
+    pub fn todos(&self) -> Vec<nca_common::todo::AgentTodo> {
+        self.supervisor.todos()
+    }
+
     pub fn compact_summary(&self) -> String {
         self.supervisor.compact_summary()
     }

@@ -5,6 +5,7 @@
 //! Extracted from `nca-cli` so the CLI entrypoint only contains argument
 //! parsing, session bootstrap, stream mode, and glue.
 
+pub mod clipboard;
 pub mod file_mentions;
 pub mod image_attach;
 pub mod ipc_pending;

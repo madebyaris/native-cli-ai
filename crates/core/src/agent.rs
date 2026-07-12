@@ -1,4 +1,5 @@
 use futures_util::future::join_all;
+use nca_common::config::SmartCompactionMode;
 use nca_common::event::{AgentEvent, BusyState};
 use nca_common::message::{ContentPart, ImageAttachment, Message, MessageToolCall};
 use nca_common::tool::{PermissionTier, ToolCall, ToolDefinition, ToolResult};
@@ -10,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::approval::{ApprovalPolicy, ApprovalVerdict};
+use crate::context_view::plan_context_view;
 use crate::cost::CostTracker;
 use crate::hooks::{HookEventKind, HookRunner};
 use crate::provider::{Provider, ProviderError, StreamChunk};
@@ -29,6 +31,8 @@ pub struct AgentLoop {
     checkpoint_interval: u32,
     cancel_flag: Arc<AtomicBool>,
     hooks: Option<HookRunner>,
+    /// Opt-in provider-request smart compaction (canonical history always kept).
+    smart_compaction_mode: SmartCompactionMode,
 }
 
 impl AgentLoop {
@@ -57,7 +61,16 @@ impl AgentLoop {
             checkpoint_interval,
             cancel_flag: Arc::new(AtomicBool::new(false)),
             hooks,
+            smart_compaction_mode: SmartCompactionMode::Off,
         }
+    }
+
+    pub fn set_smart_compaction_mode(&mut self, mode: SmartCompactionMode) {
+        self.smart_compaction_mode = mode;
+    }
+
+    pub fn smart_compaction_mode(&self) -> SmartCompactionMode {
+        self.smart_compaction_mode
     }
 
     /// Add a system prompt once at startup.
@@ -147,10 +160,41 @@ impl AgentLoop {
             self.provider
                 .prepare_messages_for_request(&mut self.messages, workspace_root)
                 .await?;
+
+            // Smart compaction builds a provider-only view; canonical history stays intact.
+            let request_messages = if self.smart_compaction_mode.is_enabled() {
+                let plan = plan_context_view(&self.messages, self.smart_compaction_mode);
+                let report = &plan.report;
+                if report.tokens_after < report.tokens_before
+                    || matches!(self.smart_compaction_mode, SmartCompactionMode::DryRun)
+                {
+                    let phase = match self.smart_compaction_mode {
+                        SmartCompactionMode::DryRun => "dry_run",
+                        SmartCompactionMode::On => "completed",
+                        SmartCompactionMode::Off => "off",
+                    };
+                    self.emit(AgentEvent::ContextCompaction {
+                        phase: phase.into(),
+                        message: report.summary_line(),
+                        tokens_before: Some(report.tokens_before),
+                        tokens_after: Some(report.tokens_after),
+                        retained_groups: Some(report.retained_groups),
+                        dropped_groups: Some(report.dropped_groups),
+                    })
+                    .await;
+                }
+                match self.smart_compaction_mode {
+                    SmartCompactionMode::On => plan.messages,
+                    SmartCompactionMode::DryRun | SmartCompactionMode::Off => self.messages.clone(),
+                }
+            } else {
+                self.messages.clone()
+            };
+
             let mut stream = self
                 .provider
                 .chat(
-                    &self.messages,
+                    &request_messages,
                     &self.tool_definitions(),
                     &self.model,
                     workspace_root,

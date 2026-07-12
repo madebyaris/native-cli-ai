@@ -306,7 +306,7 @@ pub fn transcript_lines_and_hits(
             &mut lines,
             &mut hits,
             Line::from(Span::styled(
-                "Tab  agent   Ctrl+V  image   Ctrl+P  commands   !cmd  shell   @path  search   /  inline   wheel  scroll",
+                "Tab  agent   Ctrl+V  image   Ctrl+Shift+C  copy   Ctrl+P  commands   !cmd  shell   @path  search   /  inline   wheel  scroll",
                 Style::default().fg(theme::MUTED),
             )),
             None,

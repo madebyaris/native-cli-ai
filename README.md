@@ -177,6 +177,8 @@ Slash commands, the Ctrl+P command palette, autocomplete, and `/help` all come f
 | `/skills` | Browse discovered skills; `/{skill}` runs one. |
 | `/memory` | Show or append memory notes. |
 | `/compact` | Compact session context. |
+| `/copy` | Copy the latest assistant response (TUI; also `Ctrl+Shift+C`). |
+| `/todos` | Show the session todo list. |
 | `/model` | Open the model picker (`/models` is an alias). |
 | `/connect` | Connect / switch provider, API key, or custom endpoint (`/provider`, `/apikey`, `/custom` are aliases). |
 | `/status` | Session status and health (`/stats`, `/cost`, `/doctor` are aliases). |
@@ -193,6 +195,8 @@ Slash commands, the Ctrl+P command palette, autocomplete, and `/help` all come f
 | Binding | Action |
 |---|---|
 | `Ctrl+P` | Open the command palette (fuzzy; Enter runs). |
+| `Ctrl+V` | Paste image from clipboard (TUI). |
+| `Ctrl+Shift+C` | Copy last assistant response (TUI). |
 | `Ctrl+X` then `m` / `e` / `l` / `n` / `c` / `s` / `a` / `h` / `q` | Leader shortcuts: model, editor, sessions, new, compact, status, agent, help, exit. |
 | `Ctrl+Y` / `Ctrl+N` / `Ctrl+U` | Approve / deny / always-allow a pending tool (wins over an open question modal). |
 | `Tab` | Complete `@` path or `/` command; otherwise cycle agent profile. |
@@ -261,16 +265,20 @@ Use `nca skills --json` to see all discovered skills with their sources.
 - **Auto-summarize** kicks in when context reaches a configurable threshold (default 75%).
 - **Summary format** preserves key topics, decisions, and critical context.
 - System messages are always preserved; recent messages use a sliding window.
+- **Smart compaction** (opt-in) builds a deterministic provider-request view that truncates older read/search noise while keeping tool groups atomic. Canonical session history is never rewritten by this path.
 
 Configuration in `~/.nca/config.toml`:
 
 ```toml
 [memory.context]
-context_window_target = 32000
+context_window_target = 0          # 0 = auto-detect
 max_retained_messages = 50
 auto_summarize_threshold = 75
 enable_auto_summarize = true
+smart_compaction_mode = "off"      # off | dry_run | on
 ```
+
+Use `dry_run` first to inspect savings under `/status` and in the human stream before enabling `on`.
 
 ## Providers
 

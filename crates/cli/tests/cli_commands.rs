@@ -51,6 +51,7 @@ fn write_session(
         total_input_tokens: 0,
         total_output_tokens: 0,
         estimated_cost_usd: 0.0,
+        todos: Vec::new(),
     };
 
     let json = serde_json::to_string_pretty(&session).expect("serialize session");

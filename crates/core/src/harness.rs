@@ -40,6 +40,7 @@ Tool and validation rules:
 - Empty provider completions, empty tool results, or obviously invalid outputs must fail loudly instead of being treated as success.
 - Do not pretend a tool, provider, or validation step succeeded if it did not.
 - When you need structured choices from the user (preferences, stack, deploy target, etc.), use the `ask_question` tool with clear `options`, `allow_custom` when freeform is useful, and always set `suggested_answer` to your best recommendation so the user can accept quickly.
+- For multi-step work, keep an explicit session todo list via `update_todos` (full list replacement each call). Keep at most one item `in_progress`.
 
 Headless and orchestrator rules:
 - Headless runs must behave predictably for external orchestrators.

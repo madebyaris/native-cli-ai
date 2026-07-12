@@ -4,6 +4,7 @@ use super::overlay::{UiOverlay, UiOverlayKind};
 use nca_common::config::ProviderKind;
 use nca_common::event::{AgentEvent, BusyState, InteractiveQuestionPayload, QuestionSelection};
 use nca_common::message::ImageAttachment;
+use nca_common::todo::{AgentTodo, TodoStatus};
 use ratatui::text::Line;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -85,6 +86,17 @@ pub struct SubagentRow {
     pub tokens_out: u64,
 }
 
+/// Latest smart-context / compaction diagnostics for `/status`.
+#[derive(Debug, Clone, Default)]
+pub struct ContextCompactionReport {
+    pub phase: String,
+    pub message: String,
+    pub tokens_before: Option<usize>,
+    pub tokens_after: Option<usize>,
+    pub retained_groups: Option<usize>,
+    pub dropped_groups: Option<usize>,
+}
+
 /// Status of an API key validation during onboarding.
 #[derive(Debug, Clone)]
 pub enum OnboardingValidation {
@@ -112,6 +124,10 @@ pub struct TuiSessionState {
     pub staged_image_attachments: Vec<ImageAttachment>,
     /// Live view of spawned sub-agents (updated from child activity events).
     pub subagents: Vec<SubagentRow>,
+    /// Session todo list (last `TodosUpdated` wins).
+    pub todos: Vec<AgentTodo>,
+    /// Latest context compaction diagnostics (if any).
+    pub context_report: Option<ContextCompactionReport>,
     pub model: String,
     pub agent_profile: String,
     pub permission_mode: String,
@@ -200,6 +216,8 @@ impl TuiSessionState {
             workspace_display: String::new(),
             staged_image_attachments: Vec::new(),
             subagents: Vec::new(),
+            todos: Vec::new(),
+            context_report: None,
             model,
             agent_profile,
             permission_mode,
@@ -1012,6 +1030,88 @@ impl TuiSessionState {
         self.mark_transcript_dirty();
     }
 
+    /// Newest committed assistant response, or non-empty streaming text when
+    /// nothing has been committed yet.
+    pub fn last_assistant_text(&self) -> Option<&str> {
+        for block in self.blocks.iter().rev() {
+            if let DisplayBlock::Assistant(text) = block {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    return Some(text.as_str());
+                }
+            }
+        }
+        self.streaming_assistant
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    /// Seed or replace the todo list (e.g. from a resumed session snapshot).
+    pub fn set_todos(&mut self, todos: Vec<AgentTodo>) {
+        self.todos = todos;
+        self.mark_dirty();
+    }
+
+    /// Progress summary like `2/5 done`.
+    pub fn todo_progress(&self) -> (usize, usize) {
+        let done = self
+            .todos
+            .iter()
+            .filter(|t| matches!(t.status, TodoStatus::Completed | TodoStatus::Cancelled))
+            .count();
+        (done, self.todos.len())
+    }
+
+    /// Compact sidebar rows: up to `limit` items, with `+N more` overflow.
+    pub fn todo_sidebar_lines(&self, limit: usize) -> Vec<String> {
+        let mut lines = Vec::new();
+        let (done, total) = self.todo_progress();
+        if total == 0 {
+            lines.push("none yet".into());
+            return lines;
+        }
+        lines.push(format!("{done}/{total} done"));
+        for todo in self.todos.iter().take(limit) {
+            lines.push(format!(
+                "{} {}",
+                todo.status.glyph(),
+                truncate(&todo.content, 24)
+            ));
+        }
+        if self.todos.len() > limit {
+            lines.push(format!("+{} more", self.todos.len() - limit));
+        }
+        lines
+    }
+
+    /// Full list for the `/todos` info modal.
+    pub fn todo_modal_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        let (done, total) = self.todo_progress();
+        lines.push(format!("Session todos ({done}/{total} done)"));
+        lines.push(String::new());
+        if self.todos.is_empty() {
+            lines.push("No todos yet. The agent updates them via `update_todos`.".into());
+            return lines;
+        }
+        for todo in &self.todos {
+            let source = match todo.source {
+                Some(nca_common::todo::TodoSource::Agent) => " [agent]",
+                Some(nca_common::todo::TodoSource::Plan) => " [plan]",
+                Some(nca_common::todo::TodoSource::User) => " [user]",
+                None => "",
+            };
+            lines.push(format!(
+                "{} [{}] {}{}",
+                todo.status.glyph(),
+                todo.id,
+                todo.content,
+                source
+            ));
+        }
+        lines
+    }
+
     /// Approval/question prompts from replayed history are transcript only.
     /// The live pending channels are not restored on resume, so these must not
     /// keep the input box in approval/answer mode.
@@ -1383,6 +1483,37 @@ impl TuiSessionState {
             AgentEvent::BusyStateChanged { state } => {
                 self.set_busy_state(*state);
             }
+            AgentEvent::TodosUpdated { todos } => {
+                self.todos = todos.clone();
+                self.mark_dirty();
+            }
+            AgentEvent::ContextCompaction {
+                phase,
+                message,
+                tokens_before,
+                tokens_after,
+                retained_groups,
+                dropped_groups,
+            } => {
+                self.context_report = Some(ContextCompactionReport {
+                    phase: phase.clone(),
+                    message: message.clone(),
+                    tokens_before: *tokens_before,
+                    tokens_after: *tokens_after,
+                    retained_groups: *retained_groups,
+                    dropped_groups: *dropped_groups,
+                });
+                // Only surface a concise system line for completed phases to avoid spam.
+                if phase == "completed" || phase == "dry_run" {
+                    self.blocks
+                        .push(DisplayBlock::System(format!("[context] {message}")));
+                }
+                self.mark_dirty();
+            }
+            AgentEvent::ContextWarning { message } => {
+                self.blocks
+                    .push(DisplayBlock::System(format!("[context] {message}")));
+            }
             _ => {}
         }
     }
@@ -1644,6 +1775,89 @@ mod tests {
         assert!(st.active_question.is_none());
         assert!(!st.question_modal_open());
         assert_eq!(st.question_modal_index(), 0);
+    }
+
+    #[test]
+    fn last_assistant_text_prefers_newest_committed() {
+        let mut st = TuiSessionState::new(
+            "s".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+        );
+        assert!(st.last_assistant_text().is_none());
+
+        st.blocks
+            .push(DisplayBlock::Assistant("first response".into()));
+        st.blocks
+            .push(DisplayBlock::Assistant("second response".into()));
+        st.streaming_assistant = Some("partial".into());
+        assert_eq!(st.last_assistant_text(), Some("second response"));
+    }
+
+    #[test]
+    fn last_assistant_text_falls_back_to_streaming() {
+        let mut st = TuiSessionState::new(
+            "s".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+        );
+        st.streaming_assistant = Some("still streaming".into());
+        assert_eq!(st.last_assistant_text(), Some("still streaming"));
+
+        st.blocks.push(DisplayBlock::Assistant("   ".into()));
+        assert_eq!(st.last_assistant_text(), Some("still streaming"));
+    }
+
+    #[test]
+    fn last_assistant_text_empty_transcript() {
+        let st = TuiSessionState::new(
+            "s".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+        );
+        assert!(st.last_assistant_text().is_none());
+    }
+
+    #[test]
+    fn todos_updated_replaces_list() {
+        let mut st = TuiSessionState::new(
+            "s".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+        );
+        st.apply_event(&AgentEvent::TodosUpdated {
+            todos: vec![
+                AgentTodo {
+                    id: "1".into(),
+                    content: "First".into(),
+                    status: TodoStatus::Completed,
+                    source: None,
+                },
+                AgentTodo {
+                    id: "2".into(),
+                    content: "Second longer task name here".into(),
+                    status: TodoStatus::InProgress,
+                    source: None,
+                },
+            ],
+        });
+        assert_eq!(st.todos.len(), 2);
+        assert_eq!(st.todo_progress(), (1, 2));
+        let sidebar = st.todo_sidebar_lines(6);
+        assert!(sidebar[0].contains("1/2"));
+        assert!(sidebar.iter().any(|l| l.contains("◉")));
+
+        st.apply_event(&AgentEvent::TodosUpdated { todos: vec![] });
+        assert!(st.todos.is_empty());
+        assert_eq!(st.todo_modal_lines()[0], "Session todos (0/0 done)");
     }
 
     #[test]

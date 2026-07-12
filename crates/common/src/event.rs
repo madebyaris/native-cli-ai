@@ -140,6 +140,10 @@ pub enum AgentEvent {
         question_id: String,
         selection: QuestionSelection,
     },
+    /// Full replacement of the session todo list (last write wins on replay).
+    TodosUpdated {
+        todos: Vec<crate::todo::AgentTodo>,
+    },
     /// Warning that context is approaching limit.
     ContextWarning {
         message: String,
@@ -148,6 +152,18 @@ pub enum AgentEvent {
     ContextCompaction {
         phase: String,
         message: String,
+        /// Estimated tokens before compaction (optional for older logs).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens_before: Option<usize>,
+        /// Estimated tokens after compaction (optional for older logs).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens_after: Option<usize>,
+        /// Groups retained in the provider request view.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retained_groups: Option<usize>,
+        /// Groups dropped or truncated from the provider request view.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dropped_groups: Option<usize>,
     },
     /// Busy state transition (for animated indicator rendering).
     BusyStateChanged {
@@ -283,6 +299,46 @@ mod interactive_question_serde_tests {
             } => {
                 assert_eq!(question_id, "q-1");
                 assert!(matches!(selection, QuestionSelection::Suggested));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn todos_updated_roundtrip() {
+        let ev = AgentEvent::TodosUpdated {
+            todos: vec![crate::todo::AgentTodo {
+                id: "1".into(),
+                content: "Do thing".into(),
+                status: crate::todo::TodoStatus::Pending,
+                source: Some(crate::todo::TodoSource::Agent),
+            }],
+        };
+        let json = serde_json::to_string(&ev).expect("serialize");
+        let back: AgentEvent = serde_json::from_str(&json).expect("deserialize");
+        match back {
+            AgentEvent::TodosUpdated { todos } => {
+                assert_eq!(todos.len(), 1);
+                assert_eq!(todos[0].id, "1");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn old_context_compaction_still_deserializes() {
+        let raw = r#"{"type":"ContextCompaction","phase":"completed","message":"done"}"#;
+        let back: AgentEvent = serde_json::from_str(raw).expect("deserialize");
+        match back {
+            AgentEvent::ContextCompaction {
+                phase,
+                tokens_before,
+                retained_groups,
+                ..
+            } => {
+                assert_eq!(phase, "completed");
+                assert!(tokens_before.is_none());
+                assert!(retained_groups.is_none());
             }
             _ => panic!("wrong variant"),
         }

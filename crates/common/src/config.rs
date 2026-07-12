@@ -1174,6 +1174,36 @@ pub struct ContextConfig {
     /// Enable automatic context summarization.
     #[serde(default = "default_true")]
     pub enable_auto_summarize: bool,
+    /// Opt-in deterministic provider-request compaction.
+    /// `off` (default) sends canonical history unchanged.
+    /// `dry_run` computes savings diagnostics but still sends the full history.
+    /// `on` sends a compact cloned view while persisting canonical history.
+    #[serde(default)]
+    pub smart_compaction_mode: SmartCompactionMode,
+}
+
+/// Provider-request smart compaction mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SmartCompactionMode {
+    #[default]
+    Off,
+    DryRun,
+    On,
+}
+
+impl SmartCompactionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::DryRun => "dry_run",
+            Self::On => "on",
+        }
+    }
+
+    pub fn is_enabled(self) -> bool {
+        !matches!(self, Self::Off)
+    }
 }
 
 impl Default for ContextConfig {
@@ -1185,6 +1215,7 @@ impl Default for ContextConfig {
             max_retained_messages: default_max_retained_messages(),
             auto_summarize_threshold: default_summarize_threshold(),
             enable_auto_summarize: default_true(),
+            smart_compaction_mode: SmartCompactionMode::Off,
         }
     }
 }
@@ -1348,6 +1379,9 @@ impl ContextConfig {
         }
         if let Some(query_provider_models_api) = partial.query_provider_models_api {
             self.query_provider_models_api = query_provider_models_api;
+        }
+        if let Some(smart_compaction_mode) = partial.smart_compaction_mode {
+            self.smart_compaction_mode = smart_compaction_mode;
         }
     }
 }
@@ -1544,6 +1578,7 @@ struct PartialContextConfig {
     max_retained_messages: Option<usize>,
     auto_summarize_threshold: Option<u8>,
     enable_auto_summarize: Option<bool>,
+    smart_compaction_mode: Option<SmartCompactionMode>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

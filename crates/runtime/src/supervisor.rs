@@ -11,6 +11,7 @@ use nca_common::event::{AgentCommand, AgentEvent, EndReason, EventEnvelope, Ques
 use nca_common::session::{
     OrchestrationContext, SessionMeta, SessionSnapshot, SessionState, SessionStatus,
 };
+use nca_common::todo::AgentTodo;
 use nca_core::agent::AgentLoop;
 use nca_core::approval::{ApprovalHandler, ApprovalPolicy, ApprovalVerdict};
 use nca_core::harness::build_system_prompt;
@@ -22,6 +23,7 @@ use nca_core::tools::AskQuestionTool;
 use nca_core::tools::InvokeSkillTool;
 use nca_core::tools::RecentSkillHints;
 use nca_core::tools::ToolRegistry;
+use nca_core::tools::UpdateTodosTool;
 use nca_core::tools::mcp::load_mcp_tools;
 use nca_core::tools::spawn_subagent::{SpawnRequest, SpawnSubagentTool};
 use serde_json::json;
@@ -63,6 +65,8 @@ pub struct Supervisor {
     spawn_reason: Option<String>,
     session_summary: Option<String>,
     orchestration: Option<OrchestrationContext>,
+    /// Authoritative session todo list (shared with `update_todos` tool).
+    todos: Arc<Mutex<Vec<AgentTodo>>>,
     config: NcaConfig,
     hooks: Option<HookRunner>,
     context_manager: ContextManager,
@@ -184,9 +188,14 @@ impl Supervisor {
 
         let (event_tx, event_rx) = mpsc::channel(256);
         let question_pending = Arc::new(Mutex::new(HashMap::new()));
+        let todos: Arc<Mutex<Vec<AgentTodo>>> = Arc::new(Mutex::new(Vec::new()));
         tools.register(Box::new(AskQuestionTool::new(
             event_tx.clone(),
             question_pending.clone(),
+        )));
+        tools.register(Box::new(UpdateTodosTool::new(
+            event_tx.clone(),
+            todos.clone(),
         )));
         tools.register(Box::new(InvokeSkillTool::new(
             workspace_root.clone(),
@@ -225,6 +234,7 @@ impl Supervisor {
             config.session.checkpoint_interval,
             hook_runner.clone(),
         );
+        agent.set_smart_compaction_mode(config.memory.context.smart_compaction_mode);
         let system_prompt =
             build_system_prompt(&config, &workspace_root, cfg.orchestration_context.as_ref());
         agent.set_system_prompt(system_prompt);
@@ -256,6 +266,7 @@ impl Supervisor {
             spawn_reason: None,
             session_summary: None,
             orchestration: cfg.orchestration_context,
+            todos,
             config,
             hooks: hook_runner,
             context_manager,
@@ -315,6 +326,9 @@ impl Supervisor {
         sup.spawn_reason = loaded.meta.spawn_reason;
         sup.session_summary = loaded.meta.session_summary;
         sup.orchestration = loaded.meta.orchestration;
+        if let Ok(mut guard) = sup.todos.lock() {
+            *guard = loaded.todos;
+        }
         sup.context_manager = Self::make_context_manager(&sup.config, &sup.model).await;
         Ok(sup)
     }
@@ -457,6 +471,10 @@ impl Supervisor {
                             "Auto-summarizing context ({}% full, {} tokens)",
                             stats.usage_percent, stats.estimated_tokens
                         ),
+                        tokens_before: Some(stats.estimated_tokens),
+                        tokens_after: None,
+                        retained_groups: None,
+                        dropped_groups: None,
                     })
                     .await;
             }
@@ -510,6 +528,10 @@ impl Supervisor {
                                 messages_to_summarize.len() * 100, // rough estimate
                                 self.last_summary_at_tokens
                             ),
+                            tokens_before: None,
+                            tokens_after: Some(self.last_summary_at_tokens),
+                            retained_groups: None,
+                            dropped_groups: None,
                         })
                         .await;
                 }
@@ -637,11 +659,17 @@ impl Supervisor {
             total_input_tokens: self.agent.cost_tracker.input_tokens,
             total_output_tokens: self.agent.cost_tracker.output_tokens,
             estimated_cost_usd: self.agent.cost_tracker.estimated_cost_usd(),
+            todos: self.todos.lock().map(|g| g.clone()).unwrap_or_default(),
         }
     }
 
     pub fn snapshot(&self) -> SessionSnapshot {
         self.current_session_state(Utc::now()).snapshot()
+    }
+
+    /// Current session todos (clone for UI seeding).
+    pub fn todos(&self) -> Vec<AgentTodo> {
+        self.todos.lock().map(|g| g.clone()).unwrap_or_default()
     }
 
     pub fn compact_summary(&self) -> String {
@@ -727,9 +755,11 @@ impl Supervisor {
         let provider = build_provider(&config)?;
         self.config = config;
         self.model = self.config.provider.active_model().to_string();
+        let mode = self.config.memory.context.smart_compaction_mode;
         let m = self.model.clone();
         let agent = self.agent_mut();
         agent.model = m;
+        agent.set_smart_compaction_mode(mode);
         agent.replace_provider(provider);
         self.rebuild_context_manager_sync();
         Ok(())
@@ -1635,6 +1665,7 @@ mod tests {
             total_input_tokens: 0,
             total_output_tokens: 0,
             estimated_cost_usd: 0.0,
+            todos: Vec::new(),
         };
 
         let json = serde_json::to_string_pretty(&session).expect("serialize session");

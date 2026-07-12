@@ -158,6 +158,24 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         Tui
     ),
     command!(
+        "copy",
+        "/copy",
+        [],
+        "Copy last assistant response",
+        Session,
+        "ctrl+shift+c",
+        Tui
+    ),
+    command!(
+        "todos",
+        "/todos",
+        [],
+        "Show session todos",
+        Session,
+        "",
+        Always
+    ),
+    command!(
         "editor",
         "/editor",
         [],
@@ -350,5 +368,21 @@ mod tests {
         }
         assert!(!help.contains("/undo"));
         assert!(!help.contains("/redo"));
+    }
+
+    #[test]
+    fn copy_command_is_registered_for_tui() {
+        let spec = resolve_command("/copy").expect("copy command");
+        assert_eq!(spec.id, "copy");
+        assert_eq!(spec.name, "/copy");
+        assert_eq!(spec.shortcut, "ctrl+shift+c");
+        assert_eq!(spec.availability, CommandAvailability::Tui);
+    }
+
+    #[test]
+    fn todos_command_is_registered() {
+        let spec = resolve_command("/todos").expect("todos command");
+        assert_eq!(spec.id, "todos");
+        assert_eq!(spec.category, CommandCategory::Session);
     }
 }

@@ -173,6 +173,7 @@ impl ApprovalPolicy {
                 | "web_search"
                 | "fetch_url"
                 | "ask_question"
+                | "update_todos"
         );
         let file_edit = matches!(
             tool_name,

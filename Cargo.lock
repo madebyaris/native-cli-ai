@@ -2220,6 +2220,7 @@ dependencies = [
  "async-trait",
  "base64",
  "chrono",
+ "criterion",
  "futures-util",
  "genai",
  "globset",

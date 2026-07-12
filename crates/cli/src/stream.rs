@@ -416,6 +416,43 @@ fn render_event(event: &AgentEvent, stats: &StreamStats) {
                 selection
             );
         }
+        AgentEvent::TodosUpdated { todos } => {
+            print!("{}", theme::CLEAR_LINE);
+            let done = todos
+                .iter()
+                .filter(|t| {
+                    matches!(
+                        t.status,
+                        nca_common::todo::TodoStatus::Completed
+                            | nca_common::todo::TodoStatus::Cancelled
+                    )
+                })
+                .count();
+            println!(
+                "  {} todos updated ({}/{} done)",
+                "✓".color(theme::SUCCESS),
+                done,
+                todos.len()
+            );
+        }
+        AgentEvent::ContextWarning { message } => {
+            print!("{}", theme::CLEAR_LINE);
+            println!(
+                "  {} {}",
+                "!".color(theme::WARNING),
+                message.color(theme::WARNING)
+            );
+        }
+        AgentEvent::ContextCompaction { phase, message, .. } => {
+            if phase == "completed" || phase == "dry_run" {
+                print!("{}", theme::CLEAR_LINE);
+                println!(
+                    "  {} {}",
+                    "↻".color(theme::TOOL_BG),
+                    message.color(theme::TEXT_DIM)
+                );
+            }
+        }
         AgentEvent::CostUpdated {
             input_tokens,
             output_tokens,

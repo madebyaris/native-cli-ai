@@ -610,9 +610,11 @@ impl Repl {
                     "  Ctrl+X H     Help".into(),
                     "  Ctrl+X Q     Exit".into(),
                     "  Ctrl+C       Cancel request".into(),
+                    "  Ctrl+Shift+C Copy last assistant response".into(),
                     "  Ctrl+L       Clear screen".into(),
                     "  Ctrl+V       Paste image (TUI)".into(),
                     "  F2           Cycle recent models".into(),
+                    "  Shift+drag   Native terminal selection fallback".into(),
                 ]);
                 if let ReplOutput::Tui(st) = &out {
                     if let Ok(mut g) = st.lock() {
@@ -632,6 +634,7 @@ impl Repl {
                     format!("Agent:       @{}", self.agent_profile.label()),
                     format!("Permission:  {:?}", self.runtime.permission_mode()),
                     format!("Children:    {}", snapshot.child_session_ids.len()),
+                    format!("Todos:       {}", snapshot.todos.len()),
                     format!("Memory:      {}", self.runtime.memory_store_path().display()),
                     String::new(),
                     "Provider health:".into(),
@@ -653,6 +656,24 @@ impl Repl {
                 }
                 if let ReplOutput::Tui(st) = &out {
                     if let Ok(mut g) = st.lock() {
+                        if let Some(report) = &g.context_report {
+                            lines.push(String::new());
+                            lines.push("Context compaction:".into());
+                            lines.push(format!("  phase     {}", report.phase));
+                            lines.push(format!("  message   {}", report.message));
+                            if let (Some(before), Some(after)) =
+                                (report.tokens_before, report.tokens_after)
+                            {
+                                lines.push(format!("  tokens    {before} → {after}"));
+                            }
+                            if let (Some(retained), Some(dropped)) =
+                                (report.retained_groups, report.dropped_groups)
+                            {
+                                lines.push(format!(
+                                    "  groups    retained {retained}, dropped {dropped}"
+                                ));
+                            }
+                        }
                         g.open_info_modal("status", lines);
                     }
                 } else {
@@ -797,6 +818,79 @@ impl Repl {
             }
             "/clear" => {
                 out.clear_screen();
+            }
+            "/copy" => {
+                let text = match &out {
+                    ReplOutput::Tui(st) => st
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.last_assistant_text().map(str::to_string)),
+                    ReplOutput::Stdio => None,
+                };
+                match text {
+                    Some(content) => {
+                        let result = tokio::task::spawn_blocking(move || {
+                            crate::clipboard::set_clipboard_text(&content)
+                        })
+                        .await?;
+                        match result {
+                            Ok(()) => out.println("Copied last assistant response"),
+                            Err(error) => out.eprintln(&format!(
+                                "[copy] {error} — try Shift+drag terminal selection as a fallback"
+                            )),
+                        }
+                    }
+                    None => out.eprintln(
+                        "[copy] No assistant response to copy yet — try Shift+drag terminal selection as a fallback",
+                    ),
+                }
+            }
+            "/todos" => {
+                let lines = match &out {
+                    ReplOutput::Tui(st) => st
+                        .lock()
+                        .map(|g| g.todo_modal_lines())
+                        .unwrap_or_else(|_| {
+                            vec!["Unable to read session todos (lock poisoned)".into()]
+                        }),
+                    ReplOutput::Stdio => {
+                        let todos = self.runtime.todos();
+                        let mut lines = Vec::new();
+                        if todos.is_empty() {
+                            lines.push("No todos yet.".into());
+                        } else {
+                            let done = todos
+                                .iter()
+                                .filter(|t| {
+                                    matches!(
+                                        t.status,
+                                        nca_common::todo::TodoStatus::Completed
+                                            | nca_common::todo::TodoStatus::Cancelled
+                                    )
+                                })
+                                .count();
+                            lines.push(format!("Session todos ({done}/{} done)", todos.len()));
+                            for todo in &todos {
+                                lines.push(format!(
+                                    "{} [{}] {}",
+                                    todo.status.glyph(),
+                                    todo.id,
+                                    todo.content
+                                ));
+                            }
+                        }
+                        lines
+                    }
+                };
+                if let ReplOutput::Tui(st) = &out {
+                    if let Ok(mut g) = st.lock() {
+                        g.open_info_modal("todos", lines);
+                    }
+                } else {
+                    for l in &lines {
+                        out.println(l);
+                    }
+                }
             }
             "/undo" => {
                 out.eprintln("[undo] Not yet implemented - use /compact to save session state");
@@ -1701,6 +1795,15 @@ impl Repl {
         ));
         let tui_state = shared_state.arc();
 
+        // Seed from the authoritative session snapshot before replaying events so
+        // resume still shows todos even if the event log is truncated.
+        let snapshot_todos = self.runtime.todos();
+        if !snapshot_todos.is_empty()
+            && let Ok(mut g) = tui_state.lock()
+        {
+            g.set_todos(snapshot_todos);
+        }
+
         let log_path = self.runtime.event_log_path();
         replay_event_log_into_state(&log_path, &tui_state).await;
 
@@ -1918,6 +2021,10 @@ impl Repl {
                             }
                         }
                     }
+                }
+                TuiCmd::CopyLastAssistant => {
+                    self.handle_command("/copy", ReplOutput::Tui(&tui_state))
+                        .await?;
                 }
                 TuiCmd::ApplyDefaultProvider(p) => {
                     if p == ProviderKind::Custom

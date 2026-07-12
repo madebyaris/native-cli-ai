@@ -139,7 +139,16 @@ query_provider_models_api = true       # Fetch model limits from provider API
 max_retained_messages = 50
 auto_summarize_threshold = 75          # Percentage of context window used before summarizing
 enable_auto_summarize = true
+smart_compaction_mode = "off"          # off | dry_run | on (provider-request view only)
 ```
+
+`smart_compaction_mode` is opt-in and defaults to `off`:
+
+| Mode | Behavior |
+|------|----------|
+| `off` | Send the full canonical history (default). |
+| `dry_run` | Compute savings diagnostics and emit `ContextCompaction` with phase `dry_run`, but still send the full history. |
+| `on` | Send a compact cloned provider view; session JSON / `AgentLoop.messages` stay complete. |
 
 ### `[hooks]` — Lifecycle Hooks
 

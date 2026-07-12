@@ -265,6 +265,10 @@ impl ContextManager {
     /// Get a sliding window of recent messages for context.
     /// Preserves system messages and keeps recent conversation.
     /// Ensures tool_use/tool_result groups are never split.
+    ///
+    /// When the naive message-count window still exceeds the configured token
+    /// budget, shrinks the cutoff further by whole tool groups until it fits
+    /// (or only system messages remain).
     pub fn get_sliding_window(
         &self,
         messages: &[Message],
@@ -274,7 +278,7 @@ impl ContextManager {
         let system_count = Self::find_system_messages(messages).len();
 
         if messages.len() <= max {
-            return messages.to_vec();
+            return self.fit_window_to_token_budget(messages, system_count);
         }
 
         // Keep system messages + last (max - system_count) messages
@@ -284,8 +288,52 @@ impl ContextManager {
 
         let mut result: Vec<Message> = messages[..system_count].to_vec();
         result.extend_from_slice(&messages[cutoff..]);
+        self.fit_window_to_token_budget(&result, system_count.min(result.len()))
+    }
 
-        result
+    /// Shrink a candidate window from the front (after system messages) by whole
+    /// tool groups until estimated tokens fit under `context_window_target`.
+    fn fit_window_to_token_budget(
+        &self,
+        messages: &[Message],
+        system_count: usize,
+    ) -> Vec<Message> {
+        if self.config.context_window_target == 0
+            || Self::estimate_tokens_for_slice(messages) <= self.config.context_window_target
+        {
+            return messages.to_vec();
+        }
+
+        let system_prefix: Vec<Message> = messages.iter().take(system_count).cloned().collect();
+        let mut body: Vec<Message> = messages.iter().skip(system_count).cloned().collect();
+
+        while !body.is_empty()
+            && Self::estimate_tokens_for_slice(
+                &system_prefix
+                    .iter()
+                    .cloned()
+                    .chain(body.iter().cloned())
+                    .collect::<Vec<_>>(),
+            ) > self.config.context_window_target
+        {
+            // Drop the oldest body group (assistant+tools or single message).
+            let mut drop_count = 1;
+            let starts_tool_group = body[0].role == Role::Tool
+                || (body[0].role == Role::Assistant
+                    && body[0]
+                        .tool_calls
+                        .as_ref()
+                        .map(|c| !c.is_empty())
+                        .unwrap_or(false));
+            if starts_tool_group {
+                while drop_count < body.len() && body[drop_count].role == Role::Tool {
+                    drop_count += 1;
+                }
+            }
+            body.drain(0..drop_count);
+        }
+
+        system_prefix.into_iter().chain(body).collect()
     }
 
     /// Truncate very long messages for summary generation.

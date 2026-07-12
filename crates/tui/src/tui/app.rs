@@ -61,6 +61,8 @@ pub enum TuiCmd {
     CreateBranch(String),
     /// Read and stage a clipboard image away from the UI thread.
     PasteClipboard,
+    /// Copy the latest assistant response to the system clipboard.
+    CopyLastAssistant,
     /// Apply workspace default provider (from TUI picker).
     ApplyDefaultProvider(ProviderKind),
     /// Open API key modal for provider; bool indicates whether to connect after save/confirm.
@@ -306,7 +308,8 @@ pub fn run_blocking(
                         .constraints([
                             Constraint::Length(12),
                             Constraint::Length(8),
-                            Constraint::Min(10),
+                            Constraint::Length(10),
+                            Constraint::Min(8),
                         ])
                         .split(sidebar);
 
@@ -391,6 +394,38 @@ pub fn run_blocking(
                         .wrap(Wrap { trim: false });
                     frame.render_widget(usage_block, sections[1]);
 
+                    let mut task_lines: Vec<Line> = vec![Line::from(Span::styled(
+                        "tasks",
+                        Style::default()
+                            .fg(theme::MUTED)
+                            .add_modifier(Modifier::BOLD),
+                    ))];
+                    for line in g.todo_sidebar_lines(6) {
+                        let style = if line.starts_with('+') || line == "none yet" {
+                            Style::default().fg(theme::MUTED)
+                        } else if line.contains('/')
+                            && !line.starts_with(['○', '◉', '✓', '✗'])
+                        {
+                            Style::default().fg(theme::TOOL)
+                        } else {
+                            Style::default().fg(theme::TEXT)
+                        };
+                        task_lines.push(Line::from(Span::styled(line, style)));
+                    }
+                    let tasks_block = Paragraph::new(Text::from(task_lines))
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(theme::BORDER))
+                                .title(Span::styled(
+                                    " tasks ",
+                                    Style::default().fg(theme::MUTED),
+                                )),
+                        )
+                        .style(Style::default().bg(theme::SURFACE))
+                        .wrap(Wrap { trim: false });
+                    frame.render_widget(tasks_block, sections[2]);
+
                     let mut todo_lines: Vec<Line> = vec![Line::from(Span::styled(
                         "sub-agents",
                         Style::default()
@@ -472,7 +507,7 @@ pub fn run_blocking(
                         )
                         .style(Style::default().bg(theme::SURFACE))
                         .wrap(Wrap { trim: false });
-                    frame.render_widget(todo_block, sections[2]);
+                    frame.render_widget(todo_block, sections[3]);
                 }
 
                 let elapsed = g.started.elapsed().as_secs();
@@ -2508,6 +2543,13 @@ pub fn run_blocking(
                             g.blocks
                                 .push(DisplayBlock::System("Cancelling current run...".into()));
                             let _ = cmd_tx.try_send(TuiCmd::CancelTurn);
+                        }
+                        (KeyCode::Char('c' | 'C'), mods)
+                            if mods.contains(KeyModifiers::CONTROL)
+                                && mods.contains(KeyModifiers::SHIFT) =>
+                        {
+                            drop(g);
+                            let _ = cmd_tx.try_send(TuiCmd::CopyLastAssistant);
                         }
                         (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                             if let Some(ref flag) = cancel_flag {
