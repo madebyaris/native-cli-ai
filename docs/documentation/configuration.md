@@ -6,7 +6,7 @@ nca uses a layered TOML configuration system with environment variable overrides
 
 | File | Scope | Description |
 |------|-------|-------------|
-| `~/.nca/config.toml` | Global | User-wide defaults |
+| `~/.local/share/ncacli/config.toml` (or `$NCA_HOME` / `$XDG_DATA_HOME/ncacli`) | Global | User-wide defaults; falls back to reading `~/.nca/config.toml` if missing |
 | `<workspace>/.nca/config.local.toml` | Workspace | Project-specific overrides |
 
 Settings merge in order: **defaults → global → workspace → environment variables**. Later sources override earlier ones.
@@ -91,7 +91,9 @@ See [Permissions](./permissions.md) for full details on each mode.
 
 ```toml
 [session]
-history_dir = ".nca/sessions"       # Relative to workspace
+# Default ".nca/sessions" / ".nca/.last_session" sentinels resolve under
+# ~/.local/share/ncacli/workspaces/<workspace-id>/. Other relative paths stay workspace-local.
+history_dir = ".nca/sessions"
 max_turns_per_run = 128             # Max agent turns per session run
 max_tool_calls_per_turn = 200       # Max tool calls in a single turn
 checkpoint_interval = 5             # Save checkpoint every N turns
@@ -108,6 +110,10 @@ project_instructions_path = ".ncarc"              # Project instructions file
 local_instructions_path = ".nca/instructions.md"  # Local (personal) instructions
 skill_directories = [".nca/skills", ".claude/skills"]  # Skill discovery paths
 ```
+
+The harness rebuilds a **dynamic** system prompt each turn from a `HarnessSnapshot`
+(workspace cwd, git branch, model, permission mode, capped todos, capped memory notes)
+plus static layers (identity, AGENTS.md / project / local instructions, skills, tool playbook).
 
 ### `[mcp]` — Model Context Protocol
 
@@ -128,6 +134,7 @@ enabled = true
 
 ```toml
 [memory]
+# Default ".nca/memory.json" resolves under ~/.local/share/ncacli/workspaces/<id>/memory.json
 file_path = ".nca/memory.json"
 max_notes = 128
 auto_compact_on_finish = false

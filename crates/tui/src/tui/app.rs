@@ -488,7 +488,7 @@ pub fn run_blocking(
                             .add_modifier(Modifier::BOLD),
                     )));
                     todo_lines.push(Line::from(Span::styled(
-                        ".nca/sessions",
+                        "~/.local/share/ncacli",
                         Style::default().fg(theme::USER),
                     )));
                     todo_lines.push(Line::from(Span::styled(

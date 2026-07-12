@@ -6,7 +6,9 @@ use crate::approval_prompts::InteractiveIpcApprovalHandler;
 use clap::CommandFactory;
 use clap::Parser;
 use clap_complete::aot::generate;
-use nca_common::config::{NcaConfig, PermissionMode, ProviderKind};
+use nca_common::config::{
+    NcaConfig, PermissionMode, ProviderKind, resolve_memory_path, resolve_sessions_dir,
+};
 use nca_common::event::EndReason;
 use nca_common::event::{AgentCommand, EventEnvelope};
 use nca_common::session::{OrchestrationContext, SessionSnapshot, SessionStatus};
@@ -914,7 +916,8 @@ async fn spawn_run(
     json: bool,
 ) -> anyhow::Result<()> {
     let session_id = format!("session-{}", chrono::Utc::now().timestamp_millis());
-    let sessions_dir = workspace_root.join(".nca/sessions");
+    let config = NcaConfig::load_for_workspace(workspace_root).unwrap_or_default();
+    let sessions_dir = resolve_sessions_dir(&config, workspace_root);
     std::fs::create_dir_all(&sessions_dir)?;
     let spawn_log = sessions_dir.join(format!("{session_id}.spawn.log"));
     let stdout = std::fs::File::create(&spawn_log)?;
@@ -971,9 +974,8 @@ async fn list_sessions(
 ) -> anyhow::Result<()> {
     use nca_common::session::SessionStatus;
 
-    let store = nca_runtime::session_store::SessionStore::new(
-        workspace_root.join(&config.session.history_dir),
-    );
+    let store =
+        nca_runtime::session_store::SessionStore::new(resolve_sessions_dir(config, workspace_root));
     let ids = store.list().await.map_err(anyhow::Error::msg)?;
     let mut sessions = Vec::new();
     let mut unreadable = Vec::new();
@@ -1045,9 +1047,8 @@ async fn list_sessions(
 }
 
 async fn latest_session_id(config: &NcaConfig, workspace_root: &Path) -> anyhow::Result<String> {
-    let store = nca_runtime::session_store::SessionStore::new(
-        workspace_root.join(&config.session.history_dir),
-    );
+    let store =
+        nca_runtime::session_store::SessionStore::new(resolve_sessions_dir(config, workspace_root));
     let ids = store.list().await.map_err(anyhow::Error::msg)?;
     let mut latest = None;
 
@@ -1162,9 +1163,8 @@ async fn attach_session(
     session_id: &str,
     json: bool,
 ) -> anyhow::Result<()> {
-    let store = nca_runtime::session_store::SessionStore::new(
-        workspace_root.join(&config.session.history_dir),
-    );
+    let store =
+        nca_runtime::session_store::SessionStore::new(resolve_sessions_dir(config, workspace_root));
     let session = store.load(session_id).await.map_err(anyhow::Error::msg)?;
 
     if let Some(socket_path) = session.meta.socket_path.clone() {
@@ -1186,9 +1186,8 @@ async fn show_status(
     session_id: &str,
     json: bool,
 ) -> anyhow::Result<()> {
-    let store = nca_runtime::session_store::SessionStore::new(
-        workspace_root.join(&config.session.history_dir),
-    );
+    let store =
+        nca_runtime::session_store::SessionStore::new(resolve_sessions_dir(config, workspace_root));
     let snapshot = store
         .load_snapshot(session_id)
         .await
@@ -1207,9 +1206,8 @@ async fn cancel_session(
     session_id: &str,
     json: bool,
 ) -> anyhow::Result<()> {
-    let store = nca_runtime::session_store::SessionStore::new(
-        workspace_root.join(&config.session.history_dir),
-    );
+    let store =
+        nca_runtime::session_store::SessionStore::new(resolve_sessions_dir(config, workspace_root));
     let mut session = store.load(session_id).await.map_err(anyhow::Error::msg)?;
 
     if let Some(socket_path) = session.meta.socket_path.clone() {
@@ -1249,9 +1247,8 @@ async fn print_log_file(
     session_id: &str,
     json: bool,
 ) -> anyhow::Result<()> {
-    let log_path = workspace_root
-        .join(&config.session.history_dir)
-        .join(format!("{session_id}.events.jsonl"));
+    let log_path =
+        resolve_sessions_dir(config, workspace_root).join(format!("{session_id}.events.jsonl"));
     let data = match tokio::fs::read_to_string(&log_path).await {
         Ok(data) => data,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -1574,11 +1571,7 @@ fn show_doctor(config: &NcaConfig, workspace_root: &Path, json: bool) -> anyhow:
             .filter(|server| server.enabled)
             .count(),
         skill_count: skills,
-        memory_path: if config.memory.file_path.is_absolute() {
-            config.memory.file_path.clone()
-        } else {
-            workspace_root.join(&config.memory.file_path)
-        },
+        memory_path: resolve_memory_path(config, workspace_root),
     };
     if json {
         print_json(&output, false)?;
@@ -1710,11 +1703,7 @@ fn show_config(config: &NcaConfig, workspace_root: &Path, json: bool) -> anyhow:
 }
 
 fn workspace_memory_store(config: &NcaConfig, workspace_root: &Path) -> MemoryStore {
-    if config.memory.file_path.is_absolute() {
-        MemoryStore::new(config.memory.file_path.clone())
-    } else {
-        MemoryStore::new(workspace_root.join(&config.memory.file_path))
-    }
+    MemoryStore::new(resolve_memory_path(config, workspace_root))
 }
 
 #[derive(serde::Serialize)]

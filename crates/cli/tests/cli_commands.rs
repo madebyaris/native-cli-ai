@@ -451,7 +451,7 @@ fn index_build_writes_cli_index_json_under_nca_home() {
         .success()
         .stdout(predicates::str::contains("wrote"));
 
-    let workspaces = home.path().join(".nca/workspaces");
+    let workspaces = home.path().join(".local/share/ncacli/workspaces");
     assert!(workspaces.is_dir(), "expected {:?}", workspaces);
     let mut index_path = None;
     for entry in fs::read_dir(&workspaces).expect("read workspaces") {

@@ -1,5 +1,5 @@
 use crate::ipc_pending::{ApprovalPendingMap, QuestionPendingMap};
-use nca_common::config::{NcaConfig, PermissionMode};
+use nca_common::config::{NcaConfig, PermissionMode, resolve_sessions_dir};
 use nca_common::event::{AgentEvent, EndReason, QuestionSelection};
 use nca_common::session::{OrchestrationContext, SessionSnapshot};
 use nca_core::approval::{ApprovalHandler, ApprovalVerdict};
@@ -173,9 +173,10 @@ impl SessionRuntime {
     }
 
     pub async fn list_session_ids(&self) -> Result<Vec<String>, String> {
-        let store = nca_runtime::session_store::SessionStore::new(
-            self.workspace_root().join(&self.config.session.history_dir),
-        );
+        let store = nca_runtime::session_store::SessionStore::new(resolve_sessions_dir(
+            &self.config,
+            self.workspace_root(),
+        ));
         store.list().await.map_err(|err| err.to_string())
     }
 

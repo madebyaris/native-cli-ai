@@ -153,7 +153,7 @@ The main interface is designed to feel like a serious terminal tool, not a toy o
 | `nca skills` | List discovered skills with their source (`AGENTS.md`, filesystem, or user directory). |
 | `nca mcp` | List configured MCP servers. |
 | `nca completion <shell>` | Generate shell completions. |
-| `nca index build\|show` | Build or inspect a cached CLI index under `~/.nca/workspaces/<workspace-id>/`. |
+| `nca index build\|show` | Build or inspect a cached CLI index under `~/.local/share/ncacli/workspaces/<workspace-id>/`. |
 | `nca autoresearch once <program.md>` | Run a metric-driven research program and print parsed output. |
 
 There is also a hidden `serve` subcommand used for IPC-oriented service sessions.
@@ -227,23 +227,24 @@ See [Orchestration Contract](docs/orchestration.md) for the subprocess-facing su
 
 ## Storage and Paths
 
-`nca` is workspace-first. The current workspace keeps its own session history and local state.
+`nca` keeps project instructions and git worktrees in the workspace, and stores session/memory/cache data under a unified product home (`$NCA_HOME`, `$XDG_DATA_HOME/ncacli`, or `~/.local/share/ncacli/`).
 
 | Path | Purpose |
 |---|---|
-| `~/.nca/config.toml` | Global config file. |
+| `~/.local/share/ncacli/config.toml` | Global config file (legacy `~/.nca/config.toml` is still read if present). |
 | `<workspace>/.nca/config.local.toml` | Workspace-local config overrides. |
-| `<workspace>/.nca/sessions/<id>.json` | Saved session state. |
-| `<workspace>/.nca/sessions/<id>.events.jsonl` | Event log for the session. |
-| `<workspace>/.nca/memory.json` | Default memory store. |
+| `~/.local/share/ncacli/workspaces/<id>/sessions/<sid>.json` | Saved session state. |
+| `~/.local/share/ncacli/workspaces/<id>/sessions/<sid>.events.jsonl` | Event log for the session. |
+| `~/.local/share/ncacli/workspaces/<id>/memory.json` | Default memory store. |
+| `~/.local/share/ncacli/workspaces/<id>/last_session` | Auto-resume pointer. |
 | `<workspace>/AGENTS.md` | Repo-local instruction layer; each `## Heading` is also a discoverable skill. |
 | `<workspace>/.nca/skills/` | Default workspace skill directory. |
-| `~/.nca/skills/` | User-level skill directory. |
+| `~/.local/share/ncacli/skills/` | User-level skill directory (legacy `~/.nca/skills/` still discovered). |
 | `~/.claude/skills/` | Imported Claude-style skill directory, if present. |
 | `<repo>/.nca/worktrees/<session-id>` | Worktree path for isolated child sessions. |
 | `$XDG_RUNTIME_DIR/nca/<session_id>.sock` | IPC socket path when `XDG_RUNTIME_DIR` is set. |
 | `/tmp/nca/<session_id>.sock` | IPC socket fallback when `XDG_RUNTIME_DIR` is not set. |
-| `~/.nca/workspaces/<workspace-id>/cli-index.json` | Cached CLI index for agents and tooling. |
+| `~/.local/share/ncacli/workspaces/<id>/cli-index.json` | Cached CLI index for agents and tooling. |
 | `.ncarc` | Project instructions file committed with the repo. |
 | `.nca/instructions.md` | Local instructions file. |
 
@@ -267,7 +268,7 @@ Use `nca skills --json` to see all discovered skills with their sources.
 - System messages are always preserved; recent messages use a sliding window.
 - **Smart compaction** (opt-in) builds a deterministic provider-request view that truncates older read/search noise while keeping tool groups atomic. Canonical session history is never rewritten by this path.
 
-Configuration in `~/.nca/config.toml`:
+Configuration in `~/.local/share/ncacli/config.toml`:
 
 ```toml
 [memory.context]
@@ -302,7 +303,7 @@ Use `/connect` in the TUI (or the command palette) to pick a provider, enter an 
 
 See [Providers](docs/documentation/providers.md) for full details.
 
-Provider config is loaded from defaults, then `~/.nca/config.toml`, then `<workspace>/.nca/config.local.toml`, then environment overrides.
+Provider config is loaded from defaults, then `~/.local/share/ncacli/config.toml`, then `<workspace>/.nca/config.local.toml`, then environment overrides.
 
 Use `nca doctor` to verify provider readiness and `nca models` to inspect model selection.
 

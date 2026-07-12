@@ -107,7 +107,7 @@ pub struct ContextConfig {
 **Nested under `memory`:**
 ```toml
 [memory]
-file_path = ".nca/memory.json"
+file_path = ".nca/memory.json"  # Default sentinel → ~/.local/share/ncacli/workspaces/<id>/memory.json
 max_notes = 128
 auto_compact_on_finish = false
 

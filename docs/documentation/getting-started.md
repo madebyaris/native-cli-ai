@@ -83,18 +83,21 @@ nca -p "add a health check endpoint to the API"
 
 ## Directory Structure
 
-nca creates a `.nca/` directory in your workspace for local state:
+nca creates project-local files under `.nca/` for instructions, skills, and git worktrees. Session history, memory, and last-session pointers live under the product home (`$NCA_HOME`, `$XDG_DATA_HOME/ncacli`, or `~/.local/share/ncacli/`):
 
 ```
+~/.local/share/ncacli/
+├── config.toml
+└── workspaces/<slug>-<16hex>/
+    ├── sessions/             # Session state and event logs
+    ├── memory.json
+    ├── last_session
+    └── workspace.json
+
 my-project/
 ├── .nca/
 │   ├── config.local.toml    # Workspace-specific config overrides
 │   ├── instructions.md      # Local instructions for the agent
-│   ├── .last_session         # Pointer to the most recent session
-│   ├── memory.json           # Persistent memory notes
-│   ├── sessions/             # Session state and event logs
-│   │   ├── <id>.json         # Session state snapshot
-│   │   └── <id>.events.jsonl # Event log (NDJSON)
 │   ├── worktrees/            # Git worktrees for sub-agents
 │   └── skills/               # Local skill definitions
 ├── .ncarc                    # Project-level instructions
@@ -102,7 +105,7 @@ my-project/
 └── ...
 ```
 
-Global config lives at `~/.nca/config.toml`.
+Global config lives at `~/.local/share/ncacli/config.toml`.
 
 ## Custom Instructions
 

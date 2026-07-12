@@ -1,12 +1,14 @@
 use crate::context_manager::{ContextManager, ContextManagerConfig, ContextStats};
 use crate::ipc::{IpcHandle, IpcServer};
 use crate::last_session::LastSessionStore;
-use crate::memory_store::{MemoryNote, MemoryStore};
+use crate::memory_store::{MemoryNote, MemoryState, MemoryStore};
 use crate::model_limits_api;
 use crate::pty::PtyManager;
 use crate::session_store::SessionStore;
 use chrono::Utc;
-use nca_common::config::NcaConfig;
+use nca_common::config::{
+    NcaConfig, PermissionMode, resolve_last_session_path, resolve_memory_path, resolve_sessions_dir,
+};
 use nca_common::event::{AgentCommand, AgentEvent, EndReason, EventEnvelope, QuestionSelection};
 use nca_common::session::{
     OrchestrationContext, SessionMeta, SessionSnapshot, SessionState, SessionStatus,
@@ -14,7 +16,7 @@ use nca_common::session::{
 use nca_common::todo::AgentTodo;
 use nca_core::agent::AgentLoop;
 use nca_core::approval::{ApprovalHandler, ApprovalPolicy, ApprovalVerdict};
-use nca_core::harness::build_system_prompt;
+use nca_core::harness::{HarnessMemoryNote, HarnessSnapshot, build_system_prompt};
 use nca_core::hooks::{HookEventKind, HookRunner};
 use nca_core::provider::ProviderError;
 use nca_core::provider::factory::build_provider;
@@ -203,7 +205,7 @@ impl Supervisor {
             recent_skills,
         )));
         let session_id = cfg.session_id.unwrap_or_else(generate_session_id);
-        let session_store = SessionStore::new(workspace_root.join(&config.session.history_dir));
+        let session_store = SessionStore::new(resolve_sessions_dir(&config, &workspace_root));
 
         let ipc_server = IpcServer::new(&session_id);
         let socket_path = ipc_server.socket_path();
@@ -235,14 +237,11 @@ impl Supervisor {
             hook_runner.clone(),
         );
         agent.set_smart_compaction_mode(config.memory.context.smart_compaction_mode);
-        let system_prompt =
-            build_system_prompt(&config, &workspace_root, cfg.orchestration_context.as_ref());
-        agent.set_system_prompt(system_prompt);
 
         let context_manager =
             Self::make_context_manager(&config, &config.model.default_model).await;
 
-        let sup = Self {
+        let mut sup = Self {
             session_id,
             workspace_root,
             model: config.model.default_model.clone(),
@@ -272,6 +271,7 @@ impl Supervisor {
             context_manager,
             last_summary_at_tokens: 0,
         };
+        sup.refresh_system_prompt();
         sup.save().await.map_err(ProviderError::Other)?;
         sup.update_last_session()
             .await
@@ -302,7 +302,7 @@ impl Supervisor {
         })
         .await?;
 
-        let store = SessionStore::new(workspace_root.join(&config.session.history_dir));
+        let store = SessionStore::new(resolve_sessions_dir(&config, workspace_root));
         let loaded = store
             .load(session_id)
             .await
@@ -330,6 +330,7 @@ impl Supervisor {
             *guard = loaded.todos;
         }
         sup.context_manager = Self::make_context_manager(&sup.config, &sup.model).await;
+        sup.refresh_system_prompt();
         Ok(sup)
     }
 
@@ -378,6 +379,9 @@ impl Supervisor {
                 self.model
             )));
         }
+
+        // Refresh dynamic harness (env / todos / memory) before every turn.
+        self.refresh_system_prompt();
 
         // Check context before running turn
         self.maybe_compact_context().await;
@@ -624,10 +628,10 @@ impl Supervisor {
     /// Mark this session as the last active session for the workspace.
     /// Called on create, resume, run_turn, and finish to keep the pointer fresh.
     pub async fn update_last_session(&self) -> Result<(), String> {
-        let store = LastSessionStore::new(
-            self.workspace_root
-                .join(&self.config.session.last_session_file),
-        );
+        let store = LastSessionStore::new(resolve_last_session_path(
+            &self.config,
+            &self.workspace_root,
+        ));
         store
             .save(&self.session_id)
             .await
@@ -704,23 +708,13 @@ impl Supervisor {
     }
 
     pub fn memory_store_path(&self) -> PathBuf {
-        if self.config.memory.file_path.is_absolute() {
-            self.config.memory.file_path.clone()
-        } else {
-            self.workspace_root.join(&self.config.memory.file_path)
-        }
+        resolve_memory_path(&self.config, &self.workspace_root)
     }
 
     /// Reset for a fresh session: new ID, rebuild system prompt, clear lineage and cost.
     pub fn reset_for_new_session(&mut self) {
         self.session_id = generate_session_id();
         self.agent.messages.clear();
-        let system_prompt = build_system_prompt(
-            &self.config,
-            &self.workspace_root,
-            self.orchestration.as_ref(),
-        );
-        self.agent.set_system_prompt(system_prompt);
         self.child_session_ids.clear();
         self.parent_session_id = None;
         self.inherited_summary = None;
@@ -731,7 +725,52 @@ impl Supervisor {
         self.created_at = Utc::now();
         self.last_summary_at_tokens = 0;
         self.session_store =
-            SessionStore::new(self.workspace_root.join(&self.config.session.history_dir));
+            SessionStore::new(resolve_sessions_dir(&self.config, &self.workspace_root));
+        self.refresh_system_prompt();
+    }
+
+    /// Build a harness snapshot from current workspace, config, memory, and todos.
+    pub fn build_harness_snapshot(&self) -> HarnessSnapshot {
+        let todos = self
+            .todos
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        HarnessSnapshot {
+            workspace_root: self.workspace_root.clone(),
+            cwd_display: self.workspace_root.display().to_string(),
+            git_branch: detect_git_branch(&self.workspace_root),
+            model: self.model.clone(),
+            permission_mode: permission_mode_label(self.config.permissions.mode),
+            agent_profile: None,
+            memory_notes: self.load_memory_notes_for_harness(),
+            todos,
+        }
+    }
+
+    /// Rebuild the agent system prompt from the current harness snapshot.
+    pub fn refresh_system_prompt(&mut self) {
+        let snapshot = self.build_harness_snapshot();
+        let prompt = build_system_prompt(&self.config, &snapshot, self.orchestration.as_ref());
+        self.agent.set_system_prompt(prompt);
+    }
+
+    fn load_memory_notes_for_harness(&self) -> Vec<HarnessMemoryNote> {
+        let path = self.memory_store_path();
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            return Vec::new();
+        };
+        let Ok(state) = serde_json::from_str::<MemoryState>(&raw) else {
+            return Vec::new();
+        };
+        state
+            .notes
+            .into_iter()
+            .map(|note| HarnessMemoryNote {
+                kind: note.kind,
+                content: note.content,
+            })
+            .collect()
     }
 
     pub fn session_id(&self) -> &str {
@@ -762,6 +801,7 @@ impl Supervisor {
         agent.set_smart_compaction_mode(mode);
         agent.replace_provider(provider);
         self.rebuild_context_manager_sync();
+        self.refresh_system_prompt();
         Ok(())
     }
 
@@ -1128,6 +1168,34 @@ fn generate_session_id() -> String {
     format!("session-{}-{counter}", Utc::now().timestamp_micros())
 }
 
+fn permission_mode_label(mode: PermissionMode) -> String {
+    match mode {
+        PermissionMode::Default => "default",
+        PermissionMode::Plan => "plan",
+        PermissionMode::AcceptEdits => "accept-edits",
+        PermissionMode::DontAsk => "dont-ask",
+        PermissionMode::BypassPermissions => "bypass-permissions",
+    }
+    .to_string()
+}
+
+fn detect_git_branch(workspace: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(workspace)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() || branch == "HEAD" {
+        None
+    } else {
+        Some(branch)
+    }
+}
+
 /// Query the current state of a session from its store.
 pub async fn query_session_state(
     session_store: &SessionStore,
@@ -1190,7 +1258,7 @@ pub fn spawn_subagent_consumer(
     event_tx: Option<tokio::sync::mpsc::Sender<AgentEvent>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let parent_sessions_dir = workspace_root.join(&config.session.history_dir);
+        let parent_sessions_dir = resolve_sessions_dir(&config, &workspace_root);
         let parent_summary = build_parent_summary(&parent_messages);
 
         while let Some(req) = spawn_rx.recv().await {
@@ -1558,18 +1626,18 @@ fn is_pid_alive(pid: u32) -> bool {
     }
 }
 
-/// Get the last session ID from `.nca/.last_session`, if it exists and is valid.
+/// Get the last session ID from the last-session pointer, if it exists and is valid.
 /// Falls back to finding the most recently updated session in the sessions directory.
 pub async fn get_last_session_id(
     config: &NcaConfig,
     workspace_root: &Path,
 ) -> anyhow::Result<Option<String>> {
     // First, try the explicit last-session pointer
-    let store = LastSessionStore::new(workspace_root.join(&config.session.last_session_file));
+    let store = LastSessionStore::new(resolve_last_session_path(config, workspace_root));
     match store.load().await {
         Ok(Some(id)) => {
             // Verify the session still exists on disk.
-            let session_store = SessionStore::new(workspace_root.join(&config.session.history_dir));
+            let session_store = SessionStore::new(resolve_sessions_dir(config, workspace_root));
             match session_store.load(&id).await {
                 Ok(_) => return Ok(Some(id)),
                 Err(_) => {
@@ -1588,7 +1656,7 @@ pub async fn get_last_session_id(
     }
 
     // Fallback: find the most recently updated session in the sessions directory
-    let session_store = SessionStore::new(workspace_root.join(&config.session.history_dir));
+    let session_store = SessionStore::new(resolve_sessions_dir(config, workspace_root));
     let ids = match session_store.list().await {
         Ok(ids) => ids,
         Err(e) => {
@@ -1638,7 +1706,8 @@ mod tests {
         model: &str,
         status: SessionStatus,
     ) {
-        let sessions_dir = workspace.join(".nca").join("sessions");
+        let config = nca_common::config::NcaConfig::default();
+        let sessions_dir = resolve_sessions_dir(&config, workspace);
         std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
 
         let session = SessionState {
@@ -1674,11 +1743,14 @@ mod tests {
 
     #[tokio::test]
     async fn get_last_session_id_falls_back_to_most_recent() {
+        let home = tempfile::tempdir().expect("home");
+        unsafe { std::env::set_var("NCA_HOME", home.path()) };
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path();
+        let _ = std::fs::create_dir_all(workspace);
         let now = Utc::now();
 
-        // Write sessions WITHOUT .last_session file
+        // Write sessions WITHOUT last_session pointer
         write_session_for_test(
             workspace,
             "session-oldest",
@@ -1710,14 +1782,16 @@ mod tests {
         // Should find the most recent session
         assert_eq!(session_id, "session-newest");
 
-        // The .last_session file should now be updated
-        let last_session_path = workspace.join(".nca").join(".last_session");
+        // The last_session pointer should now be updated under product home
+        let last_session_path = resolve_last_session_path(&config, workspace);
         assert!(
             last_session_path.exists(),
-            ".last_session should be created"
+            "last_session should be created at {}",
+            last_session_path.display()
         );
         let content = std::fs::read_to_string(&last_session_path).unwrap();
         assert_eq!(content.trim(), "session-newest");
+        unsafe { std::env::remove_var("NCA_HOME") };
     }
 
     #[tokio::test]
