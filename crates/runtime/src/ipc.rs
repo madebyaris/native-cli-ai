@@ -1,21 +1,34 @@
 use nca_common::event::{AgentCommand, EventEnvelope};
+use std::path::Path;
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
 
+#[cfg(windows)]
+type IpcListener = tokio::net::TcpListener;
+#[cfg(unix)]
+type IpcListener = tokio::net::UnixListener;
+#[cfg(windows)]
+type IpcStream = tokio::net::TcpStream;
+#[cfg(unix)]
+type IpcStream = tokio::net::UnixStream;
+
 /// IPC server that broadcasts AgentEvents and receives AgentCommands
-/// over a Unix domain socket.
+/// over a Unix domain socket or Windows loopback TCP.
 pub struct IpcServer {
     socket_path: PathBuf,
 }
 
 impl IpcServer {
     pub fn new(session_id: &str) -> Self {
+        #[cfg(unix)]
         let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/tmp"));
+            .unwrap_or_else(|_| std::env::temp_dir());
+        #[cfg(unix)]
         let socket_path = runtime_dir.join("nca").join(format!("{session_id}.sock"));
+        #[cfg(windows)]
+        let socket_path = windows_tcp_endpoint(session_id);
         Self { socket_path }
     }
 
@@ -25,17 +38,18 @@ impl IpcServer {
 
     /// Start listening for client connections.
     pub async fn start(&self) -> Result<IpcHandle, IpcError> {
+        #[cfg(unix)]
         if let Some(parent) = self.socket_path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(|err| IpcError::ConnectionFailed(err.to_string()))?;
         }
+        #[cfg(unix)]
         if self.socket_path.exists() {
             let _ = tokio::fs::remove_file(&self.socket_path).await;
         }
 
-        let listener = UnixListener::bind(&self.socket_path)
-            .map_err(|err| IpcError::ConnectionFailed(err.to_string()))?;
+        let listener = bind_listener(&self.socket_path).await?;
         let (event_tx, _) = broadcast::channel::<String>(256);
         let accept_event_tx = event_tx.clone();
         let (command_tx, command_rx) = mpsc::unbounded_channel();
@@ -50,7 +64,7 @@ impl IpcServer {
                 let command_tx = command_tx.clone();
                 tokio::spawn(handle_connection(stream, event_rx, command_tx));
             }
-            let _ = tokio::fs::remove_file(socket_path).await;
+            cleanup_endpoint(&socket_path).await;
         });
 
         Ok(IpcHandle {
@@ -105,9 +119,7 @@ impl IpcClient {
     }
 
     pub async fn connect(&self) -> Result<mpsc::Receiver<EventEnvelope>, IpcError> {
-        let stream = UnixStream::connect(&self.socket_path)
-            .await
-            .map_err(|err| IpcError::ConnectionFailed(err.to_string()))?;
+        let stream = connect_stream(&self.socket_path).await?;
         let (tx, rx) = mpsc::channel(128);
         tokio::spawn(async move {
             let reader = BufReader::new(stream);
@@ -124,9 +136,7 @@ impl IpcClient {
     }
 
     pub async fn send_command(&self, cmd: &AgentCommand) -> Result<(), IpcError> {
-        let mut stream = UnixStream::connect(&self.socket_path)
-            .await
-            .map_err(|err| IpcError::ConnectionFailed(err.to_string()))?;
+        let mut stream = connect_stream(&self.socket_path).await?;
         let line = serde_json::to_string(cmd)
             .map_err(|err| IpcError::ConnectionFailed(err.to_string()))?;
         stream
@@ -147,12 +157,58 @@ pub enum IpcError {
     ConnectionFailed(String),
 }
 
+#[cfg(unix)]
+async fn bind_listener(endpoint: &Path) -> Result<IpcListener, IpcError> {
+    IpcListener::bind(endpoint).map_err(|err| IpcError::ConnectionFailed(err.to_string()))
+}
+
+#[cfg(windows)]
+async fn bind_listener(endpoint: &Path) -> Result<IpcListener, IpcError> {
+    IpcListener::bind(endpoint.to_string_lossy().as_ref())
+        .await
+        .map_err(|err| IpcError::ConnectionFailed(err.to_string()))
+}
+
+#[cfg(unix)]
+async fn connect_stream(endpoint: &Path) -> Result<IpcStream, IpcError> {
+    IpcStream::connect(endpoint)
+        .await
+        .map_err(|err| IpcError::ConnectionFailed(err.to_string()))
+}
+
+#[cfg(windows)]
+async fn connect_stream(endpoint: &Path) -> Result<IpcStream, IpcError> {
+    IpcStream::connect(endpoint.to_string_lossy().as_ref())
+        .await
+        .map_err(|err| IpcError::ConnectionFailed(err.to_string()))
+}
+
+#[cfg(unix)]
+async fn cleanup_endpoint(endpoint: &Path) {
+    let _ = tokio::fs::remove_file(endpoint).await;
+}
+
+#[cfg(windows)]
+async fn cleanup_endpoint(_endpoint: &Path) {}
+
+#[cfg(any(windows, test))]
+fn windows_tcp_endpoint(session_id: &str) -> PathBuf {
+    // FNV-1a gives every process the same endpoint for a session without
+    // requiring a filesystem rendezvous file. The broad dynamic-port range
+    // keeps collisions between concurrently active sessions unlikely.
+    let hash = session_id.bytes().fold(0x811c_9dc5_u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+    });
+    let port = 20_000 + (hash % 40_000) as u16;
+    PathBuf::from(format!("127.0.0.1:{port}"))
+}
+
 async fn handle_connection(
-    stream: UnixStream,
+    stream: IpcStream,
     mut event_rx: broadcast::Receiver<String>,
     command_tx: mpsc::UnboundedSender<AgentCommand>,
 ) {
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = tokio::io::split(stream);
     let read_task = tokio::spawn(async move {
         let mut lines = BufReader::new(reader).lines();
         while let Ok(Some(line)) = lines.next_line().await {
@@ -174,4 +230,17 @@ async fn handle_connection(
     });
 
     let _ = tokio::join!(read_task, write_task);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_endpoint_is_stable_loopback_tcp() {
+        let first = windows_tcp_endpoint("session-123");
+        let second = windows_tcp_endpoint("session-123");
+        assert_eq!(first, second);
+        assert!(first.to_string_lossy().starts_with("127.0.0.1:"));
+    }
 }

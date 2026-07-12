@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+fn user_home_or_temp() -> PathBuf {
+    nca_common::config::user_home_dir().unwrap_or_else(std::env::temp_dir)
+}
+
 /// Parsed source for skill installation.
 #[derive(Debug, Clone)]
 pub enum SkillSource {
@@ -29,8 +33,7 @@ pub fn parse_source(source: &str) -> Result<SkillSource, String> {
         || trimmed.starts_with("..")
     {
         let path = if trimmed.starts_with("~/") {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            PathBuf::from(home).join(trimmed.strip_prefix("~/").unwrap())
+            user_home_or_temp().join(trimmed.strip_prefix("~/").unwrap())
         } else {
             PathBuf::from(trimmed)
         };
@@ -138,8 +141,7 @@ impl SkillLock {
 /// Get the lock file path for the given scope.
 pub fn lock_file_path(global: bool, workspace_root: &Path) -> PathBuf {
     if global {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        PathBuf::from(home).join(".nca/skills.lock")
+        user_home_or_temp().join(".nca/skills.lock")
     } else {
         workspace_root.join(".nca/skills.lock")
     }
@@ -148,8 +150,7 @@ pub fn lock_file_path(global: bool, workspace_root: &Path) -> PathBuf {
 /// Get the skills directory for the given scope.
 pub fn skills_dir(global: bool, workspace_root: &Path) -> PathBuf {
     if global {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        PathBuf::from(home).join(".nca/skills")
+        user_home_or_temp().join(".nca/skills")
     } else {
         workspace_root.join(".nca/skills")
     }
