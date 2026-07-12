@@ -1,6 +1,6 @@
 # Providers
 
-nca supports four LLM provider backends. You can switch between them at any time via config, environment variables, or the interactive `/connect` and `/provider` commands.
+nca supports five LLM provider backends. You can switch between them at any time via config, environment variables, or the interactive `/connect` and `/provider` commands.
 
 ## Supported Providers
 
@@ -10,6 +10,7 @@ nca supports four LLM provider backends. You can switch between them at any time
 | **Anthropic** | `claude-3-7-sonnet-latest` | Native Anthropic | Direct Anthropic API for Claude models. |
 | **OpenAI** | `gpt-4o-mini` | OpenAI Chat | Standard OpenAI chat completions API. |
 | **OpenRouter** | `openai/gpt-4o-mini` | OpenAI-compatible | Aggregator providing access to 100+ models from multiple providers. |
+| **Custom** | `custom-model` | OpenAI-compatible or Anthropic-compatible | Bring your own endpoint and choose the wire protocol. |
 
 ## MiniMax (Default)
 
@@ -24,7 +25,7 @@ export MINIMAX_API_KEY="your-minimax-api-key"
 Or in config:
 
 ```toml
-# ~/.nca/config.toml
+# ~/.local/share/ncacli/config.toml
 [provider]
 default = "minimax"
 
@@ -128,6 +129,51 @@ google/gemini-2.0-flash
 meta-llama/llama-3.1-70b-instruct
 ```
 
+## Custom Provider
+
+Use the custom provider when you want `nca` to talk to a non-built-in endpoint such as a self-hosted gateway or a third-party OpenAI-compatible / Anthropic-compatible service.
+
+### Setup
+
+```toml
+[provider]
+default = "custom"
+
+[provider.custom]
+compatibility = "openai"   # or "anthropic"
+base_url = "https://sumopod.example"
+api_key_env = "CUSTOM_PROVIDER_API_KEY"
+model = "my-model"
+temperature = 0.7
+```
+
+Environment variables:
+
+```bash
+export CUSTOM_PROVIDER_API_KEY="your-key"
+export CUSTOM_PROVIDER_BASE_URL="https://sumopod.example"
+export CUSTOM_PROVIDER_MODEL="my-model"
+export CUSTOM_PROVIDER_COMPATIBILITY="openai"
+```
+
+### Interactive Setup
+
+**TUI wizard** — run `/provider`, scroll to **"Add custom provider…"**, and follow the guided steps.
+
+**Slash command:**
+
+```
+/custom openai https://sumopod.example your-key my-model
+/custom anthropic https://my-gateway.example your-key my-model
+```
+
+Notes:
+
+- `compatibility = "openai"` uses `/v1/chat/completions` and `GET /v1/models`
+- `compatibility = "anthropic"` uses `/v1/messages` with `x-api-key` header
+- After setup, use `/model <name>` to switch the configured custom model
+- Press `c` in the provider picker for a quick-reference help card
+
 ## Switching Providers
 
 ### Via CLI Flag
@@ -148,6 +194,9 @@ NCA_MODEL=gpt-4o nca
 ```
 /connect           # Opens provider picker UI
 /provider openai   # Switch default provider
+/provider custom   # Use the configured custom endpoint
+/provider          # TUI picker — select "Add custom provider…" to configure
+/custom openai https://sumopod.example your-key my-model
 /model gpt-4o      # Switch model
 /models            # Browse available models
 ```
@@ -209,6 +258,7 @@ The default environment variable names are:
 | Anthropic | `ANTHROPIC_API_KEY` |
 | OpenAI | `OPENAI_API_KEY` |
 | OpenRouter | `OPENROUTER_API_KEY` |
+| Custom | `CUSTOM_PROVIDER_API_KEY` |
 
 You can change the environment variable name via `api_key_env` in config.
 

@@ -51,6 +51,7 @@ fn write_session(
         total_input_tokens: 0,
         total_output_tokens: 0,
         estimated_cost_usd: 0.0,
+        todos: Vec::new(),
     };
 
     let json = serde_json::to_string_pretty(&session).expect("serialize session");
@@ -372,9 +373,14 @@ model = "openai/gpt-4o-mini"
     let provider_models = payload["provider_models"]
         .as_array()
         .expect("provider_models array");
-    assert_eq!(provider_models.len(), 4);
+    assert_eq!(provider_models.len(), 5);
     assert!(provider_models.iter().any(|entry| {
         entry["provider"] == "OpenAI" && entry["model"] == "gpt-4o" && entry["selected"] == true
+    }));
+    assert!(provider_models.iter().any(|entry| {
+        entry["provider"] == "Custom"
+            && entry["model"] == "custom-model"
+            && entry["selected"] == false
     }));
 }
 
@@ -412,7 +418,7 @@ model = "claude-3-7-sonnet-latest"
     assert_eq!(payload["provider"], "Anthropic");
     assert_eq!(payload["default_model"], "claude-3-7-sonnet-latest");
     let providers = payload["providers"].as_array().expect("providers array");
-    assert_eq!(providers.len(), 4);
+    assert_eq!(providers.len(), 5);
     assert!(providers.iter().any(|entry| {
         entry["provider"] == "Anthropic"
             && entry["selected"] == true
@@ -420,6 +426,11 @@ model = "claude-3-7-sonnet-latest"
     }));
     assert!(providers.iter().any(|entry| {
         entry["provider"] == "OpenAI"
+            && entry["selected"] == false
+            && entry["api_key_present"] == false
+    }));
+    assert!(providers.iter().any(|entry| {
+        entry["provider"] == "Custom"
             && entry["selected"] == false
             && entry["api_key_present"] == false
     }));
@@ -440,7 +451,7 @@ fn index_build_writes_cli_index_json_under_nca_home() {
         .success()
         .stdout(predicates::str::contains("wrote"));
 
-    let workspaces = home.path().join(".nca/workspaces");
+    let workspaces = home.path().join(".local/share/ncacli/workspaces");
     assert!(workspaces.is_dir(), "expected {:?}", workspaces);
     let mut index_path = None;
     for entry in fs::read_dir(&workspaces).expect("read workspaces") {

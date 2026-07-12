@@ -1,25 +1,31 @@
 use crate::context_manager::{ContextManager, ContextManagerConfig, ContextStats};
 use crate::ipc::{IpcHandle, IpcServer};
 use crate::last_session::LastSessionStore;
-use crate::memory_store::{MemoryNote, MemoryStore};
+use crate::memory_store::{MemoryNote, MemoryState, MemoryStore};
 use crate::model_limits_api;
 use crate::pty::PtyManager;
 use crate::session_store::SessionStore;
 use chrono::Utc;
-use nca_common::config::NcaConfig;
+use nca_common::config::{
+    NcaConfig, PermissionMode, resolve_last_session_path, resolve_memory_path, resolve_sessions_dir,
+};
 use nca_common::event::{AgentCommand, AgentEvent, EndReason, EventEnvelope, QuestionSelection};
 use nca_common::session::{
     OrchestrationContext, SessionMeta, SessionSnapshot, SessionState, SessionStatus,
 };
+use nca_common::todo::AgentTodo;
 use nca_core::agent::AgentLoop;
 use nca_core::approval::{ApprovalHandler, ApprovalPolicy, ApprovalVerdict};
-use nca_core::harness::build_system_prompt;
+use nca_core::harness::{HarnessMemoryNote, HarnessSnapshot, build_system_prompt};
 use nca_core::hooks::{HookEventKind, HookRunner};
 use nca_core::provider::ProviderError;
 use nca_core::provider::factory::build_provider;
+use nca_core::skills::SkillCatalog;
 use nca_core::tools::AskQuestionTool;
 use nca_core::tools::InvokeSkillTool;
+use nca_core::tools::RecentSkillHints;
 use nca_core::tools::ToolRegistry;
+use nca_core::tools::UpdateTodosTool;
 use nca_core::tools::mcp::load_mcp_tools;
 use nca_core::tools::spawn_subagent::{SpawnRequest, SpawnSubagentTool};
 use serde_json::json;
@@ -61,6 +67,8 @@ pub struct Supervisor {
     spawn_reason: Option<String>,
     session_summary: Option<String>,
     orchestration: Option<OrchestrationContext>,
+    /// Authoritative session todo list (shared with `update_todos` tool).
+    todos: Arc<Mutex<Vec<AgentTodo>>>,
     config: NcaConfig,
     hooks: Option<HookRunner>,
     context_manager: ContextManager,
@@ -151,8 +159,12 @@ impl Supervisor {
         tools.register(Box::new(crate::bash_tool::RuntimeBashTool::new(pty)));
 
         let (spawn_tx, spawn_rx) = mpsc::channel::<SpawnRequest>(16);
+        let recent_skills = RecentSkillHints::default();
         if !cfg.safe_mode {
-            tools.register(Box::new(SpawnSubagentTool::new(spawn_tx)));
+            tools.register(Box::new(SpawnSubagentTool::new(
+                spawn_tx,
+                recent_skills.clone(),
+            )));
         }
 
         let approval_pending: Option<ApprovalPendingMap>;
@@ -178,16 +190,22 @@ impl Supervisor {
 
         let (event_tx, event_rx) = mpsc::channel(256);
         let question_pending = Arc::new(Mutex::new(HashMap::new()));
+        let todos: Arc<Mutex<Vec<AgentTodo>>> = Arc::new(Mutex::new(Vec::new()));
         tools.register(Box::new(AskQuestionTool::new(
             event_tx.clone(),
             question_pending.clone(),
         )));
+        tools.register(Box::new(UpdateTodosTool::new(
+            event_tx.clone(),
+            todos.clone(),
+        )));
         tools.register(Box::new(InvokeSkillTool::new(
             workspace_root.clone(),
             config.harness.skill_directories.clone(),
+            recent_skills,
         )));
         let session_id = cfg.session_id.unwrap_or_else(generate_session_id);
-        let session_store = SessionStore::new(workspace_root.join(&config.session.history_dir));
+        let session_store = SessionStore::new(resolve_sessions_dir(&config, &workspace_root));
 
         let ipc_server = IpcServer::new(&session_id);
         let socket_path = ipc_server.socket_path();
@@ -218,14 +236,12 @@ impl Supervisor {
             config.session.checkpoint_interval,
             hook_runner.clone(),
         );
-        let system_prompt =
-            build_system_prompt(&config, &workspace_root, cfg.orchestration_context.as_ref());
-        agent.set_system_prompt(system_prompt);
+        agent.set_smart_compaction_mode(config.memory.context.smart_compaction_mode);
 
         let context_manager =
             Self::make_context_manager(&config, &config.model.default_model).await;
 
-        let sup = Self {
+        let mut sup = Self {
             session_id,
             workspace_root,
             model: config.model.default_model.clone(),
@@ -249,11 +265,13 @@ impl Supervisor {
             spawn_reason: None,
             session_summary: None,
             orchestration: cfg.orchestration_context,
+            todos,
             config,
             hooks: hook_runner,
             context_manager,
             last_summary_at_tokens: 0,
         };
+        sup.refresh_system_prompt();
         sup.save().await.map_err(ProviderError::Other)?;
         sup.update_last_session()
             .await
@@ -284,7 +302,7 @@ impl Supervisor {
         })
         .await?;
 
-        let store = SessionStore::new(workspace_root.join(&config.session.history_dir));
+        let store = SessionStore::new(resolve_sessions_dir(&config, workspace_root));
         let loaded = store
             .load(session_id)
             .await
@@ -308,7 +326,11 @@ impl Supervisor {
         sup.spawn_reason = loaded.meta.spawn_reason;
         sup.session_summary = loaded.meta.session_summary;
         sup.orchestration = loaded.meta.orchestration;
+        if let Ok(mut guard) = sup.todos.lock() {
+            *guard = loaded.todos;
+        }
         sup.context_manager = Self::make_context_manager(&sup.config, &sup.model).await;
+        sup.refresh_system_prompt();
         Ok(sup)
     }
 
@@ -357,6 +379,9 @@ impl Supervisor {
                 self.model
             )));
         }
+
+        // Refresh dynamic harness (env / todos / memory) before every turn.
+        self.refresh_system_prompt();
 
         // Check context before running turn
         self.maybe_compact_context().await;
@@ -450,6 +475,10 @@ impl Supervisor {
                             "Auto-summarizing context ({}% full, {} tokens)",
                             stats.usage_percent, stats.estimated_tokens
                         ),
+                        tokens_before: Some(stats.estimated_tokens),
+                        tokens_after: None,
+                        retained_groups: None,
+                        dropped_groups: None,
                     })
                     .await;
             }
@@ -503,6 +532,10 @@ impl Supervisor {
                                 messages_to_summarize.len() * 100, // rough estimate
                                 self.last_summary_at_tokens
                             ),
+                            tokens_before: None,
+                            tokens_after: Some(self.last_summary_at_tokens),
+                            retained_groups: None,
+                            dropped_groups: None,
                         })
                         .await;
                 }
@@ -595,10 +628,10 @@ impl Supervisor {
     /// Mark this session as the last active session for the workspace.
     /// Called on create, resume, run_turn, and finish to keep the pointer fresh.
     pub async fn update_last_session(&self) -> Result<(), String> {
-        let store = LastSessionStore::new(
-            self.workspace_root
-                .join(&self.config.session.last_session_file),
-        );
+        let store = LastSessionStore::new(resolve_last_session_path(
+            &self.config,
+            &self.workspace_root,
+        ));
         store
             .save(&self.session_id)
             .await
@@ -630,11 +663,17 @@ impl Supervisor {
             total_input_tokens: self.agent.cost_tracker.input_tokens,
             total_output_tokens: self.agent.cost_tracker.output_tokens,
             estimated_cost_usd: self.agent.cost_tracker.estimated_cost_usd(),
+            todos: self.todos.lock().map(|g| g.clone()).unwrap_or_default(),
         }
     }
 
     pub fn snapshot(&self) -> SessionSnapshot {
         self.current_session_state(Utc::now()).snapshot()
+    }
+
+    /// Current session todos (clone for UI seeding).
+    pub fn todos(&self) -> Vec<AgentTodo> {
+        self.todos.lock().map(|g| g.clone()).unwrap_or_default()
     }
 
     pub fn compact_summary(&self) -> String {
@@ -669,23 +708,13 @@ impl Supervisor {
     }
 
     pub fn memory_store_path(&self) -> PathBuf {
-        if self.config.memory.file_path.is_absolute() {
-            self.config.memory.file_path.clone()
-        } else {
-            self.workspace_root.join(&self.config.memory.file_path)
-        }
+        resolve_memory_path(&self.config, &self.workspace_root)
     }
 
     /// Reset for a fresh session: new ID, rebuild system prompt, clear lineage and cost.
     pub fn reset_for_new_session(&mut self) {
         self.session_id = generate_session_id();
         self.agent.messages.clear();
-        let system_prompt = build_system_prompt(
-            &self.config,
-            &self.workspace_root,
-            self.orchestration.as_ref(),
-        );
-        self.agent.set_system_prompt(system_prompt);
         self.child_session_ids.clear();
         self.parent_session_id = None;
         self.inherited_summary = None;
@@ -696,7 +725,52 @@ impl Supervisor {
         self.created_at = Utc::now();
         self.last_summary_at_tokens = 0;
         self.session_store =
-            SessionStore::new(self.workspace_root.join(&self.config.session.history_dir));
+            SessionStore::new(resolve_sessions_dir(&self.config, &self.workspace_root));
+        self.refresh_system_prompt();
+    }
+
+    /// Build a harness snapshot from current workspace, config, memory, and todos.
+    pub fn build_harness_snapshot(&self) -> HarnessSnapshot {
+        let todos = self
+            .todos
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        HarnessSnapshot {
+            workspace_root: self.workspace_root.clone(),
+            cwd_display: self.workspace_root.display().to_string(),
+            git_branch: detect_git_branch(&self.workspace_root),
+            model: self.model.clone(),
+            permission_mode: permission_mode_label(self.config.permissions.mode),
+            agent_profile: None,
+            memory_notes: self.load_memory_notes_for_harness(),
+            todos,
+        }
+    }
+
+    /// Rebuild the agent system prompt from the current harness snapshot.
+    pub fn refresh_system_prompt(&mut self) {
+        let snapshot = self.build_harness_snapshot();
+        let prompt = build_system_prompt(&self.config, &snapshot, self.orchestration.as_ref());
+        self.agent.set_system_prompt(prompt);
+    }
+
+    fn load_memory_notes_for_harness(&self) -> Vec<HarnessMemoryNote> {
+        let path = self.memory_store_path();
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            return Vec::new();
+        };
+        let Ok(state) = serde_json::from_str::<MemoryState>(&raw) else {
+            return Vec::new();
+        };
+        state
+            .notes
+            .into_iter()
+            .map(|note| HarnessMemoryNote {
+                kind: note.kind,
+                content: note.content,
+            })
+            .collect()
     }
 
     pub fn session_id(&self) -> &str {
@@ -720,11 +794,14 @@ impl Supervisor {
         let provider = build_provider(&config)?;
         self.config = config;
         self.model = self.config.provider.active_model().to_string();
+        let mode = self.config.memory.context.smart_compaction_mode;
         let m = self.model.clone();
         let agent = self.agent_mut();
         agent.model = m;
+        agent.set_smart_compaction_mode(mode);
         agent.replace_provider(provider);
         self.rebuild_context_manager_sync();
+        self.refresh_system_prompt();
         Ok(())
     }
 
@@ -1091,6 +1168,34 @@ fn generate_session_id() -> String {
     format!("session-{}-{counter}", Utc::now().timestamp_micros())
 }
 
+fn permission_mode_label(mode: PermissionMode) -> String {
+    match mode {
+        PermissionMode::Default => "default",
+        PermissionMode::Plan => "plan",
+        PermissionMode::AcceptEdits => "accept-edits",
+        PermissionMode::DontAsk => "dont-ask",
+        PermissionMode::BypassPermissions => "bypass-permissions",
+    }
+    .to_string()
+}
+
+fn detect_git_branch(workspace: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(workspace)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() || branch == "HEAD" {
+        None
+    } else {
+        Some(branch)
+    }
+}
+
 /// Query the current state of a session from its store.
 pub async fn query_session_state(
     session_store: &SessionStore,
@@ -1153,7 +1258,7 @@ pub fn spawn_subagent_consumer(
     event_tx: Option<tokio::sync::mpsc::Sender<AgentEvent>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let parent_sessions_dir = workspace_root.join(&config.session.history_dir);
+        let parent_sessions_dir = resolve_sessions_dir(&config, &workspace_root);
         let parent_summary = build_parent_summary(&parent_messages);
 
         while let Some(req) = spawn_rx.recv().await {
@@ -1163,6 +1268,32 @@ pub fn spawn_subagent_consumer(
             let event_tx = event_tx.clone();
             let parent_store = SessionStore::new(parent_sessions_dir.clone());
             let parent_summary = parent_summary.clone();
+            let resolved_skills = match SkillCatalog::resolve_requested_commands(
+                &workspace_root,
+                &config.harness.skill_directories,
+                &req.skills,
+            ) {
+                Ok(skills) => skills,
+                Err(error) => {
+                    if let Some(ref tx) = event_tx {
+                        let _ = tx
+                            .send(AgentEvent::Error {
+                                message: format!("Failed to spawn child session: {error}"),
+                            })
+                            .await;
+                    }
+                    let response = nca_core::tools::spawn_subagent::SpawnResponse {
+                        child_session_id: String::new(),
+                        status: "error".into(),
+                        output: error,
+                        workspace: workspace_root.display().to_string(),
+                        branch: None,
+                        worktree_path: None,
+                    };
+                    let _ = req.reply.send(response);
+                    continue;
+                }
+            };
 
             let child_cfg = ChildSessionConfig {
                 parent_session_id: parent_session_id.clone(),
@@ -1172,6 +1303,7 @@ pub fn spawn_subagent_consumer(
                 parent_summary,
                 use_worktree: req.use_worktree,
                 focus_files: req.focus_files,
+                skills: resolved_skills,
             };
 
             tokio::spawn(async move {
@@ -1329,6 +1461,7 @@ pub struct ChildSessionConfig {
     pub parent_summary: String,
     pub use_worktree: bool,
     pub focus_files: Vec<String>,
+    pub skills: Vec<String>,
 }
 
 /// Result of a spawned child session.
@@ -1340,6 +1473,38 @@ pub struct ChildSessionResult {
     pub workspace: String,
     pub branch: Option<String>,
     pub worktree_path: Option<String>,
+}
+
+fn build_subagent_context_prompt(
+    parent_summary: &str,
+    task: &str,
+    focus_files: &[String],
+    skills: &[String],
+) -> String {
+    let mut context_prompt = format!(
+        "You are a sub-agent spawned by a parent session to handle a specific task.\n\n\
+         ## Parent Context\n{}\n\n\
+         ## Your Task\n{}",
+        parent_summary, task
+    );
+
+    if !skills.is_empty() {
+        context_prompt.push_str(
+            "\n\n## Recommended Skills\nLoad these with invoke_skill before starting if they apply:\n",
+        );
+        for skill in skills {
+            context_prompt.push_str(&format!("- {skill}\n"));
+        }
+    }
+
+    if !focus_files.is_empty() {
+        context_prompt.push_str("\n\n## Focus Files\n");
+        for file in focus_files {
+            context_prompt.push_str(&format!("- {file}\n"));
+        }
+    }
+
+    context_prompt
 }
 
 /// Spawn a child session that inherits parent context and runs to completion.
@@ -1405,19 +1570,12 @@ pub async fn spawn_child_session(
             .await;
     }
 
-    let mut context_prompt = format!(
-        "You are a sub-agent spawned by a parent session to handle a specific task.\n\n\
-         ## Parent Context\n{}\n\n\
-         ## Your Task\n{}",
-        cfg.parent_summary, cfg.task
+    let context_prompt = build_subagent_context_prompt(
+        &cfg.parent_summary,
+        &cfg.task,
+        &cfg.focus_files,
+        &cfg.skills,
     );
-
-    if !cfg.focus_files.is_empty() {
-        context_prompt.push_str("\n\n## Focus Files\n");
-        for f in &cfg.focus_files {
-            context_prompt.push_str(&format!("- {f}\n"));
-        }
-    }
 
     let mut handle = sup.take_handle();
     let event_rx = handle.take_event_rx();
@@ -1468,18 +1626,18 @@ fn is_pid_alive(pid: u32) -> bool {
     }
 }
 
-/// Get the last session ID from `.nca/.last_session`, if it exists and is valid.
+/// Get the last session ID from the last-session pointer, if it exists and is valid.
 /// Falls back to finding the most recently updated session in the sessions directory.
 pub async fn get_last_session_id(
     config: &NcaConfig,
     workspace_root: &Path,
 ) -> anyhow::Result<Option<String>> {
     // First, try the explicit last-session pointer
-    let store = LastSessionStore::new(workspace_root.join(&config.session.last_session_file));
+    let store = LastSessionStore::new(resolve_last_session_path(config, workspace_root));
     match store.load().await {
         Ok(Some(id)) => {
             // Verify the session still exists on disk.
-            let session_store = SessionStore::new(workspace_root.join(&config.session.history_dir));
+            let session_store = SessionStore::new(resolve_sessions_dir(config, workspace_root));
             match session_store.load(&id).await {
                 Ok(_) => return Ok(Some(id)),
                 Err(_) => {
@@ -1498,7 +1656,7 @@ pub async fn get_last_session_id(
     }
 
     // Fallback: find the most recently updated session in the sessions directory
-    let session_store = SessionStore::new(workspace_root.join(&config.session.history_dir));
+    let session_store = SessionStore::new(resolve_sessions_dir(config, workspace_root));
     let ids = match session_store.list().await {
         Ok(ids) => ids,
         Err(e) => {
@@ -1548,7 +1706,8 @@ mod tests {
         model: &str,
         status: SessionStatus,
     ) {
-        let sessions_dir = workspace.join(".nca").join("sessions");
+        let config = nca_common::config::NcaConfig::default();
+        let sessions_dir = resolve_sessions_dir(&config, workspace);
         std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
 
         let session = SessionState {
@@ -1575,6 +1734,7 @@ mod tests {
             total_input_tokens: 0,
             total_output_tokens: 0,
             estimated_cost_usd: 0.0,
+            todos: Vec::new(),
         };
 
         let json = serde_json::to_string_pretty(&session).expect("serialize session");
@@ -1583,11 +1743,14 @@ mod tests {
 
     #[tokio::test]
     async fn get_last_session_id_falls_back_to_most_recent() {
+        let home = tempfile::tempdir().expect("home");
+        unsafe { std::env::set_var("NCA_HOME", home.path()) };
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path();
+        let _ = std::fs::create_dir_all(workspace);
         let now = Utc::now();
 
-        // Write sessions WITHOUT .last_session file
+        // Write sessions WITHOUT last_session pointer
         write_session_for_test(
             workspace,
             "session-oldest",
@@ -1619,14 +1782,16 @@ mod tests {
         // Should find the most recent session
         assert_eq!(session_id, "session-newest");
 
-        // The .last_session file should now be updated
-        let last_session_path = workspace.join(".nca").join(".last_session");
+        // The last_session pointer should now be updated under product home
+        let last_session_path = resolve_last_session_path(&config, workspace);
         assert!(
             last_session_path.exists(),
-            ".last_session should be created"
+            "last_session should be created at {}",
+            last_session_path.display()
         );
         let content = std::fs::read_to_string(&last_session_path).unwrap();
         assert_eq!(content.trim(), "session-newest");
+        unsafe { std::env::remove_var("NCA_HOME") };
     }
 
     #[tokio::test]
@@ -1696,5 +1861,84 @@ mod tests {
 
         let _ = cmd_tx.send(AgentCommand::Shutdown);
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn spawn_subagent_consumer_rejects_unknown_skill_names() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skill_dir = temp.path().join(".nca/skills/review");
+        std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: Review\ncommand: review\n---\nReview code.\n",
+        )
+        .expect("write skill");
+
+        let (spawn_tx, spawn_rx) = mpsc::channel(1);
+        let handle = spawn_subagent_consumer(
+            spawn_rx,
+            "parent-1".into(),
+            temp.path().to_path_buf(),
+            NcaConfig::default(),
+            vec![],
+            None,
+        );
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        spawn_tx
+            .send(SpawnRequest {
+                task: "Review code".into(),
+                focus_files: vec![],
+                skills: vec!["unknown-skill".into()],
+                use_worktree: false,
+                reply: reply_tx,
+            })
+            .await
+            .expect("send spawn request");
+
+        let response = tokio::time::timeout(std::time::Duration::from_secs(1), reply_rx)
+            .await
+            .expect("reply timeout")
+            .expect("reply channel");
+
+        assert_eq!(response.status, "error");
+        assert!(
+            response
+                .output
+                .contains("Unknown skill name(s): unknown-skill")
+        );
+        assert!(response.output.contains("Available skills:"));
+        assert!(response.output.contains("review"));
+
+        handle.abort();
+    }
+
+    #[test]
+    fn build_subagent_context_prompt_includes_skills_when_present() {
+        let prompt = build_subagent_context_prompt(
+            "Parent discussed parser cleanup.",
+            "Refactor the parser.",
+            &[String::from("src/parser.rs")],
+            &[String::from("rust-refactor"), String::from("testing")],
+        );
+
+        assert!(prompt.contains("## Recommended Skills"));
+        assert!(prompt.contains("Load these with invoke_skill before starting if they apply:"));
+        assert!(prompt.contains("- rust-refactor"));
+        assert!(prompt.contains("- testing"));
+        assert!(prompt.contains("## Focus Files"));
+    }
+
+    #[test]
+    fn build_subagent_context_prompt_omits_skills_section_when_empty() {
+        let prompt = build_subagent_context_prompt(
+            "Parent discussed parser cleanup.",
+            "Refactor the parser.",
+            &[],
+            &[],
+        );
+
+        assert!(!prompt.contains("## Recommended Skills"));
+        assert!(!prompt.contains("invoke_skill before starting"));
     }
 }

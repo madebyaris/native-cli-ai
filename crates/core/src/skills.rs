@@ -1,4 +1,4 @@
-use nca_common::config::PermissionMode;
+use nca_common::config::{PermissionMode, nca_product_home};
 use serde::Deserialize;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -36,6 +36,9 @@ impl SkillCatalog {
         skill_directories: &[PathBuf],
     ) -> Result<Vec<Skill>, String> {
         let mut roots = Vec::new();
+        if let Some(product) = nca_product_home() {
+            roots.push(product.join("skills"));
+        }
         if let Some(home) = env::var_os("HOME") {
             let home = PathBuf::from(home);
             roots.push(home.join(".nca/skills"));
@@ -89,6 +92,45 @@ impl SkillCatalog {
 
         skills.sort_by(|left, right| left.command.cmp(&right.command));
         Ok(skills)
+    }
+
+    pub fn resolve_requested_commands(
+        workspace_root: &Path,
+        skill_directories: &[PathBuf],
+        requested: &[String],
+    ) -> Result<Vec<String>, String> {
+        let skills = Self::discover(workspace_root, skill_directories)?;
+        let mut resolved = Vec::new();
+        let mut unknown = Vec::new();
+
+        for requested_name in requested {
+            let requested_name = requested_name.trim();
+            if requested_name.is_empty() {
+                continue;
+            }
+
+            if let Some(skill) = skills.iter().find(|skill| skill.command == requested_name) {
+                if !resolved.iter().any(|name| name == &skill.command) {
+                    resolved.push(skill.command.clone());
+                }
+            } else if !unknown.iter().any(|name| name == requested_name) {
+                unknown.push(requested_name.to_string());
+            }
+        }
+
+        if unknown.is_empty() {
+            return Ok(resolved);
+        }
+
+        let available = skills
+            .iter()
+            .map(|skill| skill.command.as_str())
+            .collect::<Vec<_>>();
+        Err(format!(
+            "Unknown skill name(s): {}. Available skills: {}",
+            unknown.join(", "),
+            available.join(", ")
+        ))
     }
 }
 
@@ -897,5 +939,49 @@ Component management and styling...
         let expanded = skill.expanded_body();
         let count = expanded.matches("===== helper.md =====").count();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn resolve_requested_commands_deduplicates_and_preserves_known_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join(".nca/skills/review");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: Review\ncommand: review\n---\nReview code.\n",
+        )
+        .unwrap();
+
+        let resolved = SkillCatalog::resolve_requested_commands(
+            dir.path(),
+            &[PathBuf::from(".nca/skills")],
+            &["review".to_string(), " review ".to_string(), String::new()],
+        )
+        .unwrap();
+
+        assert_eq!(resolved, vec!["review"]);
+    }
+
+    #[test]
+    fn resolve_requested_commands_returns_error_for_unknown_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join(".nca/skills/review");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: Review\ncommand: review\n---\nReview code.\n",
+        )
+        .unwrap();
+
+        let error = SkillCatalog::resolve_requested_commands(
+            dir.path(),
+            &[PathBuf::from(".nca/skills")],
+            &[String::from("not-real")],
+        )
+        .unwrap_err();
+
+        assert!(error.contains("Unknown skill name(s): not-real"));
+        assert!(error.contains("Available skills:"));
+        assert!(error.contains("review"));
     }
 }

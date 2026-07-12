@@ -7,7 +7,8 @@ nca persists every conversation as a session. Sessions can be resumed, inspected
 ```
 nca (start) → Session Created → Agent Turns → Session Ended
                     ↓                              ↓
-              .nca/sessions/<id>.json         .nca/sessions/<id>.events.jsonl
+   ~/.local/share/ncacli/workspaces/<id>/sessions/<sid>.json
+   ~/.local/share/ncacli/workspaces/<id>/sessions/<sid>.events.jsonl
                     ↓                              ↓
               State snapshot                  Full event log
 ```
@@ -23,16 +24,26 @@ nca (start) → Session Created → Agent Turns → Session Ended
 
 ## Session Storage
 
-Sessions are stored in the workspace under `.nca/sessions/`:
+Session data lives under the **product home** (`$NCA_HOME`, `$XDG_DATA_HOME/ncacli`, or `~/.local/share/ncacli/`), keyed by workspace cache id — not under the project tree:
 
 ```
-.nca/sessions/
-├── a1b2c3d4.json            # Session state snapshot
-├── a1b2c3d4.events.jsonl    # Event log (NDJSON)
-├── e5f6g7h8.json
-├── e5f6g7h8.events.jsonl
-└── ...
+~/.local/share/ncacli/
+├── config.toml
+├── skills/
+└── workspaces/
+    └── <slug>-<16hex>/
+        ├── workspace.json       # { "path": "<canonical workspace>" }
+        ├── last_session
+        ├── memory.json
+        ├── cli-index.json
+        └── sessions/
+            ├── a1b2c3d4.json
+            ├── a1b2c3d4.events.jsonl
+            ├── a1b2c3d4/attachments/
+            └── ...
 ```
+
+On first open of a workspace, nca may **copy** (not delete) legacy data from `<workspace>/.nca/sessions/`, `.last_session`, and `memory.json` into the home store. Project-local `.nca/` files for skills, worktrees, and config overrides stay in the repo.
 
 ### State File (`.json`)
 
@@ -98,7 +109,7 @@ nca --resume
 
 By default, when you run `nca` without any arguments:
 
-1. nca checks `.nca/.last_session` for the most recent session ID
+1. nca checks the workspace cache `last_session` pointer under `~/.local/share/ncacli/workspaces/<id>/` for the most recent session ID
 2. If a valid recent session exists, nca **auto-resumes** it with a hint to stderr
 3. If no valid session exists, a new session starts
 
@@ -192,11 +203,13 @@ Export a session to markdown:
 
 ```toml
 [session]
-history_dir = ".nca/sessions"         # Where sessions are stored
+# Default sentinel paths resolve to ~/.local/share/ncacli/workspaces/<id>/…
+# Set a non-default relative path to keep storage workspace-local (escape hatch).
+history_dir = ".nca/sessions"
 max_turns_per_run = 128               # Max turns before session ends
 max_tool_calls_per_turn = 200         # Max tools per single turn
 checkpoint_interval = 5               # Checkpoint frequency
-last_session_file = ".nca/.last_session"  # Last session pointer
+last_session_file = ".nca/.last_session"
 auto_compact_on_finish = false        # Summarize on session end
 ```
 

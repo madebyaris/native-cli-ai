@@ -15,6 +15,21 @@ Force line REPL mode:
 nca --no-tui
 ```
 
+## Live Busy Activity
+
+While the agent is working, the TUI keeps progress visible so long model waits do not look stuck:
+
+| Busy state | What you see |
+|------------|--------------|
+| **thinking** | Animated spinner + elapsed seconds (`thinking 12s`) and a transcript footer like `waiting for model · 12s` |
+| **streaming** | Stream progress with character count |
+| **tool** | Tool name plus a one-liner (file path for `write_file` / `edit_file`, command for `execute_bash`) |
+| **approval** | Waiting for y/n or Ctrl+Y / Ctrl+N / Ctrl+U |
+
+Empty provider responses that are still retrying stay in **thinking** (soft retry), instead of flipping the status bar to a hard error mid-turn. The sidebar `status` field mirrors the same busy label.
+
+---
+
 ## Input Modes
 
 ### Regular Text
@@ -99,6 +114,7 @@ Available agent profiles:
 | `/model [name]` | Set the active model for the session |
 | `/connect` | Open the provider connection picker |
 | `/provider [name]` | Show or set the default LLM provider |
+| `/custom <compat> <url> [key] [model]` | Configure a custom endpoint (OpenAI or Anthropic compatible) |
 | `/apikey <provider> <key>` | Store an API key for a provider |
 
 ### Session and Context
@@ -106,6 +122,8 @@ Available agent profiles:
 | Command | Description |
 |---------|-------------|
 | `/compact` | Compact session context (summarize and trim history) |
+| `/copy` | Copy the latest assistant response to the clipboard (TUI) |
+| `/todos` | Show the session todo list (sidebar also shows a compact view) |
 | `/thinking` | Toggle thinking/reasoning visibility |
 | `/sessions` | List and switch between sessions |
 | `/agents` | List child sub-agent sessions |
@@ -179,6 +197,7 @@ Available agent profiles:
 |----------|--------|
 | `Ctrl+P` | Open command palette |
 | `Ctrl+V` | Paste image from clipboard (TUI only) |
+| `Ctrl+Shift+C` | Copy last assistant response (TUI only) |
 | `Ctrl+X M` | Switch model (model picker) |
 | `Ctrl+X E` | Open external editor |
 | `Ctrl+X L` | Switch session |
@@ -225,8 +244,19 @@ The TUI displays a status bar at the bottom showing:
 - Available shortcuts hint
 
 ```
-Tab  agent   Ctrl+V  image   Ctrl+P  commands   !cmd  shell   @path  search   /  inline   wheel  scroll
+Tab  agent   Ctrl+V  image   Ctrl+Shift+C  copy   Ctrl+P  commands   !cmd  shell   @path  search   /  inline   wheel  scroll
 ```
+
+## Copying Text
+
+Mouse drag-selection is limited while the TUI owns the terminal. Use:
+
+- `/copy` or `Ctrl+Shift+C` to copy the latest assistant response
+- Native terminal **Shift+drag** selection as a fallback when you need arbitrary transcript text
+
+## Session Todos
+
+The agent maintains a session checklist through the `update_todos` tool (full-list replacement). The TUI sidebar shows a compact progress view; `/todos` opens the full list (useful on narrow terminals). Todos persist in session JSON and replay via `TodosUpdated` events.
 
 ## Image Attachments
 

@@ -5,11 +5,13 @@
 </p>
 
 <p align="center">
-  <strong>Rust-native coding agent. Single binary. Terminal-first.</strong>
+  <strong>Rust-native coding agent. Single binary. Terminal-first.</strong><br />
+  <sub>v0.4 — dedicated TUI crate, unified product home, live busy activity</sub>
 </p>
 
 <p align="center">
   <a href="#installation">Install</a> &middot;
+  <a href="#whats-new-in-04">What's New</a> &middot;
   <a href="#quick-start">Quick Start</a> &middot;
   <a href="#core-commands">Commands</a> &middot;
   <a href="#interactive-ux">Interactive UX</a> &middot;
@@ -25,14 +27,24 @@ It is meant for people who like their AI tooling close to the terminal: fast to 
 
 The product surface is the CLI. No desktop wrapper, no Electron, no browser in the default path.
 
+## What's New in 0.4
+
+- **Dedicated `nca-tui` crate** — full-screen transcript, overlays, sidebar, and REPL live in their own crate; `nca-cli` stays the thin entrypoint.
+- **Unified product home** — sessions, memory, and CLI index land under `$NCA_HOME` / `$XDG_DATA_HOME/ncacli` / `~/.local/share/ncacli` (legacy `~/.nca` still migrates).
+- **Live busy activity** — status bar and transcript footer show thinking / streaming / tool path with elapsed time so long model waits never look stuck.
+- **Soft provider retries** — empty-response retries stay in thinking state instead of flipping to a red error mid-turn.
+- **Tool path previews** — in-flight `write_file` / `edit_file` / bash calls show the path or command one-liner.
+- **Multi-OS releases** — GitHub Releases build Linux, macOS, and Windows (x86_64 + ARM where available).
+
 ## What It Does
 
 - Runs coding tasks in an interactive TUI or a line-oriented REPL.
+- Keeps slash commands, the command palette, and `/help` in sync via one registry (palette Enter runs the command).
 - Supports one-shot runs and detached background sessions.
 - Persists session state and event logs under the current workspace.
 - Exposes machine-readable JSON and NDJSON for automation.
 - Spawns child agents with explicit parent/child lineage and optional git worktrees.
-- Uses MiniMax by default, with OpenAI, Anthropic, and OpenRouter support.
+- Uses MiniMax by default, with OpenAI, Anthropic, OpenRouter, and custom endpoint support.
 - Loads built-in tools plus optional MCP tools from config.
 - Sends **native multimodal** (text + image) messages to MiniMax and other vision-capable models.
 - Auto-summarizes long conversations to prevent token overflow.
@@ -68,15 +80,19 @@ curl -fsSL https://nca-cli.com/install | bash
 
 This detects your platform, downloads the latest release from GitHub, and installs `nca` to `/usr/local/bin`. Set `NCA_INSTALL_DIR` to change the install path.
 
+Windows: download the matching `.zip` from [Releases](https://github.com/madebyaris/native-cli-ai/releases) and put `nca.exe` on your `PATH`.
+
 ### GitHub Releases
 
 Pre-built binaries for every release are available on the [Releases](https://github.com/madebyaris/native-cli-ai/releases) page:
 
-| Platform | Target |
-|---|---|
-| macOS (Apple Silicon) | `aarch64-apple-darwin` |
-| macOS (Intel) | `x86_64-apple-darwin` |
-| Linux (x86_64) | `x86_64-unknown-linux-gnu` |
+| Platform | Target | Archive |
+|---|---|---|
+| macOS (Apple Silicon) | `aarch64-apple-darwin` | `.tar.gz` |
+| macOS (Intel) | `x86_64-apple-darwin` | `.tar.gz` |
+| Linux (x86_64) | `x86_64-unknown-linux-gnu` | `.tar.gz` |
+| Linux (ARM64) | `aarch64-unknown-linux-gnu` | `.tar.gz` |
+| Windows (x86_64) | `x86_64-pc-windows-msvc` | `.zip` |
 
 ### Build from source
 
@@ -152,7 +168,7 @@ The main interface is designed to feel like a serious terminal tool, not a toy o
 | `nca skills` | List discovered skills with their source (`AGENTS.md`, filesystem, or user directory). |
 | `nca mcp` | List configured MCP servers. |
 | `nca completion <shell>` | Generate shell completions. |
-| `nca index build\|show` | Build or inspect a cached CLI index under `~/.nca/workspaces/<workspace-id>/`. |
+| `nca index build\|show` | Build or inspect a cached CLI index under `~/.local/share/ncacli/workspaces/<workspace-id>/`. |
 | `nca autoresearch once <program.md>` | Run a metric-driven research program and print parsed output. |
 
 There is also a hidden `serve` subcommand used for IPC-oriented service sessions.
@@ -161,19 +177,54 @@ There is also a hidden `serve` subcommand used for IPC-oriented service sessions
 
 The interactive surface has two modes:
 
-- Full-screen TUI with transcript, composer, approvals, structured questions, slash-command palette, session sidebar, and branch picker.
-- Line-oriented REPL built on `reedline` for scripts, terminals where TUI is not desired, or cases where `--no-tui` is easier.
+- **Full-screen TUI** — transcript (markdown + syntax highlighting), composer, overlays (palette, pickers, connect wizard), approvals, structured questions, session sidebar, and branch chip.
+- **Line-oriented REPL** (`reedline`) — for scripts, non-TTY environments, or `--no-tui`.
 
-Useful interactive behaviors:
+Slash commands, the Ctrl+P command palette, autocomplete, and `/help` all come from one registry, so labels stay in sync. Palette **Enter executes** the command (it does not only pre-fill the composer).
 
-- `! <cmd>` runs a shell command.
-- `@ <query>` searches files (fuzzy file mention completions).
-- `/...` runs slash commands.
-- `Tab` cycles agent profiles such as `build`, `plan`, `review`, `fix`, and `test`.
-- `Ctrl+C` or `/stop` cancels the current running turn.
-- `/auto-answer` accepts the suggested answer for a pending `ask_question`.
+### Slash commands
 
-Small touches in the TUI matter too: branch switching, structured options, session sidebars, model picker, provider configuration, and direct control over long-running turns.
+| Command | Purpose |
+|---|---|
+| `/help` | Show help (generated from the registry). |
+| `/agent` | Choose agent profile (`build`, `plan`, `review`, `fix`, `test`). |
+| `/plan` `/review` `/fix` `/test` | Run a preset turn for that profile. |
+| `/skills` | Browse discovered skills; `/{skill}` runs one. |
+| `/memory` | Show or append memory notes. |
+| `/compact` | Compact session context. |
+| `/copy` | Copy the latest assistant response (TUI; also `Ctrl+Shift+C`). |
+| `/todos` | Show the session todo list. |
+| `/model` | Open the model picker (`/models` is an alias). |
+| `/connect` | Connect / switch provider, API key, or custom endpoint (`/provider`, `/apikey`, `/custom` are aliases). |
+| `/status` | Session status and health (`/stats`, `/cost`, `/doctor` are aliases). |
+| `/config` | Config and editor settings (`/settings`, `/set-editor` are aliases). |
+| `/permissions` | Permission mode picker (`/permission-bypass` is an alias). |
+| `/sessions` `/new` `/export` `/attach` `/logs` | Session lifecycle and inspection. |
+| `/image` | Stage clipboard or file images (TUI). |
+| `/editor` | Open the external editor. |
+| `/mcp` `/agents` `/diff` `/thinking` `/stop` `/clear` `/exit` | System and turn controls. |
+| `/auto-answer` | Accept the suggested answer for a pending `ask_question`. |
+
+### Keyboard shortcuts (TUI)
+
+| Binding | Action |
+|---|---|
+| `Ctrl+P` | Open the command palette (fuzzy; Enter runs). |
+| `Ctrl+V` | Paste image from clipboard (TUI). |
+| `Ctrl+Shift+C` | Copy last assistant response (TUI). |
+| `Ctrl+X` then `m` / `e` / `l` / `n` / `c` / `s` / `a` / `h` / `q` | Leader shortcuts: model, editor, sessions, new, compact, status, agent, help, exit. |
+| `Ctrl+Y` / `Ctrl+N` / `Ctrl+U` | Approve / deny / always-allow a pending tool (wins over an open question modal). |
+| `Tab` | Complete `@` path or `/` command; otherwise cycle agent profile. |
+| `F2` / `Shift+F2` | Cycle recent models. |
+| `Ctrl+V` | Paste clipboard image (off the UI thread). |
+| `Ctrl+L` | Clear the transcript (same idea as `/clear`). |
+| `Esc` / `Ctrl+C` | Cancel the current turn when busy. |
+| `! <cmd>` | Run a shell command. |
+| `@ <path>` | File mention with fuzzy completion (indexes in the background on open). |
+
+Click the branch chip in the status line to open the branch picker (list/switch/create via background git).
+
+While the agent is working, the status bar shows an animated busy state with elapsed seconds (`thinking 12s`, `tool 3s`) and a short detail (model wait, stream size, or file path). The transcript footer mirrors the same live activity so long provider waits do not look frozen.
 
 ![branch picker](docs/images/git-branch.png)
 
@@ -193,23 +244,24 @@ See [Orchestration Contract](docs/orchestration.md) for the subprocess-facing su
 
 ## Storage and Paths
 
-`nca` is workspace-first. The current workspace keeps its own session history and local state.
+`nca` keeps project instructions and git worktrees in the workspace, and stores session/memory/cache data under a unified product home (`$NCA_HOME`, `$XDG_DATA_HOME/ncacli`, or `~/.local/share/ncacli/`).
 
 | Path | Purpose |
 |---|---|
-| `~/.nca/config.toml` | Global config file. |
+| `~/.local/share/ncacli/config.toml` | Global config file (legacy `~/.nca/config.toml` is still read if present). |
 | `<workspace>/.nca/config.local.toml` | Workspace-local config overrides. |
-| `<workspace>/.nca/sessions/<id>.json` | Saved session state. |
-| `<workspace>/.nca/sessions/<id>.events.jsonl` | Event log for the session. |
-| `<workspace>/.nca/memory.json` | Default memory store. |
+| `~/.local/share/ncacli/workspaces/<id>/sessions/<sid>.json` | Saved session state. |
+| `~/.local/share/ncacli/workspaces/<id>/sessions/<sid>.events.jsonl` | Event log for the session. |
+| `~/.local/share/ncacli/workspaces/<id>/memory.json` | Default memory store. |
+| `~/.local/share/ncacli/workspaces/<id>/last_session` | Auto-resume pointer. |
 | `<workspace>/AGENTS.md` | Repo-local instruction layer; each `## Heading` is also a discoverable skill. |
 | `<workspace>/.nca/skills/` | Default workspace skill directory. |
-| `~/.nca/skills/` | User-level skill directory. |
+| `~/.local/share/ncacli/skills/` | User-level skill directory (legacy `~/.nca/skills/` still discovered). |
 | `~/.claude/skills/` | Imported Claude-style skill directory, if present. |
 | `<repo>/.nca/worktrees/<session-id>` | Worktree path for isolated child sessions. |
 | `$XDG_RUNTIME_DIR/nca/<session_id>.sock` | IPC socket path when `XDG_RUNTIME_DIR` is set. |
 | `/tmp/nca/<session_id>.sock` | IPC socket fallback when `XDG_RUNTIME_DIR` is not set. |
-| `~/.nca/workspaces/<workspace-id>/cli-index.json` | Cached CLI index for agents and tooling. |
+| `~/.local/share/ncacli/workspaces/<id>/cli-index.json` | Cached CLI index for agents and tooling. |
 | `.ncarc` | Project instructions file committed with the repo. |
 | `.nca/instructions.md` | Local instructions file. |
 
@@ -231,16 +283,20 @@ Use `nca skills --json` to see all discovered skills with their sources.
 - **Auto-summarize** kicks in when context reaches a configurable threshold (default 75%).
 - **Summary format** preserves key topics, decisions, and critical context.
 - System messages are always preserved; recent messages use a sliding window.
+- **Smart compaction** (opt-in) builds a deterministic provider-request view that truncates older read/search noise while keeping tool groups atomic. Canonical session history is never rewritten by this path.
 
-Configuration in `~/.nca/config.toml`:
+Configuration in `~/.local/share/ncacli/config.toml`:
 
 ```toml
 [memory.context]
-context_window_target = 32000
+context_window_target = 0          # 0 = auto-detect
 max_retained_messages = 50
 auto_summarize_threshold = 75
 enable_auto_summarize = true
+smart_compaction_mode = "off"      # off | dry_run | on
 ```
+
+Use `dry_run` first to inspect savings under `/status` and in the human stream before enabling `on`.
 
 ## Providers
 
@@ -252,8 +308,19 @@ Typical environment variables:
 - `OPENAI_API_KEY`
 - `ANTHROPIC_API_KEY`
 - `OPENROUTER_API_KEY`
+- `CUSTOM_PROVIDER_API_KEY` (for custom endpoints)
 
-Provider config is loaded from defaults, then `~/.nca/config.toml`, then `<workspace>/.nca/config.local.toml`, then environment overrides.
+### Custom Endpoints
+
+Use `/connect` in the TUI (or the command palette) to pick a provider, enter an API key, and optionally add a custom OpenAI-compatible or Anthropic-compatible endpoint. Legacy aliases `/provider`, `/apikey`, and `/custom` still resolve to the same flow.
+
+```
+/connect
+```
+
+See [Providers](docs/documentation/providers.md) for full details.
+
+Provider config is loaded from defaults, then `~/.local/share/ncacli/config.toml`, then `<workspace>/.nca/config.local.toml`, then environment overrides.
 
 Use `nca doctor` to verify provider readiness and `nca models` to inspect model selection.
 
@@ -289,8 +356,11 @@ Recent search/edit improvements are aimed at making agent file work less brittle
 | `crates/common` | Shared config, events, sessions, messages, tool schemas, and orchestration metadata. |
 | `crates/core` | Agent loop, provider abstraction, harness builder, skills, approvals, and tool registry. |
 | `crates/runtime` | Session supervision, IPC, persistence, worktrees, memory store, context management, and subagent execution. |
-| `crates/cli` | `nca` entrypoint, command parsing, stream rendering, REPL, and TUI. |
+| `crates/tui` | Full-screen TUI, line REPL, slash-command registry, overlays, transcript rendering, and session UI state. |
+| `crates/cli` | `nca` binary entrypoint, clap commands, stream rendering, and glue onto `nca-tui` / runtime. |
 | `crates/autoresearch` | Metric-driven autonomous research helpers and experiment runner. |
+
+The shipped app is still a **single binary** (`nca`). The TUI crate owns interactive presentation; the CLI crate owns argument parsing and lifecycle commands.
 
 ## Session Model
 
@@ -312,7 +382,7 @@ Full user-facing documentation lives in [`docs/documentation/`](docs/documentati
 | [Commands](docs/documentation/commands.md) | Complete CLI command and flag reference |
 | [Interactive Mode](docs/documentation/interactive-mode.md) | TUI, REPL, slash commands, keyboard shortcuts |
 | [Configuration](docs/documentation/configuration.md) | Config files, TOML format, and environment variables |
-| [Providers](docs/documentation/providers.md) | LLM provider setup — MiniMax, Anthropic, OpenAI, OpenRouter |
+| [Providers](docs/documentation/providers.md) | LLM provider setup — MiniMax, Anthropic, OpenAI, OpenRouter, Custom |
 | [Tools](docs/documentation/tools.md) | All agent tools — file ops, search, shell, web, and more |
 | [Sessions](docs/documentation/sessions.md) | Session lifecycle, persistence, resume, and management |
 | [Permissions](docs/documentation/permissions.md) | Approval system, permission modes, and safe mode |

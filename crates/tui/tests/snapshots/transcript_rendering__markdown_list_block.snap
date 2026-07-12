@@ -1,0 +1,5 @@
+---
+source: crates/tui/tests/transcript_rendering.rs
+expression: plain
+---
+- alpha- beta

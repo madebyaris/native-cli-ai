@@ -1,10 +1,15 @@
 use nca_common::config::{NcaConfig, PermissionMode};
 use nca_common::session::OrchestrationContext;
-use std::path::Path;
+use nca_common::todo::AgentTodo;
+use std::path::{Path, PathBuf};
 
 use crate::skills::SkillCatalog;
 
-const BUILT_IN_SYSTEM_PROMPT: &str = r#"You are nca, a native Rust coding assistant running in a terminal workspace.
+const MAX_MEMORY_NOTES: usize = 12;
+const MAX_MEMORY_CHARS: usize = 400;
+const MAX_TODOS_IN_PROMPT: usize = 20;
+
+const BUILT_IN_IDENTITY: &str = r#"You are nca, a native Rust coding assistant running in a terminal workspace.
 
 Identity:
 - Act like the default operator for this repository, not a generic code assistant.
@@ -31,16 +36,6 @@ Execution rules:
 - Re-read only the most relevant files and avoid dumping unnecessary context into a single turn.
 - Prefer fast local signals first: top-level listing, targeted search, focused file reads, and symbol-level inspection.
 
-Tool and validation rules:
-- When the user attaches images via nca (pasted or `/image`), the runtime already runs MiniMax native vision (`/v1/coding_plan/vlm`) and injects a text description into the conversation. Answer from that context; do **not** use `fetch_url` for workspace paths like `.nca/sessions/.../attachments/` or `file:` URLs to "load" those images.
-- Use list/search/read tools first to build a plan.
-- Use write/create tools only after enough context is gathered.
-- Validate important changes with tests, checks, or other concrete signals before claiming success.
-- If a command or edit could be destructive, expensive, or policy-sensitive, ask for approval or explain why it is needed.
-- Empty provider completions, empty tool results, or obviously invalid outputs must fail loudly instead of being treated as success.
-- Do not pretend a tool, provider, or validation step succeeded if it did not.
-- When you need structured choices from the user (preferences, stack, deploy target, etc.), use the `ask_question` tool with clear `options`, `allow_custom` when freeform is useful, and always set `suggested_answer` to your best recommendation so the user can accept quickly.
-
 Headless and orchestrator rules:
 - Headless runs must behave predictably for external orchestrators.
 - Respect orchestration metadata when present, but treat it as coordination context only.
@@ -52,19 +47,105 @@ Response style:
 - State important constraints, risks, and verification results plainly.
 "#;
 
-/// Build the layered system prompt from built-in + AGENTS.md + project + local instructions.
+const TOOL_PLAYBOOK: &str = r#"Tool playbook:
+- Explore with `list_directory`, `search_code`, `read_file`, and `query_symbols` before editing.
+- Prefer edit tools in this order:
+  1. `replace_match` for a search hit with an exact line/column location
+  2. `edit_file` for a unique exact string replacement
+  3. `apply_patch` for multiple hunks in one existing file
+  4. `write_file` / `create_directory` only for new paths
+- Validate important changes with tests, checks, or other concrete signals before claiming success.
+- Empty provider completions, empty tool results, or obviously invalid outputs must fail loudly instead of being treated as success.
+- Do not pretend a tool, provider, or validation step succeeded if it did not.
+- When the user attaches images via nca (pasted or `/image`), the runtime already runs MiniMax native vision and injects a text description. Do **not** use `fetch_url` for session attachment paths or `file:` URLs to "load" those images.
+- When you need structured choices from the user, use `ask_question` with clear options and always set `suggested_answer`. Ask **one** question per tool call (do not batch multiple `ask_question` calls in the same turn).
+- For multi-step work, keep an explicit session todo list via `update_todos` (full list replacement each call). Keep at most one item `in_progress`.
+- If a command or edit could be destructive, expensive, or policy-sensitive, ask for approval or explain why it is needed.
+"#;
+
+/// One memory note rendered into the dynamic harness section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessMemoryNote {
+    pub kind: String,
+    pub content: String,
+}
+
+/// Dynamic per-turn context for system prompt assembly.
+/// Built by the runtime; core stays free of git/memory I/O.
+#[derive(Debug, Clone, Default)]
+pub struct HarnessSnapshot {
+    pub workspace_root: PathBuf,
+    pub cwd_display: String,
+    pub git_branch: Option<String>,
+    pub model: String,
+    pub permission_mode: String,
+    pub agent_profile: Option<String>,
+    pub memory_notes: Vec<HarnessMemoryNote>,
+    pub todos: Vec<AgentTodo>,
+}
+
+impl HarnessSnapshot {
+    pub fn capped_memory_notes(&self) -> Vec<HarnessMemoryNote> {
+        self.memory_notes
+            .iter()
+            .rev()
+            .take(MAX_MEMORY_NOTES)
+            .map(|note| {
+                let content = truncate_chars(&note.content, MAX_MEMORY_CHARS);
+                HarnessMemoryNote {
+                    kind: note.kind.clone(),
+                    content,
+                }
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
+    }
+
+    pub fn capped_todos(&self) -> &[AgentTodo] {
+        let end = self.todos.len().min(MAX_TODOS_IN_PROMPT);
+        &self.todos[..end]
+    }
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max {
+        return trimmed.to_string();
+    }
+    let head: String = trimmed.chars().take(max.saturating_sub(1)).collect();
+    format!("{head}…")
+}
+
+/// Build the layered system prompt from built-in + dynamic snapshot + project files.
 pub fn build_system_prompt(
     config: &NcaConfig,
-    workspace_root: &Path,
+    snapshot: &HarnessSnapshot,
     orchestration: Option<&OrchestrationContext>,
 ) -> String {
     let mut sections = Vec::new();
+    let workspace_root = if snapshot.workspace_root.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        snapshot.workspace_root.as_path()
+    };
 
     if config.harness.built_in_enabled {
-        sections.push(BUILT_IN_SYSTEM_PROMPT.trim().to_string());
+        sections.push(BUILT_IN_IDENTITY.trim().to_string());
         if let Some(mode_section) = permission_mode_section(config.permissions.mode) {
             sections.push(mode_section);
         }
+    }
+
+    if let Some(section) = environment_section(snapshot) {
+        sections.push(section);
+    }
+    if let Some(section) = todos_section(snapshot) {
+        sections.push(section);
+    }
+    if let Some(section) = memory_section(snapshot) {
+        sections.push(section);
     }
 
     if let Some(text) = read_if_exists(&workspace_root.join("AGENTS.md"))
@@ -95,7 +176,74 @@ pub fn build_system_prompt(
         sections.push(section);
     }
 
+    if config.harness.built_in_enabled {
+        sections.push(TOOL_PLAYBOOK.trim().to_string());
+    }
+
     sections.join("\n\n---\n\n")
+}
+
+fn environment_section(snapshot: &HarnessSnapshot) -> Option<String> {
+    if snapshot.cwd_display.is_empty()
+        && snapshot.model.is_empty()
+        && snapshot.permission_mode.is_empty()
+        && snapshot.git_branch.is_none()
+        && snapshot.agent_profile.is_none()
+    {
+        return None;
+    }
+    let mut lines = vec!["Environment:".to_string()];
+    if !snapshot.cwd_display.is_empty() {
+        lines.push(format!("- cwd: {}", snapshot.cwd_display));
+    }
+    if let Some(branch) = &snapshot.git_branch {
+        lines.push(format!("- git_branch: {branch}"));
+    }
+    if !snapshot.model.is_empty() {
+        lines.push(format!("- model: {}", snapshot.model));
+    }
+    if !snapshot.permission_mode.is_empty() {
+        lines.push(format!("- permission_mode: {}", snapshot.permission_mode));
+    }
+    if let Some(profile) = &snapshot.agent_profile {
+        lines.push(format!("- agent_profile: {profile}"));
+    }
+    Some(lines.join("\n"))
+}
+
+fn todos_section(snapshot: &HarnessSnapshot) -> Option<String> {
+    let todos = snapshot.capped_todos();
+    if todos.is_empty() {
+        return None;
+    }
+    let mut lines = vec!["Session Todos:".to_string()];
+    for todo in todos {
+        lines.push(format!(
+            "- [{}] {} ({})",
+            todo.status.as_str(),
+            todo.content,
+            todo.id
+        ));
+    }
+    if snapshot.todos.len() > todos.len() {
+        lines.push(format!(
+            "- …and {} more (see /todos)",
+            snapshot.todos.len() - todos.len()
+        ));
+    }
+    Some(lines.join("\n"))
+}
+
+fn memory_section(snapshot: &HarnessSnapshot) -> Option<String> {
+    let notes = snapshot.capped_memory_notes();
+    if notes.is_empty() {
+        return None;
+    }
+    let mut lines = vec!["Memory Notes:".to_string()];
+    for note in notes {
+        lines.push(format!("- [{}] {}", note.kind, note.content));
+    }
+    Some(lines.join("\n"))
 }
 
 fn read_if_exists(path: &Path) -> Option<String> {
@@ -115,15 +263,14 @@ fn permission_mode_section(mode: PermissionMode) -> Option<String> {
             "Permission Mode: dont-ask\n- Only use automatically allowed tools.\n- If a task needs blocked tools, explain the limitation instead of pretending it succeeded."
                 .into(),
         ),
-        PermissionMode::AcceptEdits => Some(
-            "Permission Mode: accept-edits\n- File edits are allowed automatically.\n- Destructive actions and shell execution may still require caution."
+        PermissionMode::AcceptEdits | PermissionMode::Default => Some(
+            "Permission Mode: accept-edits (default)\n- File and directory create/edit tools are allowed automatically.\n- Shell commands and destructive deletes still require user approval unless explicitly allowed."
                 .into(),
         ),
         PermissionMode::BypassPermissions => Some(
             "Permission Mode: bypass-permissions\n- Tools are broadly available, but still work carefully and verify before claiming success."
                 .into(),
         ),
-        PermissionMode::Default => None,
     }
 }
 
@@ -138,7 +285,9 @@ fn skills_section(
 
     let mut section = String::from("Available Skills:\n");
     for skill in skills {
-        section.push_str(&skill.manifest_summary());
+        let summary = skill.manifest_summary();
+        let line = truncate_chars(&summary, 160);
+        section.push_str(&line);
         section.push('\n');
     }
     section.push_str(
@@ -188,22 +337,41 @@ fn orchestration_context_section(orchestration: Option<&OrchestrationContext>) -
 mod tests {
     use super::*;
     use nca_common::config::NcaConfig;
+    use nca_common::todo::{TodoSource, TodoStatus};
     use std::collections::BTreeMap;
     use std::fs;
     use tempfile::tempdir;
+
+    fn empty_snapshot(workspace: &Path) -> HarnessSnapshot {
+        HarnessSnapshot {
+            workspace_root: workspace.to_path_buf(),
+            cwd_display: workspace.display().to_string(),
+            git_branch: Some("main".into()),
+            model: "MiniMax-M2.5".into(),
+            permission_mode: "default".into(),
+            agent_profile: Some("@build".into()),
+            memory_notes: Vec::new(),
+            todos: Vec::new(),
+        }
+    }
 
     #[test]
     fn built_in_prompt_includes_repo_specific_directives() {
         let config = NcaConfig::default();
         let temp = tempdir().expect("tempdir");
+        let snapshot = empty_snapshot(temp.path());
 
-        let prompt = build_system_prompt(&config, temp.path(), None);
+        let prompt = build_system_prompt(&config, &snapshot, None);
 
         assert!(prompt.contains("Rust-native only."));
         assert!(prompt.contains("MiniMax is the primary provider path."));
         assert!(prompt.contains("The CLI (`nca`) is the product surface:"));
         assert!(prompt.contains("Subagents should be child sessions with their own worktrees"));
         assert!(prompt.contains("must fail loudly instead of being treated as success"));
+        assert!(prompt.contains("replace_match"));
+        let replace_idx = prompt.find("replace_match").expect("replace");
+        let write_idx = prompt.find("`write_file`").expect("write");
+        assert!(replace_idx < write_idx);
     }
 
     #[test]
@@ -228,6 +396,18 @@ mod tests {
         )
         .expect("write skill");
 
+        let mut snapshot = empty_snapshot(temp.path());
+        snapshot.todos = vec![AgentTodo {
+            id: "1".into(),
+            content: "Ship harness".into(),
+            status: TodoStatus::InProgress,
+            source: Some(TodoSource::Agent),
+        }];
+        snapshot.memory_notes = vec![HarnessMemoryNote {
+            kind: "note".into(),
+            content: "Prefer product home store".into(),
+        }];
+
         let orchestration = OrchestrationContext {
             orchestrator: Some("paperclip".into()),
             run_id: Some("run-123".into()),
@@ -238,12 +418,15 @@ mod tests {
             metadata: BTreeMap::new(),
         };
 
-        let prompt = build_system_prompt(&config, temp.path(), Some(&orchestration));
+        let prompt = build_system_prompt(&config, &snapshot, Some(&orchestration));
 
         let identity_idx = prompt.find("Identity:").expect("built-in section");
         let permission_idx = prompt
             .find("Permission Mode: plan")
             .expect("permission section");
+        let env_idx = prompt.find("Environment:").expect("environment");
+        let todos_idx = prompt.find("Session Todos:").expect("todos");
+        let memory_idx = prompt.find("Memory Notes:").expect("memory");
         let agents_idx = prompt
             .find("AGENTS.md Instructions:\nagent rule")
             .expect("agents instructions");
@@ -257,13 +440,18 @@ mod tests {
         let orchestration_idx = prompt
             .find("Execution Context:")
             .expect("orchestration section");
+        let playbook_idx = prompt.find("Tool playbook:").expect("playbook");
 
         assert!(identity_idx < permission_idx);
-        assert!(permission_idx < agents_idx);
+        assert!(permission_idx < env_idx);
+        assert!(env_idx < todos_idx);
+        assert!(todos_idx < memory_idx);
+        assert!(memory_idx < agents_idx);
         assert!(agents_idx < project_idx);
         assert!(project_idx < local_idx);
         assert!(local_idx < skills_idx);
         assert!(skills_idx < orchestration_idx);
+        assert!(orchestration_idx < playbook_idx);
     }
 
     #[test]
@@ -276,7 +464,7 @@ mod tests {
         fs::write(temp.path().join(".nca/instructions.md"), "local override")
             .expect("write local instructions");
 
-        let prompt = build_system_prompt(&config, temp.path(), None);
+        let prompt = build_system_prompt(&config, &empty_snapshot(temp.path()), None);
 
         assert!(prompt.contains("Product priorities:"));
         assert!(prompt.contains("AGENTS.md Instructions:\nagents override"));

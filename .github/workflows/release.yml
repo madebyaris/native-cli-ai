@@ -2,14 +2,16 @@ name: Release
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build artifacts without creating a GitHub Release"
+        type: boolean
+        default: true
 
-# Only run release jobs when:
-# - A PR is merged to main (from dev or any branch)
-# - A version tag is pushed (v*)
+# Tag pushes (v*) and manual dispatch build Windows / Linux / macOS binaries.
+# GitHub Releases are created only for version tags.
 permissions:
   contents: write
 
@@ -18,32 +20,7 @@ env:
   BINARY_NAME: nca
 
 jobs:
-  # Determine if this is a release-worthy push
-  should-release:
-    runs-on: ubuntu-latest
-    outputs:
-      value: ${{ steps.check.outputs.should_release }}
-    steps:
-      - name: Check release conditions
-        id: check
-        run: |
-          # Release on PR merge to main
-          if [[ "${{ github.event.pull_request.merged }}" == "true" ]]; then
-            echo "should_release=true" >> "$GITHUB_OUTPUT"
-            echo "trigger=PR merge to main" >> "$GITHUB_OUTPUT"
-          # Release on tag push
-          elif [[ "${{ startsWith(github.ref, 'refs/tags/v') }}" == "true" ]]; then
-            echo "should_release=true" >> "$GITHUB_OUTPUT"
-            echo "trigger=Tag push" >> "$GITHUB_OUTPUT"
-          else
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-            echo "trigger=Non-release push" >> "$GITHUB_OUTPUT"
-          fi
-
-  # CI check (required before release)
   ci-check:
-    needs: should-release
-    if: needs.should-release.outputs.value == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -68,15 +45,17 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
-  # Multi-platform build
   build:
-    needs: [should-release, ci-check]
-    if: needs.should-release.outputs.value == 'true'
+    needs: ci-check
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
             archive: tar.gz
           - target: x86_64-apple-darwin
             os: macos-latest
@@ -84,6 +63,9 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -94,8 +76,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install OpenSSL (Linux targets)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Install OpenSSL (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config
@@ -110,20 +92,46 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czf ../../../${{ env.BINARY_NAME }}-${{ matrix.target }}.${{ matrix.archive }} ${{ env.BINARY_NAME }}
+          set -euo pipefail
+          BIN="${{ env.BINARY_NAME }}"
+          TARGET="${{ matrix.target }}"
+          ARCHIVE="${{ matrix.archive }}"
+          EXT=""
+          case "$TARGET" in
+            *windows*) EXT=".exe" ;;
+          esac
+
+          cd "target/${TARGET}/release"
+          if [[ ! -f "${BIN}${EXT}" ]]; then
+            echo "missing binary: ${BIN}${EXT}" >&2
+            ls -la
+            exit 1
+          fi
+
+          OUT="../../../${BIN}-${TARGET}.${ARCHIVE}"
+          if [[ "$ARCHIVE" == "zip" ]]; then
+            if command -v 7z >/dev/null 2>&1; then
+              7z a -tzip "$OUT" "${BIN}${EXT}"
+            else
+              # Windows runners ship bsdtar, which can write zip archives.
+              tar -a -c -f "$OUT" "${BIN}${EXT}"
+            fi
+          else
+            tar czf "$OUT" "${BIN}${EXT}"
+          fi
           cd ../../..
+          ls -lh "${BIN}-${TARGET}.${ARCHIVE}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.BINARY_NAME }}-${{ matrix.target }}
           path: ${{ env.BINARY_NAME }}-${{ matrix.target }}.${{ matrix.archive }}
+          if-no-files-found: error
 
-  # Create GitHub Release (only on tags)
   release:
-    needs: [should-release, build]
-    if: needs.should-release.outputs.value == 'true' && startsWith(github.ref, 'refs/tags/')
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -141,20 +149,27 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # Update install script (only on tags)
   update-install-script:
-    needs: [should-release, release]
-    if: needs.should-release.outputs.value == 'true' && startsWith(github.ref, 'refs/tags/')
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract version
         id: version
         run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
 
       - name: Update install script version
-        run: sed -i "s/^VERSION=.*/VERSION=\"${{ steps.version.outputs.version }}\"/" install.sh
+        run: |
+          if [[ "$(uname)" == "Darwin" ]]; then
+            sed -i '' "s/^VERSION=.*/VERSION=\"${{ steps.version.outputs.version }}\"/" install.sh
+          else
+            sed -i "s/^VERSION=.*/VERSION=\"${{ steps.version.outputs.version }}\"/" install.sh
+          fi
 
       - name: Commit updated install script
         run: |

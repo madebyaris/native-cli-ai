@@ -1,7 +1,9 @@
-//! Stage image attachments under `.nca/sessions/<id>/attachments/`.
+//! Stage image attachments under the product session store.
 
 use arboard::Clipboard;
 use image::{DynamicImage, ImageBuffer, Rgba};
+use nca_common::config::NcaConfig;
+use nca_common::config::resolve_sessions_dir;
 use nca_common::message::ImageAttachment;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,15 +17,15 @@ fn nanos_name(prefix: &str, ext: &str) -> String {
 }
 
 pub fn session_attachments_dir(workspace: &Path, session_id: &str) -> PathBuf {
-    workspace
-        .join(".nca")
-        .join("sessions")
+    let config = NcaConfig::default();
+    resolve_sessions_dir(&config, workspace)
         .join(session_id)
         .join("attachments")
 }
 
-fn relative_attachment_path(session_id: &str, filename: &str) -> String {
-    format!(".nca/sessions/{session_id}/attachments/{filename}")
+fn attachment_path_ref(dir: &Path, filename: &str) -> String {
+    // Absolute path so providers resolve correctly outside the workspace tree.
+    dir.join(filename).to_string_lossy().replace('\\', "/")
 }
 
 fn media_type_for_extension(ext: &str) -> &'static str {
@@ -36,7 +38,7 @@ fn media_type_for_extension(ext: &str) -> &'static str {
     }
 }
 
-/// Copy a user file into the session attachment directory and return a workspace-relative ref.
+/// Copy a user file into the session attachment directory and return a path ref.
 pub fn import_image_file(
     workspace: &Path,
     session_id: &str,
@@ -63,7 +65,7 @@ pub fn import_image_file(
     std::fs::copy(&src, &dest).map_err(|e| format!("copy image: {e}"))?;
     Ok(ImageAttachment {
         media_type,
-        path: relative_attachment_path(session_id, &filename),
+        path: attachment_path_ref(&dir, &filename),
     })
 }
 
@@ -99,6 +101,6 @@ pub fn paste_clipboard_image(
 
     Ok(ImageAttachment {
         media_type: "image/png".into(),
-        path: relative_attachment_path(session_id, &filename),
+        path: attachment_path_ref(&dir, &filename),
     })
 }

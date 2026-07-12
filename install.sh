@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.3.0"
+VERSION="0.4.0"
 REPO="madebyaris/native-cli-ai"
 BINARY="nca"
 INSTALL_DIR="${NCA_INSTALL_DIR:-/usr/local/bin}"

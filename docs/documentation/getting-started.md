@@ -5,9 +5,19 @@
 - **Rust toolchain** — install via [rustup](https://rustup.rs/) (edition 2024, stable channel)
 - **Git** — required for session worktrees and version control integration
 - **ripgrep (`rg`)** — used by the `search_code` tool for fast code search
-- **An LLM API key** — MiniMax (default), Anthropic, OpenAI, or OpenRouter
+- **An LLM API key** — MiniMax (default), Anthropic, OpenAI, OpenRouter, or any compatible endpoint
 
 ## Installation
+
+### One-line install (macOS and Linux)
+
+```bash
+curl -fsSL https://nca-cli.com/install | bash
+```
+
+### GitHub Releases
+
+Pre-built binaries ship for Linux, macOS, and Windows (x86_64 and ARM64). Grab the matching archive from [Releases](https://github.com/madebyaris/native-cli-ai/releases).
 
 ### Build from Source
 
@@ -18,7 +28,7 @@ cd native-cli-ai
 # Build optimized release binary
 cargo build --release
 
-# Install to your PATH
+# Install to your PATH (Unix)
 cp target/release/nca /usr/local/bin/
 ```
 
@@ -51,10 +61,12 @@ export OPENROUTER_API_KEY="your-key-here"
 To persist the key, add it to your shell profile (`~/.zshrc`, `~/.bashrc`) or store it in the config file:
 
 ```toml
-# ~/.nca/config.toml
+# ~/.local/share/ncacli/config.toml  (or $NCA_HOME/config.toml)
 [provider.minimax]
 api_key = "your-key-here"
 ```
+
+Legacy `~/.nca/config.toml` is still read if the product-home config is missing.
 
 ### 2. First Run
 
@@ -83,18 +95,21 @@ nca -p "add a health check endpoint to the API"
 
 ## Directory Structure
 
-nca creates a `.nca/` directory in your workspace for local state:
+nca creates project-local files under `.nca/` for instructions, skills, and git worktrees. Session history, memory, and last-session pointers live under the product home (`$NCA_HOME`, `$XDG_DATA_HOME/ncacli`, or `~/.local/share/ncacli/`):
 
 ```
+~/.local/share/ncacli/
+├── config.toml
+└── workspaces/<slug>-<16hex>/
+    ├── sessions/             # Session state and event logs
+    ├── memory.json
+    ├── last_session
+    └── workspace.json
+
 my-project/
 ├── .nca/
 │   ├── config.local.toml    # Workspace-specific config overrides
 │   ├── instructions.md      # Local instructions for the agent
-│   ├── .last_session         # Pointer to the most recent session
-│   ├── memory.json           # Persistent memory notes
-│   ├── sessions/             # Session state and event logs
-│   │   ├── <id>.json         # Session state snapshot
-│   │   └── <id>.events.jsonl # Event log (NDJSON)
 │   ├── worktrees/            # Git worktrees for sub-agents
 │   └── skills/               # Local skill definitions
 ├── .ncarc                    # Project-level instructions
@@ -102,7 +117,7 @@ my-project/
 └── ...
 ```
 
-Global config lives at `~/.nca/config.toml`.
+Global config lives at `~/.local/share/ncacli/config.toml`.
 
 ## Custom Instructions
 

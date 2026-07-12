@@ -1,54 +1,51 @@
 //! Full-screen session TUI: transcript, streaming assistant, composer.
 
-use std::path::{Path, PathBuf};
-
 use crate::file_mentions;
-use crate::slash_commands::SLASH_COMMANDS;
+use crate::tui::composer::{
+    PaletteRow, SLASH_PANEL_MAX_ROWS, apply_at_completion, apply_selected_at_completion,
+    at_completion_active, at_completion_matches, branch_picker_enter_command,
+    composer_chrome_height, composer_line, delete_completed_at_mention, filter_palette_rows,
+    filter_slash_entries, filtered_branch_indices, load_slash_entries, palette_command_for_label,
+    palette_selectable_indices, slash_panel_visible,
+};
 use crate::tui::connect_modal::{
     ConnectRow, build_connect_rows, clamp_selection, provider_at_selection,
     row_index_for_selection, selectable_row_indices,
 };
+use crate::tui::input::{
+    ApprovalAnswer, handle_approval_key, parse_tui_question_answer, render_branch_picker,
+    render_command_palette,
+};
+use crate::tui::layout::{
+    centered_rect, layout_chunks, layout_with_sidebar, rect_contains, sidebar_fit,
+};
 use crate::tui::state::{
-    ApprovalRequest, DisplayBlock, ModelPickerAction, ModelPickerEntry, TuiSessionState,
+    CustomProviderSetupStep, DisplayBlock, ModelPickerAction, ModelPickerEntry, TuiSessionState,
+};
+use crate::tui::terminal::{restore_terminal, setup_terminal};
+use crate::tui::theme;
+use crate::tui::transcript::{
+    ensure_transcript_cache, live_activity_lines, parse_approval_verdict, transcript_lines,
 };
 use crossterm::{
-    cursor::{Hide, MoveToColumn, Show},
-    event::{
-        DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
-        MouseEventKind, poll, read,
-    },
+    cursor::MoveToColumn,
+    event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind, poll, read},
     execute,
-    terminal::{
-        Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
-        enable_raw_mode,
-    },
 };
-use nca_common::config::ProviderKind;
+use nca_common::config::{ProviderCompatibility, ProviderKind};
 use nca_common::event::{BusyState, QuestionSelection};
 use nca_core::approval::suggest_allow_pattern;
-use nca_core::skills::{SkillCatalog, SkillSource};
 use ratatui::{
-    Terminal,
-    backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear as ClearWidget, Paragraph, Wrap},
 };
-use std::io::{Stdout, stdout};
+use std::io::stdout;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::mpsc::UnboundedSender;
-
-/// Message from TUI to the approval dispatch task.
-#[derive(Debug)]
-pub enum ApprovalAnswer {
-    Verdict { call_id: String, approved: bool },
-    AllowPattern { call_id: String, pattern: String },
-}
-
-/// Per flattened transcript line: click selects this answer (same indices as `transcript_lines`).
-type LineAnswerHit = Option<QuestionSelection>;
+use tokio::sync::mpsc::Sender;
 
 #[derive(Debug)]
 pub enum TuiCmd {
@@ -64,6 +61,10 @@ pub enum TuiCmd {
     SwitchBranch(String),
     /// Create a new branch with the given name and switch to it.
     CreateBranch(String),
+    /// Read and stage a clipboard image away from the UI thread.
+    PasteClipboard,
+    /// Copy the latest assistant response to the system clipboard.
+    CopyLastAssistant,
     /// Apply workspace default provider (from TUI picker).
     ApplyDefaultProvider(ProviderKind),
     /// Open API key modal for provider; bool indicates whether to connect after save/confirm.
@@ -100,6 +101,13 @@ pub enum TuiCmd {
     /// Validate an API key for onboarding (provider, api_key).
     /// The repl handler looks up base_url from config.
     ValidateApiKey(ProviderKind, String),
+    /// Apply custom provider settings from the TUI wizard.
+    ApplyCustomProviderSetup {
+        compatibility: ProviderCompatibility,
+        base_url: String,
+        api_key: String,
+        model: String,
+    },
     /// Mark onboarding as complete and persist the flag.
     #[allow(dead_code)]
     CompleteOnboarding,
@@ -107,1279 +115,109 @@ pub enum TuiCmd {
     ResumeSession(String),
 }
 
-mod theme {
-    use ratatui::style::Color;
-
-    pub const BG: Color = Color::Rgb(22, 22, 28);
-    pub const SURFACE: Color = Color::Rgb(32, 32, 42);
-    pub const BORDER: Color = Color::Rgb(55, 55, 70);
-    pub const MENTION_BG: Color = Color::Rgb(48, 62, 94);
-
-    pub const USER: Color = Color::Rgb(56, 189, 248);
-    pub const ASSISTANT: Color = Color::Rgb(167, 139, 250);
-    pub const TOOL: Color = Color::Rgb(94, 234, 212);
-    pub const MUTED: Color = Color::Rgb(120, 120, 140);
-    pub const TEXT: Color = Color::Rgb(230, 230, 240);
-    pub const SUCCESS: Color = Color::Rgb(74, 222, 128);
-    pub const ERROR: Color = Color::Rgb(248, 113, 113);
-    pub const WARN: Color = Color::Rgb(251, 191, 36);
-}
-
-const SLASH_PANEL_MAX_ROWS: usize = 8;
 const MOUSE_SCROLL_LINES: usize = 3;
-const SIDEBAR_WIDTH: u16 = 32;
-const SIDEBAR_MIN_TOTAL_WIDTH: u16 = 110;
-const COMMAND_PALETTE_WIDTH: u16 = 48;
-const COMMAND_PALETTE_MAX_ROWS: usize = 10;
-
-fn slash_panel_visible(buffer: &str) -> bool {
-    buffer.starts_with('/') && !buffer.contains(' ')
-}
-
-fn cursor_byte_index(line: &str, cursor_char_idx: usize) -> usize {
-    line.char_indices()
-        .nth(cursor_char_idx)
-        .map(|(i, _)| i)
-        .unwrap_or(line.len())
-}
-
-fn at_panel_height(n: usize) -> u16 {
-    if n == 0 {
-        return 0;
-    }
-    (n.min(SLASH_PANEL_MAX_ROWS) as u16).saturating_add(2)
-}
-
-fn at_completion_active(buffer: &str, cursor_char_idx: usize) -> bool {
-    if slash_panel_visible(buffer) {
-        return false;
-    }
-    let b = cursor_byte_index(buffer, cursor_char_idx);
-    file_mentions::at_token_before_cursor(buffer, b).is_some()
-}
-
-fn at_completion_matches(
-    workspace_files: &[String],
-    buffer: &str,
-    cursor_char_idx: usize,
-) -> Vec<String> {
-    if !at_completion_active(buffer, cursor_char_idx) {
-        return Vec::new();
-    }
-    let b = cursor_byte_index(buffer, cursor_char_idx);
-    let Some((_, prefix)) = file_mentions::at_token_before_cursor(buffer, b) else {
-        return Vec::new();
-    };
-    file_mentions::filter_paths_prefix(workspace_files, &prefix)
-}
-
-fn composer_chrome_height(
-    slash_entries: &[SlashEntry],
-    workspace_files: &[String],
-    buffer: &str,
-    cursor_char_idx: usize,
-) -> u16 {
-    let slash_filtered = filter_slash_entries(slash_entries, buffer);
-    let at_matches = at_completion_matches(workspace_files, buffer, cursor_char_idx);
-    let slash_h = if slash_panel_visible(buffer) {
-        slash_panel_height(slash_filtered.len())
-    } else {
-        0
-    };
-    let at_h = if !at_matches.is_empty() {
-        at_panel_height(at_matches.len())
-    } else {
-        0
-    };
-    slash_h.max(at_h)
-}
-
-/// Replace `@prefix` before cursor with `@choice` (relative path).
-fn apply_at_completion(buffer: &str, cursor_char_idx: usize, choice: &str) -> (String, usize) {
-    let b = cursor_byte_index(buffer, cursor_char_idx);
-    let Some((at_byte, _prefix)) = file_mentions::at_token_before_cursor(buffer, b) else {
-        return (buffer.to_string(), cursor_char_idx);
-    };
-    let before = &buffer[..at_byte.saturating_add(1)];
-    let after = &buffer[b..];
-    let new_buf = format!("{before}{choice}{after}");
-    let new_byte = at_byte + 1 + choice.len();
-    let new_char = new_buf[..new_byte.min(new_buf.len())].chars().count();
-    (new_buf, new_char)
-}
-
-fn apply_selected_at_completion(
-    workspace_files: &[String],
-    buffer: &str,
-    cursor_char_idx: usize,
-    at_menu_index: usize,
-    append_space: bool,
-) -> Option<(String, usize)> {
-    let at_matches = at_completion_matches(workspace_files, buffer, cursor_char_idx);
-    if at_matches.is_empty() || !at_completion_active(buffer, cursor_char_idx) {
-        return None;
-    }
-
-    let pick = at_menu_index.min(at_matches.len().saturating_sub(1));
-    let choice = at_matches.get(pick)?;
-    let (mut new_buf, mut new_cursor_char_idx) =
-        apply_at_completion(buffer, cursor_char_idx, choice);
-
-    if append_space {
-        let insert_at = cursor_byte_index(&new_buf, new_cursor_char_idx);
-        new_buf.insert(insert_at, ' ');
-        new_cursor_char_idx += 1;
-    }
-
-    Some((new_buf, new_cursor_char_idx))
-}
-
-fn at_mention_char_ranges(buffer: &str) -> Vec<(usize, usize)> {
-    file_mentions::parse_at_mentions(buffer)
-        .into_iter()
-        .map(|(start, end, _)| {
-            let start_char = buffer[..start].chars().count();
-            let end_char = buffer[..end].chars().count();
-            (start_char, end_char)
-        })
-        .collect()
-}
-
-fn completed_at_mention_range_before_cursor(
-    buffer: &str,
-    cursor_char_idx: usize,
-) -> Option<(usize, usize)> {
-    let chars: Vec<char> = buffer.chars().collect();
-    for (start_char, end_char) in at_mention_char_ranges(buffer) {
-        if end_char == cursor_char_idx {
-            return Some((start_char, end_char));
-        }
-        if end_char < chars.len()
-            && end_char + 1 == cursor_char_idx
-            && chars.get(end_char) == Some(&' ')
-        {
-            return Some((start_char, end_char + 1));
-        }
-    }
-    None
-}
-
-fn remove_char_range(buffer: &str, start_char_idx: usize, end_char_idx: usize) -> String {
-    let mut chars: Vec<char> = buffer.chars().collect();
-    chars.drain(start_char_idx..end_char_idx);
-    chars.into_iter().collect()
-}
-
-fn delete_completed_at_mention(buffer: &str, cursor_char_idx: usize) -> Option<(String, usize)> {
-    let (start_char, end_char) = completed_at_mention_range_before_cursor(buffer, cursor_char_idx)?;
-    Some((remove_char_range(buffer, start_char, end_char), start_char))
-}
-
-fn push_styled_run(
-    spans: &mut Vec<Span<'static>>,
-    text: &mut String,
-    current_style: &mut Option<Style>,
-    style: Style,
-    ch: char,
-) {
-    if current_style.as_ref() != Some(&style) && !text.is_empty() {
-        spans.push(Span::styled(
-            std::mem::take(text),
-            current_style.unwrap_or_default(),
-        ));
-    }
-    *current_style = Some(style);
-    text.push(ch);
-}
-
-fn composer_line(buffer: &str, cursor_char_idx: usize) -> Line<'static> {
-    let prompt = Span::styled("❯ ", Style::default().fg(theme::USER).bold());
-    let chars: Vec<char> = buffer.chars().collect();
-    let mention_ranges = at_mention_char_ranges(buffer);
-    let cursor_char_idx = cursor_char_idx.min(chars.len());
-    let mut spans = vec![prompt];
-    let mut run = String::new();
-    let mut run_style: Option<Style> = None;
-
-    for idx in 0..=chars.len() {
-        if idx == cursor_char_idx {
-            let cursor_char = chars.get(idx).copied().unwrap_or(' ');
-            let in_mention = idx < chars.len()
-                && mention_ranges
-                    .iter()
-                    .any(|(start, end)| *start <= idx && idx < *end);
-            let cursor_style = if in_mention {
-                Style::default()
-                    .bg(theme::USER)
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-                    .bg(theme::MUTED)
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::BOLD)
-            };
-            push_styled_run(
-                &mut spans,
-                &mut run,
-                &mut run_style,
-                cursor_style,
-                cursor_char,
-            );
-            if idx == chars.len() {
-                break;
-            }
-            continue;
-        }
-
-        let Some(ch) = chars.get(idx).copied() else {
-            break;
-        };
-        let in_mention = mention_ranges
-            .iter()
-            .any(|(start, end)| *start <= idx && idx < *end);
-        let style = if in_mention {
-            Style::default()
-                .fg(theme::TEXT)
-                .bg(theme::MENTION_BG)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme::TEXT)
-        };
-        push_styled_run(&mut spans, &mut run, &mut run_style, style, ch);
-    }
-
-    if !run.is_empty() {
-        spans.push(Span::styled(run, run_style.unwrap_or_default()));
-    }
-
-    Line::from(spans)
-}
-
-/// Entry for the slash panel: either a hardcoded command or a discovered skill.
-#[derive(Clone)]
-pub enum SlashEntry {
-    Command(&'static str),
-    Skill {
-        command: String,
-        description: Option<String>,
-        source: SkillSource,
-    },
-}
-
-impl SlashEntry {
-    fn command_str(&self) -> String {
-        match self {
-            SlashEntry::Command(s) => s.to_string(),
-            SlashEntry::Skill { command, .. } => format!("/{command}"),
-        }
-    }
-
-    fn display_text(&self) -> String {
-        match self {
-            SlashEntry::Command(s) => s.to_string(),
-            SlashEntry::Skill {
-                command,
-                description,
-                source,
-            } => {
-                let tag = match source {
-                    SkillSource::AgentsMd => " (AGENTS.md)",
-                    SkillSource::FileSystem => " (skill dir)",
-                };
-                match description {
-                    Some(desc) => format!("/{command:<20} — {desc}{tag}"),
-                    None => format!("/{command}{tag}"),
-                }
-            }
-        }
-    }
-}
-
-/// Collect skills from SkillCatalog for slash panel display.
-fn collect_skill_entries(workspace_root: &Path, skill_dirs: &[PathBuf]) -> Vec<SlashEntry> {
-    match SkillCatalog::discover(workspace_root, skill_dirs) {
-        Ok(skills) => skills
-            .into_iter()
-            .map(|s| SlashEntry::Skill {
-                command: s.command,
-                description: s.description,
-                source: s.source,
-            })
-            .collect(),
-        Err(_) => Vec::new(),
-    }
-}
-
-/// Load all slash-commands: hardcoded commands + discovered skills.
-fn load_slash_entries(workspace_root: &Path, skill_dirs: &[PathBuf]) -> Vec<SlashEntry> {
-    let mut entries: Vec<SlashEntry> = SLASH_COMMANDS
-        .iter()
-        .map(|c| SlashEntry::Command(c))
-        .collect();
-
-    // Add discovered skills
-    entries.extend(collect_skill_entries(workspace_root, skill_dirs));
-
-    // Sort by command name
-    entries.sort_by(|a, b| {
-        a.command_str()
-            .to_lowercase()
-            .cmp(&b.command_str().to_lowercase())
-    });
-    entries.dedup_by(|a, b| a.command_str().eq_ignore_ascii_case(&b.command_str()));
-    entries
-}
-
-/// Filter slash entries by buffer prefix.
-fn filter_slash_entries<'a>(entries: &'a [SlashEntry], buffer: &str) -> Vec<&'a SlashEntry> {
-    if !slash_panel_visible(buffer) {
-        return Vec::new();
-    }
-    let needle = buffer.trim_start_matches('/').to_lowercase();
-    entries
-        .iter()
-        .filter(|e| {
-            e.command_str()
-                .trim_start_matches('/')
-                .to_lowercase()
-                .starts_with(&needle)
-        })
-        .collect()
-}
-
-fn branch_filter_text(query: &str) -> &str {
-    query.trim().strip_prefix('/').unwrap_or(query.trim())
-}
-
-fn filtered_branch_indices(branches: &[String], query: &str) -> Vec<usize> {
-    let filter = branch_filter_text(query).to_ascii_lowercase();
-    if filter.is_empty() {
-        return (0..branches.len()).collect();
-    }
-    branches
-        .iter()
-        .enumerate()
-        .filter(|(_, branch)| branch.to_ascii_lowercase().contains(&filter))
-        .map(|(idx, _)| idx)
-        .collect()
-}
-
-fn branch_picker_enter_command(
-    branches: &[String],
-    query: &str,
-    selected_filtered_idx: usize,
-) -> Option<TuiCmd> {
-    let raw_query = query.trim();
-    let branch_name = branch_filter_text(raw_query).trim();
-    let filtered = filtered_branch_indices(branches, raw_query);
-
-    if raw_query.starts_with('/') {
-        return (!branch_name.is_empty()).then(|| TuiCmd::CreateBranch(branch_name.to_string()));
-    }
-
-    if !branch_name.is_empty()
-        && let Some((idx, _)) = branches
-            .iter()
-            .enumerate()
-            .find(|(_, branch)| branch.eq_ignore_ascii_case(branch_name))
-    {
-        return Some(TuiCmd::SwitchBranch(branches[idx].clone()));
-    }
-
-    filtered
-        .get(selected_filtered_idx)
-        .copied()
-        .map(|idx| TuiCmd::SwitchBranch(branches[idx].clone()))
-}
-
-/// A row in the categorized command palette.
-#[derive(Clone)]
-enum PaletteRow {
-    Section(&'static str),
-    Entry {
-        label: &'static str,
-        shortcut: &'static str,
-    },
-}
-
-const PALETTE_CATALOG: &[PaletteRow] = &[
-    PaletteRow::Section("Suggested"),
-    PaletteRow::Entry {
-        label: "Switch model",
-        shortcut: "ctrl+x m",
-    },
-    PaletteRow::Entry {
-        label: "Connect provider",
-        shortcut: "",
-    },
-    PaletteRow::Section("Session"),
-    PaletteRow::Entry {
-        label: "Open editor",
-        shortcut: "ctrl+x e",
-    },
-    PaletteRow::Entry {
-        label: "Switch session",
-        shortcut: "ctrl+x l",
-    },
-    PaletteRow::Entry {
-        label: "New session",
-        shortcut: "ctrl+x n",
-    },
-    PaletteRow::Entry {
-        label: "Compact",
-        shortcut: "ctrl+x c",
-    },
-    PaletteRow::Entry {
-        label: "Export session",
-        shortcut: "",
-    },
-    PaletteRow::Section("Prompt"),
-    PaletteRow::Entry {
-        label: "Skills",
-        shortcut: "",
-    },
-    PaletteRow::Entry {
-        label: "Agent profile",
-        shortcut: "ctrl+x a",
-    },
-    PaletteRow::Entry {
-        label: "Toggle thinking",
-        shortcut: "",
-    },
-    PaletteRow::Section("Provider"),
-    PaletteRow::Entry {
-        label: "Connect provider",
-        shortcut: "",
-    },
-    PaletteRow::Entry {
-        label: "Switch provider",
-        shortcut: "",
-    },
-    PaletteRow::Entry {
-        label: "API key",
-        shortcut: "",
-    },
-    PaletteRow::Section("System"),
-    PaletteRow::Entry {
-        label: "View status",
-        shortcut: "ctrl+x s",
-    },
-    PaletteRow::Entry {
-        label: "Config",
-        shortcut: "",
-    },
-    PaletteRow::Entry {
-        label: "Doctor",
-        shortcut: "",
-    },
-    PaletteRow::Entry {
-        label: "Help",
-        shortcut: "ctrl+x h",
-    },
-    PaletteRow::Entry {
-        label: "Permissions",
-        shortcut: "",
-    },
-    PaletteRow::Entry {
-        label: "Memory",
-        shortcut: "",
-    },
-    PaletteRow::Entry {
-        label: "Logs",
-        shortcut: "",
-    },
-    PaletteRow::Entry {
-        label: "MCP servers",
-        shortcut: "",
-    },
-    PaletteRow::Entry {
-        label: "Clear screen",
-        shortcut: "ctrl+l",
-    },
-    PaletteRow::Entry {
-        label: "Exit",
-        shortcut: "ctrl+x q",
-    },
-];
-
-fn palette_command_for_label(label: &str) -> &'static str {
-    match label {
-        "Switch model" => "/models",
-        "Connect provider" => "/connect",
-        "Open editor" => "/editor",
-        "Switch session" => "/sessions",
-        "New session" => "/new",
-        "Compact" => "/compact",
-        "Export session" => "/export",
-        "Skills" => "/skills",
-        "Agent profile" => "/agent",
-        "Toggle thinking" => "/thinking",
-        "Switch provider" => "/provider",
-        "API key" => "/apikey",
-        "View status" => "/status",
-        "Config" => "/config",
-        "Doctor" => "/doctor",
-        "Help" => "/help",
-        "Permissions" => "/permissions",
-        "Memory" => "/memory",
-        "Logs" => "/logs",
-        "MCP servers" => "/mcp",
-        "Clear screen" => "/clear",
-        "Exit" => "/exit",
-        _ => "/help",
-    }
-}
-
-fn filter_palette_rows(query: &str) -> Vec<&'static PaletteRow> {
-    let needle = query.trim().to_ascii_lowercase();
-    if needle.is_empty() {
-        return PALETTE_CATALOG.iter().collect();
-    }
-    let mut result: Vec<&'static PaletteRow> = Vec::new();
-    let mut pending_section: Option<&'static PaletteRow> = None;
-    for row in PALETTE_CATALOG {
-        match row {
-            PaletteRow::Section(_) => {
-                pending_section = Some(row);
-            }
-            PaletteRow::Entry { label, shortcut } => {
-                if label.to_ascii_lowercase().contains(&needle)
-                    || shortcut.to_ascii_lowercase().contains(&needle)
-                    || palette_command_for_label(label).contains(&needle)
-                {
-                    if let Some(s) = pending_section.take() {
-                        result.push(s);
-                    }
-                    result.push(row);
-                }
-            }
-        }
-    }
-    result
-}
-
-fn palette_selectable_indices(rows: &[&PaletteRow]) -> Vec<usize> {
-    rows.iter()
-        .enumerate()
-        .filter_map(|(i, r)| matches!(r, PaletteRow::Entry { .. }).then_some(i))
-        .collect()
-}
-
-fn slash_panel_height(filtered_len: usize) -> u16 {
-    if filtered_len == 0 {
-        return 0;
-    }
-    let rows = filtered_len.min(SLASH_PANEL_MAX_ROWS);
-    let footer = if filtered_len > SLASH_PANEL_MAX_ROWS {
-        1
-    } else {
-        0
-    };
-    // borders (2) + command rows + optional footer
-    (rows as u16)
-        .saturating_add(footer)
-        .saturating_add(2)
-        .min(14)
-}
-
-fn layout_chunks(area: Rect, slash_h: u16) -> (Rect, Rect, Option<Rect>, Rect) {
-    if slash_h > 0 {
-        let c = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(4),
-                Constraint::Length(2),
-                Constraint::Length(slash_h),
-                Constraint::Length(3),
-            ])
-            .split(area);
-        (c[0], c[1], Some(c[2]), c[3])
-    } else {
-        let c = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(4),
-                Constraint::Length(2),
-                Constraint::Length(3),
-            ])
-            .split(area);
-        (c[0], c[1], None, c[2])
-    }
-}
-
-fn sidebar_fit(s: &str, max_chars: usize) -> String {
-    let t = s.trim();
-    if t.chars().count() <= max_chars {
-        t.to_string()
-    } else {
-        format!(
-            "{}…",
-            t.chars()
-                .take(max_chars.saturating_sub(1))
-                .collect::<String>()
-        )
-    }
-}
-
-fn layout_with_sidebar(area: Rect) -> (Rect, Option<Rect>) {
-    if area.width < SIDEBAR_MIN_TOTAL_WIDTH {
-        return (area, None);
-    }
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(60), Constraint::Length(SIDEBAR_WIDTH)])
-        .split(area);
-    (chunks[0], Some(chunks[1]))
-}
-
-fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
-    let popup_w = width
-        .min(area.width.saturating_sub(2).max(20))
-        .min(area.width);
-    let popup_h = height
-        .min(area.height.saturating_sub(2).max(6))
-        .min(area.height);
-    Rect::new(
-        area.x + area.width.saturating_sub(popup_w) / 2,
-        area.y + area.height.saturating_sub(popup_h) / 2,
-        popup_w,
-        popup_h,
-    )
-}
 
 /// Matches `PermissionMode` as stored via `format!("{:?}", mode)` (e.g. `BypassPermissions`).
 fn toolbar_permission_is_bypass(mode: &str) -> bool {
     mode.contains("BypassPermissions")
 }
 
+fn permission_status_span(mode: &str) -> Span<'static> {
+    if toolbar_permission_is_bypass(mode) {
+        Span::styled(
+            " bypass ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(theme::WARN)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if mode.contains("AcceptEdits") || mode == "Default" {
+        Span::styled(
+            " edits ok ",
+            Style::default()
+                .fg(theme::SUCCESS)
+                .add_modifier(Modifier::DIM),
+        )
+    } else if mode.contains("Plan") {
+        Span::styled(
+            " plan ",
+            Style::default()
+                .fg(theme::ASSISTANT)
+                .add_modifier(Modifier::DIM),
+        )
+    } else if mode.contains("DontAsk") {
+        Span::styled(
+            " readonly ",
+            Style::default()
+                .fg(theme::MUTED)
+                .add_modifier(Modifier::DIM),
+        )
+    } else {
+        Span::styled(format!(" {mode} "), Style::default().fg(theme::MUTED))
+    }
+}
+
 fn escape_cancels_active_turn(state: &TuiSessionState) -> bool {
     matches!(
         state.current_busy_state,
-        BusyState::Thinking | BusyState::Streaming | BusyState::ToolRunning
-    )
+        BusyState::Thinking
+            | BusyState::Streaming
+            | BusyState::ToolRunning
+            | BusyState::ApprovalPending
+    ) || state.active_question.is_some()
+        || state.active_approval.is_some()
 }
 
-fn rect_contains(r: Rect, col: u16, row: u16) -> bool {
-    col >= r.x
-        && col < r.x.saturating_add(r.width)
-        && row >= r.y
-        && row < r.y.saturating_add(r.height)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrimaryInputMode {
+    Approval,
+    QuestionModal,
+    Normal,
 }
 
-/// Run a git command synchronously and return stdout.
-fn git_run(args: &[&str], cwd: Option<&Path>) -> Option<String> {
-    let cwd = cwd?;
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .ok()?;
-    if output.status.success() {
-        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+fn primary_input_mode(active_approval: bool, question_modal_open: bool) -> PrimaryInputMode {
+    if active_approval {
+        PrimaryInputMode::Approval
+    } else if question_modal_open {
+        PrimaryInputMode::QuestionModal
     } else {
-        None
+        PrimaryInputMode::Normal
     }
 }
 
-/// Get the current git branch name for `workspace`.
-pub fn git_current_branch(workspace: &Path) -> Option<String> {
-    git_run(&["rev-parse", "--abbrev-ref", "HEAD"], Some(workspace))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApprovalShortcutAction {
+    Approve,
+    Deny,
+    AllowPattern,
 }
 
-/// List local git branches for `workspace`. Current branch is marked with `*`.
-pub fn git_list_branches(workspace: &Path) -> Vec<String> {
-    git_run(&["branch", "--no-color"], Some(workspace))
-        .map(|out| {
-            out.lines()
-                .map(|l| {
-                    l.trim_start_matches("* ")
-                        .trim_start_matches("+ ")
-                        .trim()
-                        .to_string()
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Create a new branch `name` and check it out in `workspace`.
-pub fn git_create_branch(workspace: &Path, name: &str) -> bool {
-    git_run(&["checkout", "-b", name], Some(workspace)).is_some()
-}
-
-/// Switch to an existing branch `name` in `workspace`.
-pub fn git_switch_branch(workspace: &Path, name: &str) -> bool {
-    git_run(&["checkout", name], Some(workspace)).is_some()
-}
-
-pub fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
-    enable_raw_mode().map_err(|e| anyhow::anyhow!("enable_raw_mode: {e}"))?;
-    let res: anyhow::Result<Terminal<CrosstermBackend<Stdout>>> = (|| {
-        let mut out = stdout();
-        execute!(out, EnterAlternateScreen)?;
-        execute!(out, EnableMouseCapture)?;
-        execute!(out, Hide)?;
-        execute!(out, Clear(ClearType::All))?;
-        Ok(Terminal::new(CrosstermBackend::new(out))?)
-    })();
-    if res.is_err() {
-        let _ = disable_raw_mode();
-    }
-    res
-}
-
-pub fn restore_terminal() {
-    let mut out = stdout();
-    let _ = execute!(out, Show);
-    let _ = execute!(out, DisableMouseCapture);
-    let _ = execute!(out, LeaveAlternateScreen);
-    let _ = disable_raw_mode();
-}
-
-#[inline]
-fn push_transcript_line(
-    lines: &mut Vec<Line<'static>>,
-    hits: &mut Vec<LineAnswerHit>,
-    line: Line<'static>,
-    hit: LineAnswerHit,
-) {
-    lines.push(line);
-    hits.push(hit);
-}
-
-/// Build scrollable transcript lines + optional mouse/click targets per line.
-fn transcript_lines_and_hits(
-    state: &TuiSessionState,
-    width: u16,
-) -> (Vec<Line<'static>>, Vec<LineAnswerHit>) {
-    let w = width.max(20) as usize;
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut hits: Vec<LineAnswerHit> = Vec::new();
-
-    for block in &state.blocks {
-        match block {
-            DisplayBlock::User(content) => {
-                push_transcript_line(
-                    &mut lines,
-                    &mut hits,
-                    Line::from(vec![Span::styled(
-                        " YOU ",
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(theme::USER)
-                            .add_modifier(Modifier::BOLD),
-                    )]),
-                    None,
-                );
-                push_transcript_line(&mut lines, &mut hits, Line::default(), None);
-                for text_line in wrap_text(content, w) {
-                    push_transcript_line(
-                        &mut lines,
-                        &mut hits,
-                        Line::from(Span::styled(text_line, Style::default().fg(theme::TEXT))),
-                        None,
-                    );
-                }
-                push_transcript_line(&mut lines, &mut hits, Line::default(), None);
-            }
-            DisplayBlock::Assistant(content) => {
-                push_transcript_line(
-                    &mut lines,
-                    &mut hits,
-                    Line::from(vec![Span::styled(
-                        " nca ",
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(theme::ASSISTANT)
-                            .add_modifier(Modifier::BOLD),
-                    )]),
-                    None,
-                );
-                push_transcript_line(&mut lines, &mut hits, Line::default(), None);
-                for text_line in wrap_text(content, w) {
-                    push_transcript_line(&mut lines, &mut hits, parse_md_line(&text_line), None);
-                }
-                push_transcript_line(&mut lines, &mut hits, Line::default(), None);
-            }
-            DisplayBlock::ToolRunning { name, .. } => {
-                push_transcript_line(
-                    &mut lines,
-                    &mut hits,
-                    Line::from(vec![
-                        Span::styled(" ⚡ ", Style::default().fg(theme::TOOL)),
-                        Span::styled(
-                            format!("{name} "),
-                            Style::default()
-                                .fg(theme::TOOL)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled("…", Style::default().fg(theme::MUTED)),
-                    ]),
-                    None,
-                );
-            }
-            DisplayBlock::ApprovalPending(req) => {
-                render_approval_block(&mut lines, &mut hits, req, w);
-            }
-            DisplayBlock::ApprovalResolved { tool, approved } => {
-                let (label, style) = if *approved {
-                    (
-                        " approved ",
-                        Style::default().fg(Color::Black).bg(theme::SUCCESS),
-                    )
-                } else {
-                    (
-                        " denied ",
-                        Style::default().fg(Color::Black).bg(theme::ERROR),
-                    )
-                };
-                push_transcript_line(
-                    &mut lines,
-                    &mut hits,
-                    Line::from(vec![
-                        Span::styled(label, style.add_modifier(Modifier::BOLD)),
-                        Span::styled(format!(" {tool}"), Style::default().fg(theme::TEXT)),
-                    ]),
-                    None,
-                );
-                push_transcript_line(&mut lines, &mut hits, Line::default(), None);
-            }
-            DisplayBlock::ToolDone { name, ok, detail } => {
-                let (icon, st) = if *ok {
-                    ("✓", Style::default().fg(theme::SUCCESS))
-                } else {
-                    ("✗", Style::default().fg(theme::ERROR))
-                };
-                push_transcript_line(
-                    &mut lines,
-                    &mut hits,
-                    Line::from(vec![
-                        Span::styled(format!(" {icon} "), st),
-                        Span::styled(
-                            name.to_string(),
-                            Style::default()
-                                .fg(theme::TOOL)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!(" — {}", truncate_chars(detail, 100)),
-                            Style::default().fg(theme::MUTED),
-                        ),
-                    ]),
-                    None,
-                );
-            }
-            DisplayBlock::System(s) => {
-                push_transcript_line(
-                    &mut lines,
-                    &mut hits,
-                    Line::from(Span::styled(
-                        format!(" ‣ {s}"),
-                        Style::default().fg(theme::WARN),
-                    )),
-                    None,
-                );
-            }
-            DisplayBlock::Question(q) => {
-                push_transcript_line(
-                    &mut lines,
-                    &mut hits,
-                    Line::from(vec![
-                        Span::styled(
-                            " ? ",
-                            Style::default().fg(Color::Black).bg(theme::WARN).bold(),
-                        ),
-                        Span::styled(
-                            " question ",
-                            Style::default()
-                                .fg(theme::WARN)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]),
-                    None,
-                );
-                push_transcript_line(&mut lines, &mut hits, Line::default(), None);
-                for text_line in wrap_text(&q.prompt, w) {
-                    push_transcript_line(
-                        &mut lines,
-                        &mut hits,
-                        Line::from(Span::styled(text_line, Style::default().fg(theme::TEXT))),
-                        None,
-                    );
-                }
-                // When the modal is open, skip inline options — the popup handles selection.
-                if !state.question_modal_open {
-                    push_transcript_line(
-                        &mut lines,
-                        &mut hits,
-                        Line::from(vec![
-                            Span::styled(
-                                format!("  [0] suggested: {} ", q.suggested_answer),
-                                Style::default()
-                                    .fg(theme::SUCCESS)
-                                    .add_modifier(Modifier::UNDERLINED),
-                            ),
-                            Span::styled("(click)", Style::default().fg(theme::MUTED)),
-                        ]),
-                        Some(QuestionSelection::Suggested),
-                    );
-                    for (i, o) in q.options.iter().enumerate() {
-                        push_transcript_line(
-                            &mut lines,
-                            &mut hits,
-                            Line::from(vec![
-                                Span::styled(
-                                    format!("  [{}] ({}) {} ", i + 1, o.id, o.label),
-                                    Style::default()
-                                        .fg(theme::TEXT)
-                                        .add_modifier(Modifier::UNDERLINED),
-                                ),
-                                Span::styled("(click)", Style::default().fg(theme::MUTED)),
-                            ]),
-                            Some(QuestionSelection::Option {
-                                option_id: o.id.clone(),
-                            }),
-                        );
-                    }
-                    if q.allow_custom {
-                        push_transcript_line(
-                            &mut lines,
-                            &mut hits,
-                            Line::from(Span::styled(
-                                "  [c] type your own answer below, then Enter",
-                                Style::default().fg(theme::MUTED),
-                            )),
-                            None,
-                        );
-                    }
-                    push_transcript_line(
-                        &mut lines,
-                        &mut hits,
-                        Line::from(Span::styled(
-                            "  Tip: /auto-answer or Enter on empty = suggested · click an option above",
-                            Style::default().fg(theme::MUTED),
-                        )),
-                        None,
-                    );
-                }
-                push_transcript_line(&mut lines, &mut hits, Line::default(), None);
-            }
-            DisplayBlock::ErrorLine(s) => {
-                push_transcript_line(
-                    &mut lines,
-                    &mut hits,
-                    Line::from(Span::styled(
-                        format!(" ✗ {s}"),
-                        Style::default().fg(theme::ERROR),
-                    )),
-                    None,
-                );
-            }
-        }
-    }
-
-    if let Some(stream) = &state.streaming_assistant
-        && !stream.is_empty()
-    {
-        push_transcript_line(
-            &mut lines,
-            &mut hits,
-            Line::from(vec![
-                Span::styled(
-                    " nca ",
-                    Style::default().fg(Color::Black).bg(theme::ASSISTANT),
-                ),
-                Span::styled(" streaming", Style::default().fg(theme::MUTED)),
-            ]),
-            None,
-        );
-        push_transcript_line(&mut lines, &mut hits, Line::default(), None);
-        for text_line in wrap_text(stream, w) {
-            push_transcript_line(&mut lines, &mut hits, parse_md_line(&text_line), None);
-        }
-    }
-
-    if lines.is_empty() {
-        push_transcript_line(
-            &mut lines,
-            &mut hits,
-            Line::from(vec![
-                Span::styled(
-                    "nca",
-                    Style::default()
-                        .fg(theme::ASSISTANT)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" — session ready", Style::default().fg(theme::MUTED)),
-            ]),
-            None,
-        );
-        push_transcript_line(&mut lines, &mut hits, Line::default(), None);
-        push_transcript_line(
-            &mut lines,
-            &mut hits,
-            Line::from(Span::styled(
-                "Tab  agent   Ctrl+V  image   Ctrl+P  commands   !cmd  shell   @path  search   /  inline   wheel  scroll",
-                Style::default().fg(theme::MUTED),
-            )),
-            None,
-        );
-    }
-
-    (lines, hits)
-}
-
-fn transcript_lines(state: &TuiSessionState, width: u16) -> Vec<Line<'static>> {
-    transcript_lines_and_hits(state, width).0
-}
-
-fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        format!(
-            "{}…",
-            s.chars().take(max.saturating_sub(1)).collect::<String>()
-        )
-    }
-}
-
-fn wrap_text(s: &str, width: usize) -> Vec<String> {
-    if width < 8 {
-        return vec![s.to_string()];
-    }
-    let mut out = Vec::new();
-    for paragraph in s.split('\n') {
-        if paragraph.is_empty() {
-            out.push(String::new());
-            continue;
-        }
-        let mut line = String::new();
-        for word in paragraph.split_whitespace() {
-            if line.is_empty() {
-                line = word.to_string();
-            } else if line.len() + 1 + word.len() <= width {
-                line.push(' ');
-                line.push_str(word);
-            } else {
-                out.push(line);
-                line = word.to_string();
-            }
-        }
-        if !line.is_empty() {
-            out.push(line);
-        }
-    }
-    if out.is_empty() && !s.is_empty() {
-        out.push(s.to_string());
-    }
-    out
-}
-
-fn wrap_preformatted_line(line: &str, width: usize) -> Vec<String> {
-    if width < 4 || line.is_empty() {
-        return vec![line.to_string()];
-    }
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut current_len = 0usize;
-    for ch in line.chars() {
-        if current_len >= width {
-            out.push(current);
-            current = String::new();
-            current_len = 0;
-        }
-        current.push(ch);
-        current_len += 1;
-    }
-    if out.is_empty() || !current.is_empty() {
-        out.push(current);
-    }
-    out
-}
-
-fn push_wrapped_plain_lines(
-    lines: &mut Vec<Line<'static>>,
-    hits: &mut Vec<LineAnswerHit>,
-    text: &str,
-    width: usize,
-    style: Style,
-) {
-    for source_line in text.lines() {
-        let wrapped = wrap_preformatted_line(source_line, width);
-        for line in wrapped {
-            push_transcript_line(lines, hits, Line::from(Span::styled(line, style)), None);
-        }
-        if source_line.is_empty() {
-            push_transcript_line(lines, hits, Line::default(), None);
-        }
-    }
-}
-
-fn render_approval_block(
-    lines: &mut Vec<Line<'static>>,
-    hits: &mut Vec<LineAnswerHit>,
-    req: &ApprovalRequest,
-    width: usize,
-) {
-    push_transcript_line(
-        lines,
-        hits,
-        Line::from(vec![
-            Span::styled(
-                " ? ",
-                Style::default().fg(Color::Black).bg(theme::WARN).bold(),
-            ),
-            Span::styled(
-                format!(" approval required: {}", req.tool),
-                Style::default()
-                    .fg(theme::WARN)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        None,
-    );
-    push_transcript_line(lines, hits, Line::default(), None);
-    for text_line in wrap_text(&req.description, width) {
-        push_transcript_line(
-            lines,
-            hits,
-            Line::from(Span::styled(text_line, Style::default().fg(theme::TEXT))),
-            None,
-        );
-    }
-    push_transcript_line(lines, hits, Line::default(), None);
-    push_transcript_line(
-        lines,
-        hits,
-        Line::from(Span::styled(
-            " Input ",
-            Style::default()
-                .fg(theme::MUTED)
-                .add_modifier(Modifier::BOLD),
-        )),
-        None,
-    );
-    push_wrapped_plain_lines(
-        lines,
-        hits,
-        &req.input,
-        width,
-        Style::default().fg(theme::MUTED),
-    );
-    push_transcript_line(
-        lines,
-        hits,
-        Line::from(Span::styled(
-            " Reply: y/n · Ctrl+Y approve · Ctrl+N deny · Ctrl+U always allow · /approve · /deny",
-            Style::default().fg(theme::MUTED),
-        )),
-        None,
-    );
-    push_transcript_line(lines, hits, Line::default(), None);
-}
-
-/// Parse user approval input (flexible: punctuation, synonyms, `/approve` style).
-fn parse_approval_verdict(line: &str) -> Option<bool> {
-    let mut s = line.trim().to_lowercase();
-    while matches!(
-        s.chars().last(),
-        Some('.' | '!' | '?' | ',' | ';' | ':' | '"' | '\'')
-    ) {
-        s.pop();
-    }
-    let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    // Slash commands (handled before this in caller for passthrough; bare forms here too)
-    match s {
-        "/approve" | "/y" | "/yes" | "/ok" => return Some(true),
-        "/deny" | "/n" | "/no" => return Some(false),
-        _ => {}
-    }
-    let word = s.split_whitespace().next()?;
-    match word {
-        "y" | "yes" | "ok" | "okay" | "approve" | "approved" | "allow" | "1" | "true" => Some(true),
-        "n" | "no" | "deny" | "denied" | "reject" | "rejected" | "decline" | "declined" | "0"
-        | "false" => Some(false),
+fn approval_shortcut_action(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> Option<ApprovalShortcutAction> {
+    match (code, modifiers) {
+        (KeyCode::Char('y'), KeyModifiers::CONTROL) => Some(ApprovalShortcutAction::Approve),
+        (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(ApprovalShortcutAction::Deny),
+        (KeyCode::Char('u'), KeyModifiers::CONTROL) => Some(ApprovalShortcutAction::AllowPattern),
         _ => None,
     }
 }
 
-fn parse_md_line(line: &str) -> Line<'static> {
-    if line.starts_with("```") {
-        return Line::from(Span::styled(
-            line.to_string(),
-            Style::default().fg(theme::MUTED),
-        ));
-    }
-    let mut spans: Vec<Span> = Vec::new();
-    let mut rest = line.to_string();
-    while !rest.is_empty() {
-        if let Some(pos) = rest.find("**") {
-            if pos > 0 {
-                spans.push(Span::styled(
-                    rest[..pos].to_string(),
-                    Style::default().fg(theme::TEXT),
-                ));
-            }
-            rest = rest[pos + 2..].to_string();
-            if let Some(end) = rest.find("**") {
-                spans.push(Span::styled(
-                    rest[..end].to_string(),
-                    Style::default()
-                        .fg(theme::TEXT)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                rest = rest[end + 2..].to_string();
-            } else {
-                spans.push(Span::raw("**"));
-                break;
-            }
-        } else {
-            spans.push(Span::styled(rest, Style::default().fg(theme::TEXT)));
-            break;
-        }
-    }
-    Line::from(spans)
-}
-
-fn parse_tui_question_answer(
-    raw: &str,
-    q: &nca_common::event::InteractiveQuestionPayload,
-) -> Option<QuestionSelection> {
-    let t = raw.trim();
-    if t.is_empty() || t == "0" || t.eq_ignore_ascii_case("s") {
-        return Some(QuestionSelection::Suggested);
-    }
-    if let Ok(n) = t.parse::<usize>()
-        && n >= 1
-        && n <= q.options.len()
-    {
-        return Some(QuestionSelection::Option {
-            option_id: q.options[n - 1].id.clone(),
-        });
-    }
-    if q.allow_custom && !t.is_empty() {
-        return Some(QuestionSelection::Custom {
-            text: t.to_string(),
-        });
-    }
-    None
-}
-
 /// `question_answer_tx`: when `Some`, answers are sent there so they unblock `ask_question` while
 /// the async loop is stuck in `run_turn` (that task does not poll `cmd_rx` until the turn ends).
+#[allow(clippy::too_many_arguments)]
 pub fn run_blocking(
     state: Arc<Mutex<TuiSessionState>>,
-    cmd_tx: UnboundedSender<TuiCmd>,
-    question_answer_tx: Option<UnboundedSender<(String, QuestionSelection)>>,
-    approval_answer_tx: Option<UnboundedSender<ApprovalAnswer>>,
+    mut version_rx: tokio::sync::watch::Receiver<u64>,
+    version_tx: tokio::sync::watch::Sender<u64>,
+    cmd_tx: Sender<TuiCmd>,
+    question_answer_tx: Option<Sender<(String, QuestionSelection)>>,
+    approval_answer_tx: Option<Sender<ApprovalAnswer>>,
     show_run_banner: bool,
     cancel_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
 ) -> anyhow::Result<()> {
+    let _ = version_rx.borrow_and_update();
     let mut terminal = setup_terminal()?;
 
     // Load slash entries once: hardcoded commands + discovered skills
@@ -1389,41 +227,96 @@ pub fn run_blocking(
         g.workspace_root.clone()
     };
     let slash_entries = load_slash_entries(&workspace_root, &skill_dirs);
-    let workspace_files = file_mentions::discover_workspace_files(&workspace_root);
+    let (workspace_files_tx, workspace_files_rx) = std::sync::mpsc::channel();
+    let discovery_root = workspace_root.clone();
+    std::thread::spawn(move || {
+        let files = file_mentions::discover_workspace_files(&discovery_root);
+        let _ = workspace_files_tx.send(files);
+    });
+    let mut workspace_files = vec!["Indexing workspace…".to_string()];
+    let mut workspace_files_indexing = true;
 
     if show_run_banner && let Ok(mut g) = state.lock() {
         g.blocks.push(DisplayBlock::System(
             "Interactive run — type a message, Tab cycles agent profile, Ctrl+P opens commands."
                 .into(),
         ));
+        g.mark_transcript_dirty();
     }
 
+    // Dirty-flag rendering: only call `terminal.draw` when the state actually
+    // changed (or on resize / busy animation ticks). This is the #1 win called
+    // out in docs/research/rust-ratatui-optimization.md — static content drops
+    // from ~7% CPU to near-zero.
+    let mut last_rendered_version: u64 = 0;
+    let mut last_rendered_size: (u16, u16) = (0, 0);
+    let mut last_busy_tick: std::time::Instant = std::time::Instant::now();
     loop {
+        if workspace_files_indexing && let Ok(files) = workspace_files_rx.try_recv() {
+            workspace_files = files;
+            workspace_files_indexing = false;
+            if let Ok(mut g) = state.lock() {
+                g.mark_dirty();
+                let _ = version_tx.send(g.state_version);
+            }
+        }
+        let version_changed = version_rx.has_changed().unwrap_or(false);
         {
             let mut g = state.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
             if g.should_exit {
                 break;
             }
 
-            let slash_filtered = filter_slash_entries(&slash_entries, &g.input_buffer);
-            let at_matches =
-                at_completion_matches(&workspace_files, &g.input_buffer, g.cursor_char_idx);
-            let chrome_h = composer_chrome_height(
-                &slash_entries,
-                &workspace_files,
-                &g.input_buffer,
-                g.cursor_char_idx,
+            // Busy animation: advance the indicator at most every ~120ms while
+            // the agent is Streaming/ToolRunning/etc; otherwise skip the redraw.
+            let busy_animating = matches!(
+                g.current_busy_state,
+                BusyState::Thinking
+                    | BusyState::Streaming
+                    | BusyState::ToolRunning
+                    | BusyState::ApprovalPending
             );
+            let now = std::time::Instant::now();
+            let busy_tick_due =
+                busy_animating && now.duration_since(last_busy_tick).as_millis() >= 120;
 
-            terminal.draw(|frame| {
+            let cur_size = terminal
+                .size()
+                .map(|r| (r.width, r.height))
+                .unwrap_or(last_rendered_size);
+            let size_changed = cur_size != last_rendered_size;
+            let state_changed = version_changed || g.state_version != last_rendered_version;
+
+            if !state_changed && !size_changed && !busy_tick_due {
+                // Nothing to redraw. Drop the lock and go straight to polling.
+                drop(g);
+            } else {
+                let slash_filtered = filter_slash_entries(&slash_entries, &g.input_buffer);
+                let at_matches =
+                    at_completion_matches(&workspace_files, &g.input_buffer, g.cursor_char_idx);
+                let chrome_h = composer_chrome_height(
+                    &slash_entries,
+                    &workspace_files,
+                    &g.input_buffer,
+                    g.cursor_char_idx,
+                );
+
+                terminal.draw(|frame| {
                 let area = frame.area();
                 let (main_area, sidebar_opt) = layout_with_sidebar(area);
                 let (tr, st_r, slash_opt, inp_r) = layout_chunks(main_area, chrome_h);
 
                 let transcript_h = tr.height.saturating_sub(2) as usize;
                 let inner_w = tr.width.saturating_sub(2);
-                let (lines, _hits) = transcript_lines_and_hits(&g, inner_w);
-                let total = lines.len();
+                let transcript_lines = {
+                    let cache = ensure_transcript_cache(&mut g, inner_w);
+                    let mut lines = cache.lines.clone();
+                    // Overlay keeps the "still working" footer ticking on busy
+                    // animation frames without invalidating the full cache.
+                    lines.extend(live_activity_lines(&g));
+                    lines
+                };
+                let total = transcript_lines.len();
                 let max_scroll = total.saturating_sub(transcript_h);
                 if g.transcript_follow_tail {
                     g.scroll_lines = max_scroll;
@@ -1433,7 +326,7 @@ pub fn run_blocking(
                 let start = g.scroll_lines;
                 let end = (start + transcript_h).min(total);
                 let visible: Vec<Line> = if start < end {
-                    lines[start..end].to_vec()
+                    transcript_lines[start..end].to_vec()
                 } else {
                     vec![]
                 };
@@ -1460,7 +353,8 @@ pub fn run_blocking(
                         .constraints([
                             Constraint::Length(12),
                             Constraint::Length(8),
-                            Constraint::Min(10),
+                            Constraint::Length(10),
+                            Constraint::Min(8),
                         ])
                         .split(sidebar);
 
@@ -1480,10 +374,7 @@ pub fn run_blocking(
                         Line::from(format!("model   {}", g.model)),
                         Line::from(format!("agent   {}", g.agent_profile)),
                         Line::from(format!("mode    {}", g.permission_mode)),
-                        Line::from(format!(
-                            "status  {}",
-                            if g.busy { "busy" } else { "idle" }
-                        )),
+                        Line::from(format!("status  {}", g.current_busy_state.label())),
                         Line::from(format!("blocks  {}", g.blocks.len())),
                         Line::from(format!("lines   {total}")),
                     ];
@@ -1501,10 +392,26 @@ pub fn run_blocking(
                         .wrap(Wrap { trim: false });
                     frame.render_widget(session_block, sections[0]);
 
+                    let total = g.input_tokens + g.output_tokens;
+                    let bar_width: usize = 16;
+                    let bar = if total == 0 {
+                        "·".repeat(bar_width)
+                    } else {
+                        let in_w = ((g.input_tokens as f64 / total as f64)
+                            * bar_width as f64)
+                            .round() as usize;
+                        let in_w = in_w.min(bar_width);
+                        let out_w = bar_width - in_w;
+                        format!("{}{}", "▒".repeat(in_w), "█".repeat(out_w))
+                    };
                     let usage_lines = vec![
                         Line::from(format!("input   {}", g.input_tokens)),
                         Line::from(format!("output  {}", g.output_tokens)),
-                        Line::from(format!("total   {}", g.input_tokens + g.output_tokens)),
+                        Line::from(format!("total   {total}")),
+                        Line::from(vec![
+                            Span::styled("i/o     ", Style::default().fg(theme::MUTED)),
+                            Span::styled(bar, Style::default().fg(theme::TOOL)),
+                        ]),
                         Line::from(format!("cost    ${:.4}", g.cost_usd)),
                         Line::default(),
                         Line::from(if g.active_approval.is_some() {
@@ -1528,6 +435,38 @@ pub fn run_blocking(
                         .style(Style::default().bg(theme::SURFACE))
                         .wrap(Wrap { trim: false });
                     frame.render_widget(usage_block, sections[1]);
+
+                    let mut task_lines: Vec<Line> = vec![Line::from(Span::styled(
+                        "tasks",
+                        Style::default()
+                            .fg(theme::MUTED)
+                            .add_modifier(Modifier::BOLD),
+                    ))];
+                    for line in g.todo_sidebar_lines(6) {
+                        let style = if line.starts_with('+') || line == "none yet" {
+                            Style::default().fg(theme::MUTED)
+                        } else if line.contains('/')
+                            && !line.starts_with(['○', '◉', '✓', '✗'])
+                        {
+                            Style::default().fg(theme::TOOL)
+                        } else {
+                            Style::default().fg(theme::TEXT)
+                        };
+                        task_lines.push(Line::from(Span::styled(line, style)));
+                    }
+                    let tasks_block = Paragraph::new(Text::from(task_lines))
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(theme::BORDER))
+                                .title(Span::styled(
+                                    " tasks ",
+                                    Style::default().fg(theme::MUTED),
+                                )),
+                        )
+                        .style(Style::default().bg(theme::SURFACE))
+                        .wrap(Wrap { trim: false });
+                    frame.render_widget(tasks_block, sections[2]);
 
                     let mut todo_lines: Vec<Line> = vec![Line::from(Span::styled(
                         "sub-agents",
@@ -1557,6 +496,12 @@ pub fn run_blocking(
                                 Span::styled(format!("{id8} "), Style::default().fg(theme::TEXT)),
                                 Span::styled(ph, Style::default().fg(theme::TOOL)),
                             ]));
+                            if row.tokens_in > 0 || row.tokens_out > 0 {
+                                todo_lines.push(Line::from(Span::styled(
+                                    format!("  {}↑ {}↓", row.tokens_in, row.tokens_out),
+                                    Style::default().fg(theme::MUTED),
+                                )));
+                            }
                             if !row.detail.is_empty() {
                                 todo_lines.push(Line::from(Span::styled(
                                     format!("  {}", sidebar_fit(&row.detail, 26)),
@@ -1585,11 +530,7 @@ pub fn run_blocking(
                             .add_modifier(Modifier::BOLD),
                     )));
                     todo_lines.push(Line::from(Span::styled(
-                        ".nca/sessions",
-                        Style::default().fg(theme::USER),
-                    )));
-                    todo_lines.push(Line::from(Span::styled(
-                        "docs/research/",
+                        "~/.local/share/ncacli",
                         Style::default().fg(theme::USER),
                     )));
                     todo_lines.push(Line::from(Span::styled(
@@ -1608,7 +549,7 @@ pub fn run_blocking(
                         )
                         .style(Style::default().bg(theme::SURFACE))
                         .wrap(Wrap { trim: false });
-                    frame.render_widget(todo_block, sections[2]);
+                    frame.render_widget(todo_block, sections[3]);
                 }
 
                 let elapsed = g.started.elapsed().as_secs();
@@ -1619,31 +560,47 @@ pub fn run_blocking(
                 let indicator_color =
                     crate::tui::busy_indicator::color_for_state(g.current_busy_state);
                 let busy = Span::styled(indicator_text, Style::default().fg(indicator_color));
+                let activity_detail = match g.current_busy_state {
+                    BusyState::ToolRunning => g.blocks.iter().rev().find_map(|b| match b {
+                        crate::tui::state::DisplayBlock::ToolRunning { name, input, .. } => {
+                            Some(format!(
+                                "{} ",
+                                crate::tui::transcript::tool_running_summary(name, input)
+                            ))
+                        }
+                        _ => None,
+                    }),
+                    BusyState::Thinking => Some("model… ".into()),
+                    BusyState::Streaming => Some("out… ".into()),
+                    _ => None,
+                };
+                let activity_span = activity_detail
+                    .map(|d| Span::styled(d, Style::default().fg(theme::MUTED)))
+                    .unwrap_or_else(|| Span::raw(""));
                 let approval_hint = if g.active_approval.is_some() {
-                    Span::styled(" !approve ", Style::default().fg(theme::ERROR))
+                    Span::styled(
+                        " approve ",
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(theme::WARN)
+                            .add_modifier(Modifier::BOLD),
+                    )
                 } else {
                     Span::raw("")
                 };
                 let q_hint = if g.active_question.is_some() {
-                    Span::styled(" ?answer ", Style::default().fg(theme::WARN))
-                } else {
-                    Span::raw("")
-                };
-                // Session / tokens / cost live in the sidebar; keep the bar short and obvious about bypass.
-                let perm_span = if toolbar_permission_is_bypass(&g.permission_mode) {
                     Span::styled(
-                        " BYPASS — tools run without approval ",
+                        " answer ",
                         Style::default()
                             .fg(Color::Black)
-                            .bg(theme::ERROR)
+                            .bg(theme::ASSISTANT)
                             .add_modifier(Modifier::BOLD),
                     )
                 } else {
-                    Span::styled(
-                        format!(" perm:{} ", g.permission_mode),
-                        Style::default().fg(theme::MUTED),
-                    )
+                    Span::raw("")
                 };
+                // Session / tokens / cost live in the sidebar; keep the bar short.
+                let perm_span = permission_status_span(&g.permission_mode);
                 let time_span = Span::styled(
                     format!("{:02}:{:02}", elapsed / 60, elapsed % 60),
                     Style::default().fg(theme::MUTED),
@@ -1697,6 +654,7 @@ pub fn run_blocking(
 
                 let mut status_spans = vec![
                     busy,
+                    activity_span,
                     approval_hint,
                     q_hint,
                     Span::raw(" │ "),
@@ -1851,14 +809,21 @@ pub fn run_blocking(
                         "Approval: y/n · Ctrl+Y approve · Ctrl+N deny · Ctrl+U always allow · /approve · /deny · other /commands still work",
                         Style::default().fg(theme::ERROR),
                     ))
-                } else if g.active_question.is_some() && !g.question_modal_open {
+                } else if g.active_question.is_some() && !g.question_modal_open() {
                     Line::from(Span::styled(
                         "Enter / 0 = suggested · 1–n = option · click underlined line · /auto-answer · End = transcript bottom (empty input)",
                         Style::default().fg(theme::WARN),
                     ))
+                } else if slash_panel_visible(&g.input_buffer) {
+                    let hint_msg = if slash_filtered.is_empty() {
+                        "No matching /command — try /help or Ctrl+P (palette)"
+                    } else {
+                        "Commands above · ↑↓ select · Tab complete · Ctrl+P palette"
+                    };
+                    Line::from(Span::styled(hint_msg, Style::default().fg(theme::MUTED)))
                 } else if g.input_buffer.is_empty() {
                     Line::from(Span::styled(
-                        "Enter send · Tab agent · Ctrl+V image · /image · Ctrl+P palette · Ctrl+Q exit · Ctrl+L clear",
+                        "Enter send · Tab agent · Ctrl+V image · Ctrl+P palette · Ctrl+X Q exit · Ctrl+L clear",
                         Style::default().fg(theme::MUTED),
                     ))
                 } else {
@@ -1866,11 +831,23 @@ pub fn run_blocking(
                 };
 
                 let input_title = if g.active_approval.is_some() {
-                    " approval "
+                    Span::styled(
+                        " approve ",
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(theme::WARN)
+                            .add_modifier(Modifier::BOLD),
+                    )
                 } else if g.active_question.is_some() {
-                    " answer "
+                    Span::styled(
+                        " answer ",
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(theme::ASSISTANT)
+                            .add_modifier(Modifier::BOLD),
+                    )
                 } else {
-                    " message "
+                    Span::styled(" message ", Style::default().fg(theme::MUTED))
                 };
                 let mut input_lines = vec![input_line];
                 if !g.staged_image_attachments.is_empty() {
@@ -1887,182 +864,40 @@ pub fn run_blocking(
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
-                            .border_style(Style::default().fg(theme::BORDER))
-                            .title(Span::styled(input_title, Style::default().fg(theme::MUTED))),
+                            .border_style(Style::default().fg(if g.active_approval.is_some() {
+                                theme::WARN
+                            } else if g.active_question.is_some() {
+                                theme::ASSISTANT
+                            } else {
+                                theme::BORDER
+                            }))
+                            .title(input_title),
                     )
                     .style(Style::default().bg(theme::SURFACE));
 
                 frame.render_widget(input_block, inp_r);
 
-                if g.command_palette_open {
-                    let filtered = filter_palette_rows(&g.command_palette_query);
-                    let selectable = palette_selectable_indices(&filtered);
-                    let pick_abs = if selectable.is_empty() {
-                        0
-                    } else {
-                        selectable[g.palette_index.min(selectable.len().saturating_sub(1))]
-                    };
-                    let total_vis = filtered.len().clamp(1, COMMAND_PALETTE_MAX_ROWS);
-                    let popup_area = centered_rect(area, COMMAND_PALETTE_WIDTH, (total_vis as u16).saturating_add(6));
-                    let list_scroll = pick_abs.saturating_sub(COMMAND_PALETTE_MAX_ROWS / 2);
-                    let list_end = (list_scroll + COMMAND_PALETTE_MAX_ROWS).min(filtered.len());
-                    let mut popup_lines = vec![
-                        Line::from(vec![
-                            Span::styled(
-                                "  Search ",
-                                Style::default()
-                                    .fg(theme::MUTED)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(
-                                if g.command_palette_query.is_empty() {
-                                    "type to filter"
-                                } else {
-                                    g.command_palette_query.as_str()
-                                },
-                                Style::default().fg(theme::TEXT),
-                            ),
-                        ]),
-                        Line::default(),
-                    ];
-                    if selectable.is_empty() {
-                        popup_lines.push(Line::from(Span::styled(
-                            " No matching commands",
-                            Style::default().fg(theme::MUTED),
-                        )));
-                    } else {
-                        for &idx in &filtered[list_scroll..list_end] {
-                            match idx {
-                                PaletteRow::Section(name) => {
-                                    popup_lines.push(Line::from(Span::styled(
-                                        format!("  {name}"),
-                                        Style::default().fg(theme::MUTED).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-                                    )));
-                                }
-                                PaletteRow::Entry { label, shortcut } => {
-                                    let global = filtered.iter().position(|r| std::ptr::eq(*r, idx)).unwrap_or(0);
-                                    let is_selected = global == pick_abs;
-                                    let label_style = if is_selected {
-                                        Style::default().fg(Color::Black).bg(theme::USER).add_modifier(Modifier::BOLD)
-                                    } else {
-                                        Style::default().fg(theme::TEXT)
-                                    };
-                                    let shortcut_style = if is_selected {
-                                        Style::default().fg(Color::Black).bg(theme::USER)
-                                    } else {
-                                        Style::default().fg(theme::MUTED)
-                                    };
-                                    let pad = 36usize.saturating_sub(label.len()).saturating_sub(2);
-                                    let mut spans = vec![Span::styled(format!("  {label}"), label_style)];
-                                    if !shortcut.is_empty() {
-                                        spans.push(Span::styled(format!("{:>pad$}", shortcut, pad = pad), shortcut_style));
-                                    }
-                                    popup_lines.push(Line::from(spans));
-                                }
-                            }
-                        }
-                    }
-                    popup_lines.push(Line::default());
-                    popup_lines.push(Line::from(Span::styled(
-                        " Enter apply · Esc close ",
-                        Style::default().fg(theme::MUTED),
-                    )));
-                    frame.render_widget(ClearWidget, popup_area);
-                    let popup = Paragraph::new(Text::from(popup_lines))
-                        .block(
-                            Block::default()
-                                .borders(Borders::ALL)
-                                .border_style(Style::default().fg(theme::BORDER))
-                                .title(Span::styled(
-                                    " command palette (ctrl+p) ",
-                                    Style::default().fg(theme::MUTED),
-                                )),
-                        )
-                        .style(Style::default().bg(theme::SURFACE))
-                        .wrap(Wrap { trim: false });
-                    frame.render_widget(popup, popup_area);
+                if g.command_palette_open() {
+                    render_command_palette(frame, area, &g);
                 }
 
-                // Branch picker popup.
-                if g.branch_picker_open {
-                    let branches = &g.branch_picker_branches;
-                    let filtered = filtered_branch_indices(branches, &g.branch_picker_query);
-
-                    let popup_h = (filtered.len().min(12) as u16).saturating_add(6).max(8);
-                    let popup_area = centered_rect(area, 36, popup_h);
-
-                    let mut popup_lines = vec![
-                        Line::from(vec![
-                            Span::styled(" Branch ", Style::default().fg(theme::MUTED).add_modifier(Modifier::BOLD)),
-                            Span::styled(
-                                if g.branch_picker_query.is_empty() {
-                                    "".to_string()
-                                } else {
-                                    format!(": {}", g.branch_picker_query)
-                                },
-                                Style::default().fg(theme::TEXT),
-                            ),
-                        ]),
-                        Line::default(),
-                    ];
-
-                    if filtered.is_empty() {
-                        popup_lines.push(Line::from(Span::styled(
-                            "  (no branches — type a name to create)",
-                            Style::default().fg(theme::MUTED),
-                        )));
-                    } else {
-                        let n_show = filtered.len().min(12);
-                        let list_scroll = g
-                            .branch_picker_index
-                            .saturating_sub(n_show.saturating_sub(1))
-                            .min(filtered.len().saturating_sub(n_show));
-                        for (i, branch_idx) in filtered[list_scroll..list_scroll + n_show].iter().enumerate() {
-                            let filtered_idx = list_scroll + i;
-                            let branch = &branches[*branch_idx];
-                            let style = if filtered_idx == g.branch_picker_index {
-                                Style::default()
-                                    .fg(Color::Black)
-                                    .bg(theme::USER)
-                                    .add_modifier(Modifier::BOLD)
-                            } else {
-                                Style::default().fg(theme::TEXT)
-                            };
-                            let mark = if branch.as_str() == g.current_branch { " *" } else { "" };
-                            popup_lines.push(Line::from(Span::styled(format!(" {branch}{mark}"), style)));
-                        }
-                    }
-
-                    popup_lines.push(Line::default());
-                    popup_lines.push(Line::from(Span::styled(
-                        " Enter switch  /name new  Esc close",
-                        Style::default().fg(theme::MUTED),
-                    )));
-
-                    frame.render_widget(ClearWidget, popup_area);
-                    let popup = Paragraph::new(Text::from(popup_lines))
-                        .block(
-                            Block::default()
-                                .borders(Borders::ALL)
-                                .border_style(Style::default().fg(theme::BORDER))
-                                .title(Span::styled(" git branch ", Style::default().fg(theme::MUTED))),
-                        )
-                        .style(Style::default().bg(theme::SURFACE))
-                        .wrap(Wrap { trim: false });
-                    frame.render_widget(popup, popup_area);
+                if g.branch_picker_open() {
+                    render_branch_picker(frame, area, &g);
                 }
 
                 // LLM provider picker (default provider or API-key target).
-                if g.provider_picker_open {
-                    let names: Vec<&'static str> = ProviderKind::ALL
-                        .iter()
-                        .map(|p| p.display_name())
-                        .collect();
-                    let rows = (names.len() as u16).saturating_add(6).max(8);
-                    let popup_area = centered_rect(area, 40, rows);
+                if g.provider_picker_open() {
+                    let all = ProviderKind::ALL;
+                    let n_builtin = all.len();
+                    let n = g.provider_picker_visible_row_count();
+                    let cap = crate::tui::state::TuiSessionState::PROVIDER_PICKER_VISIBLE_ROWS.min(n.max(1));
+                    let scroll = g.provider_picker_scroll().min(n.saturating_sub(1));
+                    let end = (scroll + cap).min(n);
+                    let rows = (cap as u16).saturating_add(9).max(10);
+                    let popup_area = centered_rect(area, 52, rows);
                     let mut lines: Vec<Line> = vec![
                         Line::from(Span::styled(
-                            if g.provider_picker_for_api_key {
+                            if g.provider_picker_for_api_key() {
                                 " Select provider for API key "
                             } else {
                                 " Default LLM provider "
@@ -2071,8 +906,34 @@ pub fn run_blocking(
                         )),
                         Line::default(),
                     ];
-                    for (i, name) in names.iter().enumerate() {
-                        let st = if i == g.provider_picker_index {
+                    if scroll > 0 {
+                        lines.push(Line::from(Span::styled(
+                            "  More above (Up)",
+                            Style::default().fg(theme::MUTED),
+                        )));
+                    }
+                    let row_labels: Vec<String> = (0..n)
+                        .map(|i| {
+                            if i < n_builtin {
+                                let p = all[i];
+                                let name = p.display_name();
+                                if p == ProviderKind::Custom {
+                                    format!("{name} (BYO endpoint)")
+                                } else {
+                                    name.to_string()
+                                }
+                            } else {
+                                "Add custom provider…".to_string()
+                            }
+                        })
+                        .collect();
+                    for (i, label) in row_labels
+                        .iter()
+                        .enumerate()
+                        .skip(scroll)
+                        .take(end.saturating_sub(scroll))
+                    {
+                        let st = if i == g.provider_picker_index() {
                             Style::default()
                                 .fg(Color::Black)
                                 .bg(theme::USER)
@@ -2080,11 +941,17 @@ pub fn run_blocking(
                         } else {
                             Style::default().fg(theme::TEXT)
                         };
-                        lines.push(Line::from(Span::styled(format!(" {name}"), st)));
+                        lines.push(Line::from(Span::styled(format!(" {label}"), st)));
+                    }
+                    if end < n {
+                        lines.push(Line::from(Span::styled(
+                            "  More below (Down)",
+                            Style::default().fg(theme::MUTED),
+                        )));
                     }
                     lines.push(Line::default());
                     lines.push(Line::from(Span::styled(
-                        " Enter confirm · Esc cancel ",
+                        " Enter confirm · Esc cancel · c slash-command help ",
                         Style::default().fg(theme::MUTED),
                     )));
                     frame.render_widget(ClearWidget, popup_area);
@@ -2100,7 +967,107 @@ pub fn run_blocking(
                     frame.render_widget(popup, popup_area);
                 }
 
-                if g.permission_picker_open {
+                // Add custom provider wizard (`/provider` → Add custom provider…).
+                if g.custom_provider_setup_open() {
+                    let rows = 18u16;
+                    let popup_area = centered_rect(area, 72, rows);
+                    let step_title = match g.custom_provider_setup_step() {
+                        CustomProviderSetupStep::Compatibility => "Step 1/4 — API compatibility",
+                        CustomProviderSetupStep::BaseUrl => "Step 2/4 — Base URL",
+                        CustomProviderSetupStep::ApiKey => "Step 3/4 — API key",
+                        CustomProviderSetupStep::Model => "Step 4/4 — Model id",
+                    };
+                    let mut lines: Vec<Line> = vec![
+                        Line::from(Span::styled(
+                            step_title,
+                            Style::default().fg(theme::MUTED).add_modifier(Modifier::BOLD),
+                        )),
+                        Line::default(),
+                    ];
+                    match g.custom_provider_setup_step() {
+                        CustomProviderSetupStep::Compatibility => {
+                            let opts = [
+                                ("OpenAI-compatible", "POST …/v1/chat/completions (Bearer)"),
+                                ("Anthropic-compatible", "POST …/v1/messages (x-api-key)"),
+                            ];
+                            for (j, (a, b)) in opts.iter().enumerate() {
+                                let st = if j == g.custom_setup_compat_index() {
+                                    Style::default()
+                                        .fg(Color::Black)
+                                        .bg(theme::USER)
+                                        .add_modifier(Modifier::BOLD)
+                                } else {
+                                    Style::default().fg(theme::TEXT)
+                                };
+                                lines.push(Line::from(vec![
+                                    Span::styled(format!(" {a}"), st),
+                                    Span::styled(
+                                        format!(" - {b}"),
+                                        Style::default().fg(theme::MUTED),
+                                    ),
+                                ]));
+                            }
+                        }
+                        CustomProviderSetupStep::BaseUrl => {
+                            lines.push(Line::from(Span::styled(
+                                " Example: https://api.example.com (no trailing /v1/…)",
+                                Style::default().fg(theme::MUTED),
+                            )));
+                            lines.push(Line::default());
+                            lines.push(Line::from(Span::styled(
+                                format!(" {}", g.custom_setup_input()),
+                                Style::default().fg(theme::TEXT),
+                            )));
+                        }
+                        CustomProviderSetupStep::ApiKey => {
+                            lines.push(Line::from(Span::styled(
+                                " Paste your secret key for this endpoint.",
+                                Style::default().fg(theme::MUTED),
+                            )));
+                            lines.push(Line::default());
+                            let masked = if g.custom_setup_input().is_empty() {
+                                String::new()
+                            } else {
+                                "*".repeat(g.custom_setup_input().chars().count().min(48))
+                            };
+                            lines.push(Line::from(Span::styled(masked, Style::default().fg(theme::TEXT))));
+                        }
+                        CustomProviderSetupStep::Model => {
+                            lines.push(Line::from(Span::styled(
+                                " Model name your host expects (e.g. gpt-4o-mini).",
+                                Style::default().fg(theme::MUTED),
+                            )));
+                            lines.push(Line::default());
+                            lines.push(Line::from(Span::styled(
+                                format!(" {}", g.custom_setup_input()),
+                                Style::default().fg(theme::TEXT),
+                            )));
+                        }
+                    }
+                    lines.push(Line::default());
+                    lines.push(Line::from(Span::styled(
+                        match g.custom_provider_setup_step() {
+                            CustomProviderSetupStep::Compatibility => {
+                                " Enter confirm · Up/Down · Esc cancel "
+                            }
+                            _ => " Enter confirm · Esc cancel · Backspace edit ",
+                        },
+                        Style::default().fg(theme::MUTED),
+                    )));
+                    frame.render_widget(ClearWidget, popup_area);
+                    let popup = Paragraph::new(Text::from(lines))
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(theme::BORDER))
+                                .title(Span::styled(" custom provider ", Style::default().fg(theme::MUTED))),
+                        )
+                        .style(Style::default().bg(theme::SURFACE))
+                        .wrap(Wrap { trim: false });
+                    frame.render_widget(popup, popup_area);
+                }
+
+                if g.permission_picker_open() {
                     const PERM_LABELS: &[&str] = &["Default", "Plan", "AcceptEdits", "DontAsk", "BypassPermissions"];
                     let rows = (PERM_LABELS.len() as u16).saturating_add(6).max(8);
                     let popup_area = centered_rect(area, 40, rows);
@@ -2112,7 +1079,7 @@ pub fn run_blocking(
                         Line::default(),
                     ];
                     for (i, name) in PERM_LABELS.iter().enumerate() {
-                        let st = if i == g.permission_picker_index {
+                        let st = if i == g.permission_picker_index() {
                             Style::default().fg(Color::Black).bg(theme::USER).add_modifier(Modifier::BOLD)
                         } else {
                             Style::default().fg(theme::TEXT)
@@ -2137,7 +1104,7 @@ pub fn run_blocking(
                     frame.render_widget(popup, popup_area);
                 }
 
-                if g.agent_picker_open {
+                if g.agent_picker_open() {
                     const AGENT_LABELS: &[(&str, &str)] = &[
                         ("@build", "Full-access agent for development"),
                         ("@plan", "Read-only analysis and planning"),
@@ -2155,12 +1122,12 @@ pub fn run_blocking(
                         Line::default(),
                     ];
                     for (i, (name, desc)) in AGENT_LABELS.iter().enumerate() {
-                        let st = if i == g.agent_picker_index {
+                        let st = if i == g.agent_picker_index() {
                             Style::default().fg(Color::Black).bg(theme::USER).add_modifier(Modifier::BOLD)
                         } else {
                             Style::default().fg(theme::TEXT)
                         };
-                        let desc_st = if i == g.agent_picker_index {
+                        let desc_st = if i == g.agent_picker_index() {
                             Style::default().fg(Color::Black).bg(theme::USER)
                         } else {
                             Style::default().fg(theme::MUTED)
@@ -2189,7 +1156,7 @@ pub fn run_blocking(
                 }
 
                 // Question modal popup (arrow-key option picker).
-                if g.question_modal_open
+                if g.question_modal_open()
                     && let Some(ref q) = g.active_question
                 {
                         let has_chat_option = q.allow_custom;
@@ -2211,7 +1178,7 @@ pub fn run_blocking(
 
                         // Suggested answer (index 0)
                         let suggested_label = format!(" Suggested: {} ", q.suggested_answer);
-                        if g.question_modal_index == 0 {
+                        if g.question_modal_index() == 0 {
                             lines.push(Line::from(Span::styled(
                                 format!(" ► {}", suggested_label.trim()),
                                 Style::default()
@@ -2230,7 +1197,7 @@ pub fn run_blocking(
                         for (i, o) in q.options.iter().enumerate() {
                             let item_idx = i + 1;
                             let label = format!("{} ", o.label);
-                            if g.question_modal_index == item_idx {
+                            if g.question_modal_index() == item_idx {
                                 lines.push(Line::from(Span::styled(
                                     format!(" ► {}", label.trim()),
                                     Style::default()
@@ -2249,7 +1216,7 @@ pub fn run_blocking(
                         // "Chat about this" (last item, only if allow_custom)
                         if has_chat_option {
                             let chat_idx = 1 + q.options.len();
-                            if g.question_modal_index == chat_idx {
+                            if g.question_modal_index() == chat_idx {
                                 lines.push(Line::from(Span::styled(
                                     " ► Chat about this",
                                     Style::default()
@@ -2295,9 +1262,9 @@ pub fn run_blocking(
                         frame.render_widget(popup, popup_area);
                 }
 
-                if g.session_picker_open {
-                    let filter = g.session_picker_search.to_ascii_lowercase();
-                    let filtered_indices: Vec<usize> = g.session_picker_entries.iter().enumerate()
+                if g.session_picker_open() {
+                    let filter = g.session_picker_search().to_ascii_lowercase();
+                    let filtered_indices: Vec<usize> = g.session_picker_entries().iter().enumerate()
                         .filter(|(_, s)| filter.is_empty() || s.to_ascii_lowercase().contains(&filter))
                         .map(|(i, _)| i)
                         .collect();
@@ -2306,21 +1273,21 @@ pub fn run_blocking(
                     let viewport_rows = n_filtered.min(SESSION_PICKER_MAX_ROWS);
                     let rows = (viewport_rows as u16).saturating_add(8).max(10);
                     let popup_area = centered_rect(area, 56, rows);
-                    let pick = g.session_picker_index.min(n_filtered.saturating_sub(1));
+                    let pick = g.session_picker_index().min(n_filtered.saturating_sub(1));
 
-                    if pick < g.session_picker_scroll {
-                        g.session_picker_scroll = pick;
-                    } else if viewport_rows > 0 && pick >= g.session_picker_scroll + viewport_rows {
-                        g.session_picker_scroll = pick.saturating_sub(viewport_rows - 1);
+                    if pick < g.session_picker_scroll() {
+                        *g.session_picker_scroll_mut().unwrap() = pick;
+                    } else if viewport_rows > 0 && pick >= g.session_picker_scroll() + viewport_rows {
+                        *g.session_picker_scroll_mut().unwrap() = pick.saturating_sub(viewport_rows - 1);
                     }
-                    g.session_picker_scroll = g.session_picker_scroll.min(n_filtered.saturating_sub(viewport_rows));
-                    let list_start = g.session_picker_scroll;
+                    *g.session_picker_scroll_mut().unwrap() = g.session_picker_scroll().min(n_filtered.saturating_sub(viewport_rows));
+                    let list_start = g.session_picker_scroll();
                     let list_end = (list_start + viewport_rows).min(n_filtered);
 
-                    let search_display = if g.session_picker_search.is_empty() {
+                    let search_display = if g.session_picker_search().is_empty() {
                         "type to filter".to_string()
                     } else {
-                        g.session_picker_search.clone()
+                        g.session_picker_search().to_string()
                     };
                     let mut lines: Vec<Line> = vec![
                         Line::from(vec![
@@ -2345,7 +1312,7 @@ pub fn run_blocking(
                             .skip(list_start)
                             .take(list_end.saturating_sub(list_start))
                         {
-                            let id = &g.session_picker_entries[filt_idx];
+                            let id = &g.session_picker_entries()[filt_idx];
                             let is_current = id == &current_session_id;
                             let marker = if is_current { " *" } else { "" };
                             let st = if vis_idx == pick {
@@ -2381,26 +1348,26 @@ pub fn run_blocking(
                     frame.render_widget(popup, popup_area);
                 }
 
-                if g.api_key_modal_open {
+                if g.api_key_modal_open() {
                     let provider = g
-                        .api_key_target_provider
+                        .api_key_target_provider()
                         .map(|p| p.display_name())
                         .unwrap_or("provider");
                     let popup_area = centered_rect(area, 66, 12);
-                    let headline = if g.api_key_connect_after_save {
+                    let headline = if g.api_key_connect_after_save() {
                         " Connect provider "
                     } else {
                         " API key "
                     };
-                    let hint = if g.api_key_target_has_existing {
+                    let hint = if g.api_key_target_has_existing() {
                         " Press Enter to keep current key, or paste a new key to replace it. "
                     } else {
                         " Paste API key, then press Enter. "
                     };
-                    let masked = if g.api_key_input.is_empty() {
+                    let masked = if g.api_key_input().is_empty() {
                         String::new()
                     } else {
-                        "*".repeat(g.api_key_input.chars().count())
+                        "*".repeat(g.api_key_input().chars().count())
                     };
                     let validation_line = if g.onboarding_mode {
                         match &g.validation_status {
@@ -2459,18 +1426,18 @@ pub fn run_blocking(
                 }
 
                 // Generic info modal (read-only scrollable popup).
-                if g.info_modal_open {
+                if g.info_modal_open() {
                     let max_vis = 16usize;
-                    let n_lines = g.info_modal_lines.len();
+                    let n_lines = g.info_modal_lines().len();
                     let popup_h = (n_lines.min(max_vis) as u16).saturating_add(6).max(8);
                     let popup_area = centered_rect(area, 70, popup_h);
                     let n_show = n_lines.min(max_vis);
                     let max_scroll = n_lines.saturating_sub(n_show);
-                    g.info_modal_scroll = g.info_modal_scroll.min(max_scroll);
-                    let start = g.info_modal_scroll;
+                    *g.info_modal_scroll_mut().unwrap() = g.info_modal_scroll().min(max_scroll);
+                    let start = g.info_modal_scroll();
                     let end = (start + n_show).min(n_lines);
                     let mut lines: Vec<Line> = Vec::new();
-                    for line in &g.info_modal_lines[start..end] {
+                    for line in &g.info_modal_lines()[start..end] {
                         lines.push(Line::from(Span::styled(
                             format!(" {line}"),
                             Style::default().fg(theme::TEXT),
@@ -2488,7 +1455,7 @@ pub fn run_blocking(
                         Style::default().fg(theme::MUTED),
                     )));
                     frame.render_widget(ClearWidget, popup_area);
-                    let title = format!(" {} ", g.info_modal_title);
+                    let title = format!(" {} ", g.info_modal_title());
                     let popup = Paragraph::new(Text::from(lines))
                         .block(
                             Block::default()
@@ -2502,14 +1469,14 @@ pub fn run_blocking(
                 }
 
                 // Model picker popup.
-                if g.model_picker_open {
-                    let filter = g.model_picker_search.to_ascii_lowercase();
+                if g.model_picker_open() {
+                    let filter = g.model_picker_search().to_ascii_lowercase();
 
                     // Pre-compute indices for visible/selectable items and scroll
                     // without holding an immutable borrow on `g` that conflicts
                     // with the scroll update.
                     let vis_indices: Vec<usize> = g
-                        .model_picker_entries
+                        .model_picker_entries()
                         .iter()
                         .enumerate()
                         .filter(|(_, e)| {
@@ -2523,12 +1490,12 @@ pub fn run_blocking(
                     let selectable_vis: Vec<usize> = vis_indices
                         .iter()
                         .enumerate()
-                        .filter(|&(_, &orig)| !g.model_picker_entries[orig].is_header)
+                        .filter(|&(_, &orig)| !g.model_picker_entries()[orig].is_header)
                         .map(|(vi, _)| vi)
                         .collect();
                     let n_sel = selectable_vis.len();
                     let pick = if n_sel > 0 {
-                        g.model_picker_index.min(n_sel - 1)
+                        g.model_picker_index().min(n_sel - 1)
                     } else {
                         0
                     };
@@ -2541,19 +1508,19 @@ pub fn run_blocking(
                     let popup_area = centered_rect(area, 62, popup_h);
 
                     // Keep the selected item visible within the viewport.
-                    if selected_vis_idx < g.model_picker_scroll {
-                        g.model_picker_scroll = selected_vis_idx;
-                    } else if viewport_rows > 0 && selected_vis_idx >= g.model_picker_scroll + viewport_rows {
-                        g.model_picker_scroll = selected_vis_idx.saturating_sub(viewport_rows - 1);
+                    if selected_vis_idx < g.model_picker_scroll() {
+                        *g.model_picker_scroll_mut().unwrap() = selected_vis_idx;
+                    } else if viewport_rows > 0 && selected_vis_idx >= g.model_picker_scroll() + viewport_rows {
+                        *g.model_picker_scroll_mut().unwrap() = selected_vis_idx.saturating_sub(viewport_rows - 1);
                     }
-                    g.model_picker_scroll = g.model_picker_scroll.min(n_visible.saturating_sub(viewport_rows));
-                    let list_start = g.model_picker_scroll;
+                    *g.model_picker_scroll_mut().unwrap() = g.model_picker_scroll().min(n_visible.saturating_sub(viewport_rows));
+                    let list_start = g.model_picker_scroll();
                     let list_end = (list_start + viewport_rows).min(n_visible);
 
-                    let search_display = if g.model_picker_search.is_empty() {
+                    let search_display = if g.model_picker_search().is_empty() {
                         "type to filter…".to_string()
                     } else {
-                        g.model_picker_search.clone()
+                        g.model_picker_search().to_string()
                     };
                     let mut lines: Vec<Line> = vec![
                         Line::from(vec![
@@ -2588,7 +1555,7 @@ pub fn run_blocking(
                             .skip(list_start)
                             .take(list_end.saturating_sub(list_start))
                         {
-                            let entry = &g.model_picker_entries[model_idx];
+                            let entry = &g.model_picker_entries()[model_idx];
                             if entry.is_header {
                                 lines.push(Line::from(Span::styled(
                                     format!(" {}", entry.label),
@@ -2647,9 +1614,9 @@ pub fn run_blocking(
                 }
 
                 // OpenCode-style "Connect a provider" (`/connect`).
-                if g.connect_modal_open {
-                    let rows = build_connect_rows(&g.connect_search);
-                    let sel = clamp_selection(g.connect_menu_index, &rows);
+                if g.connect_modal_open() {
+                    let rows = build_connect_rows(g.connect_search());
+                    let sel = clamp_selection(g.connect_menu_index(), &rows);
                     let selected_row = row_index_for_selection(&rows, sel);
                     let body_lines = rows.len().max(1);
                     let popup_h = (body_lines as u16).saturating_add(9).clamp(11, 24);
@@ -2663,10 +1630,10 @@ pub fn run_blocking(
                                     .add_modifier(Modifier::BOLD),
                             ),
                             Span::styled(
-                                if g.connect_search.is_empty() {
+                                if g.connect_search().is_empty() {
                                     "type to filter…"
                                 } else {
-                                    g.connect_search.as_str()
+                                    g.connect_search()
                                 },
                                 Style::default().fg(theme::TEXT),
                             ),
@@ -2741,23 +1708,53 @@ pub fn run_blocking(
                     frame.render_widget(popup, popup_area);
                 }
             })?;
+
+                last_rendered_version = g.state_version;
+                last_rendered_size = cur_size;
+                if busy_tick_due {
+                    last_busy_tick = now;
+                }
+            }
         }
 
-        if poll(Duration::from_millis(40))? {
+        // Adaptive poll: quick ticks (~66ms) while the agent is busy or
+        // streaming so the spinner stays lively; otherwise 250ms to keep
+        // idle CPU <1% per the research doc.
+        let poll_ms = {
+            let g = state.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+            if matches!(
+                g.current_busy_state,
+                BusyState::Thinking
+                    | BusyState::Streaming
+                    | BusyState::ToolRunning
+                    | BusyState::ApprovalPending
+            ) {
+                66u64
+            } else {
+                250u64
+            }
+        };
+        if poll(Duration::from_millis(poll_ms))? {
             let ev = read()?;
             let mut g = state.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+            // Any user input triggers a redraw on the next tick (typing, mouse,
+            // resize, etc). This avoids having to sprinkle `mark_dirty()` through
+            // every branch of the huge `match ev` below.
+            g.mark_dirty();
+            let _ = version_tx.send(g.state_version);
 
             match ev {
-                Event::Mouse(_) if g.command_palette_open => continue,
-                Event::Mouse(_) if g.info_modal_open => continue,
-                Event::Mouse(_) if g.model_picker_open => continue,
-                Event::Mouse(_) if g.connect_modal_open => continue,
-                Event::Mouse(_) if g.api_key_modal_open => continue,
-                Event::Mouse(_) if g.provider_picker_open => continue,
-                Event::Mouse(_) if g.permission_picker_open => continue,
-                Event::Mouse(_) if g.agent_picker_open => continue,
-                Event::Mouse(_) if g.session_picker_open => continue,
-                Event::Mouse(_) if g.question_modal_open => continue,
+                Event::Mouse(_) if g.command_palette_open() => continue,
+                Event::Mouse(_) if g.info_modal_open() => continue,
+                Event::Mouse(_) if g.model_picker_open() => continue,
+                Event::Mouse(_) if g.connect_modal_open() => continue,
+                Event::Mouse(_) if g.api_key_modal_open() => continue,
+                Event::Mouse(_) if g.custom_provider_setup_open() => continue,
+                Event::Mouse(_) if g.provider_picker_open() => continue,
+                Event::Mouse(_) if g.permission_picker_open() => continue,
+                Event::Mouse(_) if g.agent_picker_open() => continue,
+                Event::Mouse(_) if g.session_picker_open() => continue,
+                Event::Mouse(_) if g.question_modal_open() => continue,
                 Event::Mouse(m) => {
                     let sz = terminal.size()?;
                     let area = Rect::new(0, 0, sz.width, sz.height);
@@ -2775,14 +1772,15 @@ pub fn run_blocking(
 
                     if rect_contains(tr, m.column, m.row) {
                         let inner_w = tr.width.saturating_sub(2);
-                        let (lines, hits) = transcript_lines_and_hits(&g, inner_w);
-                        let total = lines.len();
+                        let cache = ensure_transcript_cache(&mut g, inner_w);
+                        let total = cache.lines.len();
                         let th = tr.height.saturating_sub(2) as usize;
                         let max_scroll = total.saturating_sub(th);
                         match m.kind {
                             MouseEventKind::ScrollUp => {
                                 g.transcript_follow_tail = false;
                                 g.scroll_lines = g.scroll_lines.saturating_sub(MOUSE_SCROLL_LINES);
+                                g.mark_dirty();
                             }
                             MouseEventKind::ScrollDown => {
                                 g.scroll_lines =
@@ -2790,6 +1788,7 @@ pub fn run_blocking(
                                 if g.scroll_lines >= max_scroll {
                                     g.transcript_follow_tail = true;
                                 }
+                                g.mark_dirty();
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 // Inner content starts below top border (y+1).
@@ -2798,21 +1797,26 @@ pub fn run_blocking(
                                     let row_in_area = (m.row - inner_top) as usize;
                                     if row_in_area < th {
                                         let gline = g.scroll_lines + row_in_area;
-                                        let picked = if gline < hits.len() {
-                                            hits[gline].clone().zip(
-                                                g.active_question
-                                                    .as_ref()
-                                                    .map(|q| q.question_id.clone()),
-                                            )
+                                        let hits_len = g
+                                            .transcript_cache
+                                            .as_ref()
+                                            .map(|c| c.hits.len())
+                                            .unwrap_or(0);
+                                        let hit = if gline < hits_len {
+                                            g.transcript_cache
+                                                .as_ref()
+                                                .and_then(|c| c.hits.get(gline).cloned())
+                                                .flatten()
                                         } else {
                                             None
                                         };
-                                        if let Some((sel, qid)) = picked {
+                                        if let Some((qid, sel)) = hit {
                                             drop(g);
                                             if let Some(ref tx) = question_answer_tx {
-                                                let _ = tx.send((qid, sel));
+                                                let _ = tx.try_send((qid, sel));
                                             } else {
-                                                let _ = cmd_tx.send(TuiCmd::QuestionAnswer(sel));
+                                                let _ =
+                                                    cmd_tx.try_send(TuiCmd::QuestionAnswer(sel));
                                             }
                                             continue;
                                         }
@@ -2868,58 +1872,63 @@ pub fn run_blocking(
                         && rect_contains(bounds, m.column, m.row)
                         && matches!(m.kind, MouseEventKind::Down(MouseButton::Left))
                     {
-                        let _ = cmd_tx.send(TuiCmd::OpenBranchPicker);
+                        let _ = cmd_tx.try_send(TuiCmd::OpenBranchPicker);
                     }
                 }
                 Event::Key(key) => {
-                    if g.command_palette_open {
+                    if g.command_palette_open() {
                         match (key.code, key.modifiers) {
                             (KeyCode::Esc, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
-                                g.command_palette_open = false;
-                                g.command_palette_query.clear();
-                                g.palette_index = 0;
+                                g.close_command_palette();
+                                g.command_palette_query_mut().unwrap().clear();
+                                *g.palette_index_mut().unwrap() = 0;
                             }
                             (KeyCode::Up, _) => {
-                                if g.palette_index > 0 {
-                                    g.palette_index -= 1;
+                                if g.palette_index() > 0 {
+                                    *g.palette_index_mut().unwrap() -= 1;
                                 }
                             }
                             (KeyCode::Down, _) => {
-                                let filtered = filter_palette_rows(&g.command_palette_query);
+                                let filtered = filter_palette_rows(g.command_palette_query());
                                 let selectable = palette_selectable_indices(&filtered);
                                 if !selectable.is_empty() {
-                                    g.palette_index = (g.palette_index + 1)
+                                    *g.palette_index_mut().unwrap() = (g.palette_index() + 1)
                                         .min(selectable.len().saturating_sub(1));
                                 }
                             }
                             (KeyCode::Enter, _) => {
-                                let filtered = filter_palette_rows(&g.command_palette_query);
+                                let filtered = filter_palette_rows(g.command_palette_query());
                                 let selectable = palette_selectable_indices(&filtered);
-                                let pick = g.palette_index.min(selectable.len().saturating_sub(1));
-                                if let Some(&abs_idx) = selectable.get(pick)
+                                let pick =
+                                    g.palette_index().min(selectable.len().saturating_sub(1));
+                                let command = if let Some(&abs_idx) = selectable.get(pick)
                                     && let PaletteRow::Entry { label, .. } = filtered[abs_idx]
                                 {
-                                    let cmd = palette_command_for_label(label);
-                                    g.input_buffer = cmd.to_string();
-                                    g.cursor_char_idx = g.input_buffer.chars().count();
+                                    Some(palette_command_for_label(label).to_string())
+                                } else {
+                                    None
+                                };
+                                g.close_command_palette();
+                                g.command_palette_query_mut().unwrap().clear();
+                                *g.palette_index_mut().unwrap() = 0;
+                                if let Some(command) = command {
+                                    drop(g);
+                                    let _ = cmd_tx.try_send(TuiCmd::Submit(command));
                                 }
-                                g.command_palette_open = false;
-                                g.command_palette_query.clear();
-                                g.palette_index = 0;
                             }
                             (KeyCode::Backspace, _) => {
-                                g.command_palette_query.pop();
-                                let filtered = filter_palette_rows(&g.command_palette_query);
+                                g.command_palette_query_mut().unwrap().pop();
+                                let filtered = filter_palette_rows(g.command_palette_query());
                                 let selectable = palette_selectable_indices(&filtered);
-                                g.palette_index =
-                                    g.palette_index.min(selectable.len().saturating_sub(1));
+                                *g.palette_index_mut().unwrap() =
+                                    g.palette_index().min(selectable.len().saturating_sub(1));
                             }
                             (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
-                                g.command_palette_query.push(c);
-                                let filtered = filter_palette_rows(&g.command_palette_query);
+                                g.command_palette_query_mut().unwrap().push(c);
+                                let filtered = filter_palette_rows(g.command_palette_query());
                                 let selectable = palette_selectable_indices(&filtered);
-                                g.palette_index =
-                                    g.palette_index.min(selectable.len().saturating_sub(1));
+                                *g.palette_index_mut().unwrap() =
+                                    g.palette_index().min(selectable.len().saturating_sub(1));
                             }
                             _ => {}
                         }
@@ -2927,26 +1936,28 @@ pub fn run_blocking(
                     }
 
                     // Info modal (read-only scrollable popup).
-                    if g.info_modal_open {
+                    if g.info_modal_open() {
                         match (key.code, key.modifiers) {
                             (KeyCode::Esc, _) | (KeyCode::Char('q'), KeyModifiers::NONE) => {
                                 g.close_info_modal();
                             }
                             (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
-                                g.info_modal_scroll = g.info_modal_scroll.saturating_sub(1);
+                                *g.info_modal_scroll_mut().unwrap() =
+                                    g.info_modal_scroll().saturating_sub(1);
                             }
                             (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
                                 let max_vis = 16usize;
-                                let max_scroll = g.info_modal_lines.len().saturating_sub(max_vis);
-                                g.info_modal_scroll = (g.info_modal_scroll + 1).min(max_scroll);
+                                let max_scroll = g.info_modal_lines().len().saturating_sub(max_vis);
+                                *g.info_modal_scroll_mut().unwrap() =
+                                    (g.info_modal_scroll() + 1).min(max_scroll);
                             }
                             (KeyCode::Home, _) => {
-                                g.info_modal_scroll = 0;
+                                *g.info_modal_scroll_mut().unwrap() = 0;
                             }
                             (KeyCode::End, _) => {
                                 let max_vis = 16usize;
-                                g.info_modal_scroll =
-                                    g.info_modal_lines.len().saturating_sub(max_vis);
+                                *g.info_modal_scroll_mut().unwrap() =
+                                    g.info_modal_lines().len().saturating_sub(max_vis);
                             }
                             _ => {}
                         }
@@ -2954,10 +1965,10 @@ pub fn run_blocking(
                     }
 
                     // Model picker popup.
-                    if g.model_picker_open {
-                        let filter = g.model_picker_search.to_ascii_lowercase();
+                    if g.model_picker_open() {
+                        let filter = g.model_picker_search().to_ascii_lowercase();
                         let selectable_count = g
-                            .model_picker_entries
+                            .model_picker_entries()
                             .iter()
                             .filter(|e| {
                                 !e.is_header
@@ -2972,21 +1983,21 @@ pub fn run_blocking(
                             }
                             (KeyCode::Up, _) => {
                                 if selectable_count > 0 {
-                                    g.model_picker_index = g
-                                        .model_picker_index
+                                    *g.model_picker_index_mut().unwrap() = g
+                                        .model_picker_index()
                                         .saturating_sub(1)
                                         .min(selectable_count - 1);
                                 }
                             }
                             (KeyCode::Down, _) => {
                                 if selectable_count > 0 {
-                                    g.model_picker_index =
-                                        (g.model_picker_index + 1).min(selectable_count - 1);
+                                    *g.model_picker_index_mut().unwrap() =
+                                        (g.model_picker_index() + 1).min(selectable_count - 1);
                                 }
                             }
                             (KeyCode::Enter, _) => {
                                 let selectable: Vec<&ModelPickerEntry> = g
-                                    .model_picker_entries
+                                    .model_picker_entries()
                                     .iter()
                                     .filter(|e| {
                                         !e.is_header
@@ -2995,31 +2006,32 @@ pub fn run_blocking(
                                                 || e.detail.to_ascii_lowercase().contains(&filter))
                                     })
                                     .collect();
-                                let pick =
-                                    g.model_picker_index.min(selectable.len().saturating_sub(1));
+                                let pick = g
+                                    .model_picker_index()
+                                    .min(selectable.len().saturating_sub(1));
                                 if let Some(entry) = selectable.get(pick) {
                                     let action = entry.action.clone();
                                     g.close_model_picker();
                                     drop(g);
                                     match action {
                                         ModelPickerAction::SwitchProvider(p) => {
-                                            let _ = cmd_tx.send(TuiCmd::ApplyModelProvider(p));
+                                            let _ = cmd_tx.try_send(TuiCmd::ApplyModelProvider(p));
                                         }
                                         ModelPickerAction::ApplyModel(m) => {
-                                            let _ = cmd_tx.send(TuiCmd::ApplyModel(m));
+                                            let _ = cmd_tx.try_send(TuiCmd::ApplyModel(m));
                                         }
                                     }
                                 }
                             }
                             (KeyCode::Backspace, _) => {
-                                g.model_picker_search.pop();
-                                g.model_picker_index = 0;
-                                g.model_picker_scroll = 0;
+                                g.model_picker_search_mut().unwrap().pop();
+                                *g.model_picker_index_mut().unwrap() = 0;
+                                *g.model_picker_scroll_mut().unwrap() = 0;
                             }
                             (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
-                                g.model_picker_search.push(c);
-                                g.model_picker_index = 0;
-                                g.model_picker_scroll = 0;
+                                g.model_picker_search_mut().unwrap().push(c);
+                                *g.model_picker_index_mut().unwrap() = 0;
+                                *g.model_picker_scroll_mut().unwrap() = 0;
                             }
                             _ => {}
                         }
@@ -3027,8 +2039,8 @@ pub fn run_blocking(
                     }
 
                     // Connect provider (OpenCode-style `/connect`).
-                    if g.connect_modal_open {
-                        let rows = build_connect_rows(&g.connect_search);
+                    if g.connect_modal_open() {
+                        let rows = build_connect_rows(g.connect_search());
                         let n_sel = selectable_row_indices(&rows).len();
                         match (key.code, key.modifiers) {
                             (KeyCode::Esc, _) => {
@@ -3038,46 +2050,47 @@ pub fn run_blocking(
                             }
                             (KeyCode::Up, _) => {
                                 if n_sel > 0 {
-                                    g.connect_menu_index =
-                                        g.connect_menu_index.saturating_sub(1).min(n_sel - 1);
+                                    *g.connect_menu_index_mut().unwrap() =
+                                        g.connect_menu_index().saturating_sub(1).min(n_sel - 1);
                                 }
                             }
                             (KeyCode::Down, _) => {
                                 if n_sel > 0 {
-                                    g.connect_menu_index =
-                                        (g.connect_menu_index + 1).min(n_sel - 1);
+                                    *g.connect_menu_index_mut().unwrap() =
+                                        (g.connect_menu_index() + 1).min(n_sel - 1);
                                 }
                             }
                             (KeyCode::Enter, _) => {
-                                if let Some(p) = provider_at_selection(&rows, g.connect_menu_index)
+                                if let Some(p) =
+                                    provider_at_selection(&rows, g.connect_menu_index())
                                 {
                                     g.close_connect_modal();
                                     drop(g);
-                                    let _ = cmd_tx.send(TuiCmd::PromptApiKey(p, true));
+                                    let _ = cmd_tx.try_send(TuiCmd::PromptApiKey(p, true));
                                 }
                             }
                             (KeyCode::Backspace, _) => {
-                                g.connect_search.pop();
-                                g.connect_menu_index = 0;
-                                g.connect_modal_scroll = 0;
-                                let rows2 = build_connect_rows(&g.connect_search);
-                                g.connect_menu_index =
-                                    clamp_selection(g.connect_menu_index, &rows2);
+                                g.connect_search_mut().unwrap().pop();
+                                *g.connect_menu_index_mut().unwrap() = 0;
+                                *g.connect_modal_scroll_mut().unwrap() = 0;
+                                let rows2 = build_connect_rows(g.connect_search());
+                                *g.connect_menu_index_mut().unwrap() =
+                                    clamp_selection(g.connect_menu_index(), &rows2);
                             }
                             (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
-                                g.connect_search.push(c);
-                                g.connect_menu_index = 0;
-                                g.connect_modal_scroll = 0;
-                                let rows2 = build_connect_rows(&g.connect_search);
-                                g.connect_menu_index =
-                                    clamp_selection(g.connect_menu_index, &rows2);
+                                g.connect_search_mut().unwrap().push(c);
+                                *g.connect_menu_index_mut().unwrap() = 0;
+                                *g.connect_modal_scroll_mut().unwrap() = 0;
+                                let rows2 = build_connect_rows(g.connect_search());
+                                *g.connect_menu_index_mut().unwrap() =
+                                    clamp_selection(g.connect_menu_index(), &rows2);
                             }
                             _ => {}
                         }
                         continue;
                     }
 
-                    if g.api_key_modal_open {
+                    if g.api_key_modal_open() {
                         match (key.code, key.modifiers) {
                             (KeyCode::Esc, _) => {
                                 g.close_api_key_modal();
@@ -3094,8 +2107,8 @@ pub fn run_blocking(
                                         Some(crate::tui::state::OnboardingValidation::Validating)
                                     ) {
                                         // Already validating — ignore
-                                    } else if let Some(provider) = g.api_key_target_provider {
-                                        let key = g.api_key_input.trim().to_string();
+                                    } else if let Some(provider) = g.api_key_target_provider() {
+                                        let key = g.api_key_input().trim().to_string();
                                         if key.is_empty() {
                                             // Don't submit empty keys during onboarding
                                         } else {
@@ -3103,23 +2116,23 @@ pub fn run_blocking(
                                                 crate::tui::state::OnboardingValidation::Validating,
                                             );
                                             drop(g);
-                                            let _ =
-                                                cmd_tx.send(TuiCmd::ValidateApiKey(provider, key));
+                                            let _ = cmd_tx
+                                                .try_send(TuiCmd::ValidateApiKey(provider, key));
                                         }
                                     }
                                 } else {
                                     drop(g);
-                                    let _ = cmd_tx.send(TuiCmd::Submit(String::new()));
+                                    let _ = cmd_tx.try_send(TuiCmd::Submit(String::new()));
                                 }
                             }
                             (KeyCode::Backspace, _) => {
-                                g.api_key_input.pop();
+                                g.api_key_input_mut().unwrap().pop();
                                 if g.onboarding_mode {
                                     g.validation_status = None;
                                 }
                             }
                             (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
-                                g.api_key_input.push(c);
+                                g.api_key_input_mut().unwrap().push(c);
                                 if g.onboarding_mode {
                                     g.validation_status = None; // Clear stale error on new input
                                 }
@@ -3129,35 +2142,176 @@ pub fn run_blocking(
                         continue;
                     }
 
+                    if g.custom_provider_setup_open() {
+                        match (key.code, key.modifiers) {
+                            (KeyCode::Esc, _) => {
+                                g.close_custom_provider_setup();
+                            }
+                            (KeyCode::Enter, _) => match g.custom_provider_setup_step() {
+                                CustomProviderSetupStep::Compatibility => {
+                                    *g.custom_provider_setup_step_mut().unwrap() =
+                                        CustomProviderSetupStep::BaseUrl;
+                                    g.custom_setup_input_mut().unwrap().clear();
+                                }
+                                CustomProviderSetupStep::BaseUrl => {
+                                    let t = g.custom_setup_input().trim();
+                                    if t.is_empty() {
+                                        g.push_error(
+                                                "[custom] enter a base URL (e.g. https://api.example.com)"
+                                                    .into(),
+                                            );
+                                    } else {
+                                        *g.custom_setup_base_url_mut().unwrap() = t.to_string();
+                                        g.custom_setup_input_mut().unwrap().clear();
+                                        *g.custom_provider_setup_step_mut().unwrap() =
+                                            CustomProviderSetupStep::ApiKey;
+                                    }
+                                }
+                                CustomProviderSetupStep::ApiKey => {
+                                    let t = g.custom_setup_input().trim();
+                                    if t.is_empty() {
+                                        g.push_error("[custom] API key is required".into());
+                                    } else {
+                                        *g.custom_setup_api_key_mut().unwrap() = t.to_string();
+                                        *g.custom_setup_input_mut().unwrap() =
+                                            g.custom_setup_model_hint().to_string();
+                                        if g.custom_setup_input().trim().is_empty() {
+                                            *g.custom_setup_input_mut().unwrap() =
+                                                "custom-model".into();
+                                        }
+                                        *g.custom_provider_setup_step_mut().unwrap() =
+                                            CustomProviderSetupStep::Model;
+                                    }
+                                }
+                                CustomProviderSetupStep::Model => {
+                                    let t = g.custom_setup_input().trim();
+                                    let model = if t.is_empty() {
+                                        "custom-model".to_string()
+                                    } else {
+                                        t.to_string()
+                                    };
+                                    let compatibility =
+                                        if *g.custom_setup_compat_index_mut().unwrap() == 0 {
+                                            ProviderCompatibility::OpenAi
+                                        } else {
+                                            ProviderCompatibility::Anthropic
+                                        };
+                                    let base_url = g.custom_setup_base_url().to_string();
+                                    let api_key = g.custom_setup_api_key().to_string();
+                                    g.close_custom_provider_setup();
+                                    drop(g);
+                                    let _ = cmd_tx.try_send(TuiCmd::ApplyCustomProviderSetup {
+                                        compatibility,
+                                        base_url,
+                                        api_key,
+                                        model,
+                                    });
+                                }
+                            },
+                            (KeyCode::Up, _)
+                                if matches!(
+                                    g.custom_provider_setup_step(),
+                                    CustomProviderSetupStep::Compatibility
+                                ) =>
+                            {
+                                *g.custom_setup_compat_index_mut().unwrap() =
+                                    g.custom_setup_compat_index().saturating_sub(1);
+                            }
+                            (KeyCode::Down, _)
+                                if matches!(
+                                    g.custom_provider_setup_step(),
+                                    CustomProviderSetupStep::Compatibility
+                                ) =>
+                            {
+                                if g.custom_setup_compat_index() < 1 {
+                                    *g.custom_setup_compat_index_mut().unwrap() += 1;
+                                }
+                            }
+                            (KeyCode::Backspace, _)
+                                if !matches!(
+                                    g.custom_provider_setup_step(),
+                                    CustomProviderSetupStep::Compatibility
+                                ) =>
+                            {
+                                g.custom_setup_input_mut().unwrap().pop();
+                            }
+                            (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT)
+                                if !matches!(
+                                    g.custom_provider_setup_step(),
+                                    CustomProviderSetupStep::Compatibility
+                                ) =>
+                            {
+                                g.custom_setup_input_mut().unwrap().push(c);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
                     // Provider picker (settings).
-                    if g.provider_picker_open {
-                        let n = ProviderKind::ALL.len();
+                    if g.provider_picker_open() {
+                        let n = g.provider_picker_visible_row_count();
+                        let n_builtin = ProviderKind::ALL.len();
                         match (key.code, key.modifiers) {
                             (KeyCode::Esc, _) => {
                                 g.close_provider_picker();
                             }
                             (KeyCode::Up, _) => {
-                                g.provider_picker_index = g.provider_picker_index.saturating_sub(1);
+                                if n > 0 {
+                                    *g.provider_picker_index_mut().unwrap() =
+                                        g.provider_picker_index().saturating_sub(1);
+                                }
+                                g.sync_provider_picker_scroll();
                             }
                             (KeyCode::Down, _) => {
                                 if n > 0 {
-                                    g.provider_picker_index = (g.provider_picker_index + 1) % n;
+                                    *g.provider_picker_index_mut().unwrap() =
+                                        (g.provider_picker_index() + 1) % n;
                                 }
+                                g.sync_provider_picker_scroll();
+                            }
+                            (KeyCode::Char('c'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                                g.close_provider_picker();
+                                g.open_info_modal(
+                                    "custom API",
+                                    vec![
+                                        "Use a custom base URL that speaks an OpenAI- or Anthropic-compatible HTTP API."
+                                            .to_string(),
+                                        String::new(),
+                                        "Option A — use this wizard: /provider then choose \"Add custom provider…\"."
+                                            .to_string(),
+                                        String::new(),
+                                        "Option B — composer commands:".to_string(),
+                                        "  /custom openai <base-url> [api-key] [model]".to_string(),
+                                        "  /custom anthropic <base-url> [api-key] [model]".to_string(),
+                                        String::new(),
+                                        "Then pick \"Custom\" in /provider or run /provider custom.".to_string(),
+                                    ],
+                                );
                             }
                             (KeyCode::Enter, _) => {
                                 if n == 0 {
                                     g.close_provider_picker();
                                     continue;
                                 }
-                                let p = ProviderKind::ALL[g.provider_picker_index.min(n - 1)];
-                                let for_key = g.provider_picker_for_api_key;
+                                let for_key = g.provider_picker_for_api_key();
+                                if g.provider_picker_include_add_row()
+                                    && *g.provider_picker_index_mut().unwrap() == n_builtin
+                                {
+                                    let hint = g.model.clone();
+                                    g.close_provider_picker();
+                                    g.open_custom_provider_setup(hint);
+                                    continue;
+                                }
+                                let p =
+                                    ProviderKind::ALL[g.provider_picker_index().min(n_builtin - 1)];
                                 g.close_provider_picker();
                                 if for_key {
                                     drop(g);
-                                    let _ = cmd_tx.send(TuiCmd::PromptApiKey(p, false));
+                                    let _ = cmd_tx.try_send(TuiCmd::PromptApiKey(p, false));
                                 } else {
                                     drop(g);
-                                    let _ = cmd_tx.send(TuiCmd::ApplyDefaultProvider(p));
+                                    let _ = cmd_tx.try_send(TuiCmd::ApplyDefaultProvider(p));
                                 }
                             }
                             _ => {}
@@ -3166,63 +2320,82 @@ pub fn run_blocking(
                     }
 
                     // Branch picker keyboard handling.
-                    if g.branch_picker_open {
+                    if g.branch_picker_open() {
                         match (key.code, key.modifiers) {
                             (KeyCode::Esc, _) => {
                                 g.close_branch_picker();
                             }
                             (KeyCode::Up, _) => {
                                 if !filtered_branch_indices(
-                                    &g.branch_picker_branches,
-                                    &g.branch_picker_query,
+                                    g.branch_picker_branches(),
+                                    g.branch_picker_query(),
                                 )
                                 .is_empty()
                                 {
-                                    g.branch_picker_index = g.branch_picker_index.saturating_sub(1);
+                                    *g.branch_picker_index_mut().unwrap() =
+                                        g.branch_picker_index().saturating_sub(1);
                                 }
                             }
                             (KeyCode::Down, _) => {
                                 let n = filtered_branch_indices(
-                                    &g.branch_picker_branches,
-                                    &g.branch_picker_query,
+                                    g.branch_picker_branches(),
+                                    g.branch_picker_query(),
                                 )
                                 .len();
                                 if n > 0 {
-                                    g.branch_picker_index = (g.branch_picker_index + 1).min(n - 1);
+                                    *g.branch_picker_index_mut().unwrap() =
+                                        (g.branch_picker_index() + 1).min(n - 1);
                                 }
                             }
                             (KeyCode::Enter, _) => {
                                 let cmd = branch_picker_enter_command(
-                                    &g.branch_picker_branches,
-                                    &g.branch_picker_query,
-                                    g.branch_picker_index,
+                                    g.branch_picker_branches(),
+                                    g.branch_picker_query(),
+                                    g.branch_picker_index(),
                                 );
                                 g.close_branch_picker();
                                 if let Some(c) = cmd {
                                     drop(g);
-                                    let _ = cmd_tx.send(c);
+                                    let _ = cmd_tx.try_send(c);
                                 }
                             }
                             (KeyCode::Backspace, _) => {
-                                g.branch_picker_query.pop();
+                                g.branch_picker_query_mut().unwrap().pop();
                                 let filtered = filtered_branch_indices(
-                                    &g.branch_picker_branches,
-                                    &g.branch_picker_query,
+                                    g.branch_picker_branches(),
+                                    g.branch_picker_query(),
                                 );
-                                g.branch_picker_index =
-                                    g.branch_picker_index.min(filtered.len().saturating_sub(1));
+                                *g.branch_picker_index_mut().unwrap() = g
+                                    .branch_picker_index()
+                                    .min(filtered.len().saturating_sub(1));
                             }
                             (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
-                                g.branch_picker_query.push(c);
-                                g.branch_picker_index = 0;
+                                g.branch_picker_query_mut().unwrap().push(c);
+                                *g.branch_picker_index_mut().unwrap() = 0;
                             }
                             _ => {}
                         }
                         continue;
                     }
 
+                    // Phase 0 invariant: approval hotkeys own Ctrl+Y/N/U even
+                    // when a question modal is also active.
+                    let primary_mode =
+                        primary_input_mode(g.active_approval.is_some(), g.question_modal_open());
+                    if matches!(primary_mode, PrimaryInputMode::Approval)
+                        && approval_shortcut_action(key.code, key.modifiers).is_some()
+                        && let Some(answer) = handle_approval_key(&mut g, key)
+                    {
+                        g.mark_transcript_dirty();
+                        drop(g);
+                        if let Some(ref tx) = approval_answer_tx {
+                            let _ = tx.try_send(answer);
+                        }
+                        continue;
+                    }
+
                     // Question modal keyboard handling.
-                    if g.question_modal_open {
+                    if matches!(primary_mode, PrimaryInputMode::QuestionModal) {
                         if let Some(ref q) = g.active_question.clone() {
                             // Total items: 1 (suggested) + options.len() + (1 if allow_custom for "Chat about this")
                             let total = 1 + q.options.len() + if q.allow_custom { 1 } else { 0 };
@@ -3235,15 +2408,15 @@ pub fn run_blocking(
                                     // If !allow_custom, Esc is a no-op
                                 }
                                 (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
-                                    g.question_modal_index =
-                                        g.question_modal_index.saturating_sub(1);
+                                    *g.question_modal_index_mut().unwrap() =
+                                        g.question_modal_index().saturating_sub(1);
                                 }
                                 (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
-                                    g.question_modal_index =
-                                        (g.question_modal_index + 1).min(total - 1);
+                                    *g.question_modal_index_mut().unwrap() =
+                                        (g.question_modal_index() + 1).min(total - 1);
                                 }
                                 (KeyCode::Enter, _) => {
-                                    let idx = g.question_modal_index;
+                                    let idx = g.question_modal_index();
                                     let sel = if idx == 0 {
                                         // Suggested answer
                                         Some(QuestionSelection::Suggested)
@@ -3260,12 +2433,20 @@ pub fn run_blocking(
                                     if let Some(sel) = sel {
                                         let qid = q.question_id.clone();
                                         g.close_question_modal();
-                                        g.active_question = None;
                                         drop(g);
-                                        if let Some(ref tx) = question_answer_tx {
-                                            let _ = tx.send((qid, sel));
+                                        let sent = if let Some(ref tx) = question_answer_tx {
+                                            tx.try_send((qid.clone(), sel.clone())).is_ok()
                                         } else {
-                                            let _ = cmd_tx.send(TuiCmd::QuestionAnswer(sel));
+                                            cmd_tx.try_send(TuiCmd::QuestionAnswer(sel)).is_ok()
+                                        };
+                                        if !sent && let Ok(mut g) = state.lock() {
+                                            // Restore so the user can retry if the side-channel dropped.
+                                            g.active_question = Some(q.clone());
+                                            g.open_question_modal();
+                                            g.push_error(
+                                                "failed to submit question answer; try again"
+                                                    .into(),
+                                            );
                                         }
                                     } else {
                                         // "Chat about this" — close modal, keep active_question
@@ -3279,25 +2460,25 @@ pub fn run_blocking(
                     }
 
                     // Permission picker keyboard handling.
-                    if g.permission_picker_open {
+                    if g.permission_picker_open() {
                         const PERM_COUNT: usize = 5;
                         match (key.code, key.modifiers) {
                             (KeyCode::Esc, _) => {
                                 g.close_permission_picker();
                             }
                             (KeyCode::Up, _) => {
-                                g.permission_picker_index =
-                                    g.permission_picker_index.saturating_sub(1);
+                                *g.permission_picker_index_mut().unwrap() =
+                                    g.permission_picker_index().saturating_sub(1);
                             }
                             (KeyCode::Down, _) => {
-                                g.permission_picker_index =
-                                    (g.permission_picker_index + 1).min(PERM_COUNT - 1);
+                                *g.permission_picker_index_mut().unwrap() =
+                                    (g.permission_picker_index() + 1).min(PERM_COUNT - 1);
                             }
                             (KeyCode::Enter, _) => {
-                                let idx = g.permission_picker_index;
+                                let idx = g.permission_picker_index();
                                 g.close_permission_picker();
                                 drop(g);
-                                let _ = cmd_tx.send(TuiCmd::ApplyPermission(idx));
+                                let _ = cmd_tx.try_send(TuiCmd::ApplyPermission(idx));
                             }
                             _ => {}
                         }
@@ -3305,24 +2486,25 @@ pub fn run_blocking(
                     }
 
                     // Agent profile picker keyboard handling.
-                    if g.agent_picker_open {
+                    if g.agent_picker_open() {
                         const AGENT_COUNT: usize = 5;
                         match (key.code, key.modifiers) {
                             (KeyCode::Esc, _) => {
                                 g.close_agent_picker();
                             }
                             (KeyCode::Up, _) => {
-                                g.agent_picker_index = g.agent_picker_index.saturating_sub(1);
+                                *g.agent_picker_index_mut().unwrap() =
+                                    g.agent_picker_index().saturating_sub(1);
                             }
                             (KeyCode::Down, _) => {
-                                g.agent_picker_index =
-                                    (g.agent_picker_index + 1).min(AGENT_COUNT - 1);
+                                *g.agent_picker_index_mut().unwrap() =
+                                    (g.agent_picker_index() + 1).min(AGENT_COUNT - 1);
                             }
                             (KeyCode::Enter, _) => {
-                                let idx = g.agent_picker_index;
+                                let idx = g.agent_picker_index();
                                 g.close_agent_picker();
                                 drop(g);
-                                let _ = cmd_tx.send(TuiCmd::SwitchAgent(idx));
+                                let _ = cmd_tx.try_send(TuiCmd::SwitchAgent(idx));
                             }
                             _ => {}
                         }
@@ -3330,10 +2512,10 @@ pub fn run_blocking(
                     }
 
                     // Session picker keyboard handling.
-                    if g.session_picker_open {
-                        let filter = g.session_picker_search.to_ascii_lowercase();
+                    if g.session_picker_open() {
+                        let filter = g.session_picker_search().to_ascii_lowercase();
                         let count = g
-                            .session_picker_entries
+                            .session_picker_entries()
                             .iter()
                             .filter(|s| {
                                 filter.is_empty() || s.to_ascii_lowercase().contains(&filter)
@@ -3344,41 +2526,43 @@ pub fn run_blocking(
                                 g.close_session_picker();
                             }
                             (KeyCode::Up, _) => {
-                                g.session_picker_index = g.session_picker_index.saturating_sub(1);
+                                *g.session_picker_index_mut().unwrap() =
+                                    g.session_picker_index().saturating_sub(1);
                             }
                             (KeyCode::Down, _) => {
                                 if count > 0 {
-                                    g.session_picker_index =
-                                        (g.session_picker_index + 1).min(count.saturating_sub(1));
+                                    *g.session_picker_index_mut().unwrap() =
+                                        (g.session_picker_index() + 1).min(count.saturating_sub(1));
                                 }
                             }
                             (KeyCode::Enter, _) => {
                                 let filtered: Vec<&String> = g
-                                    .session_picker_entries
+                                    .session_picker_entries()
                                     .iter()
                                     .filter(|s| {
                                         filter.is_empty()
                                             || s.to_ascii_lowercase().contains(&filter)
                                     })
                                     .collect();
-                                let pick =
-                                    g.session_picker_index.min(filtered.len().saturating_sub(1));
+                                let pick = g
+                                    .session_picker_index()
+                                    .min(filtered.len().saturating_sub(1));
                                 if let Some(id) = filtered.get(pick) {
                                     let id = (*id).clone();
                                     g.close_session_picker();
                                     drop(g);
-                                    let _ = cmd_tx.send(TuiCmd::ResumeSession(id));
+                                    let _ = cmd_tx.try_send(TuiCmd::ResumeSession(id));
                                 }
                             }
                             (KeyCode::Backspace, _) => {
-                                g.session_picker_search.pop();
-                                g.session_picker_index = 0;
-                                g.session_picker_scroll = 0;
+                                g.session_picker_search_mut().unwrap().pop();
+                                *g.session_picker_index_mut().unwrap() = 0;
+                                *g.session_picker_scroll_mut().unwrap() = 0;
                             }
                             (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
-                                g.session_picker_search.push(c);
-                                g.session_picker_index = 0;
-                                g.session_picker_scroll = 0;
+                                g.session_picker_search_mut().unwrap().push(c);
+                                *g.session_picker_index_mut().unwrap() = 0;
+                                *g.session_picker_scroll_mut().unwrap() = 0;
                             }
                             _ => {}
                         }
@@ -3391,39 +2575,39 @@ pub fn run_blocking(
                         match key.code {
                             KeyCode::Char('m') | KeyCode::Char('M') => {
                                 drop(g);
-                                let _ = cmd_tx.send(TuiCmd::OpenModelPicker);
+                                let _ = cmd_tx.try_send(TuiCmd::OpenModelPicker);
                             }
                             KeyCode::Char('e') | KeyCode::Char('E') => {
                                 drop(g);
-                                let _ = cmd_tx.send(TuiCmd::OpenEditor);
+                                let _ = cmd_tx.try_send(TuiCmd::OpenEditor);
                             }
                             KeyCode::Char('l') | KeyCode::Char('L') => {
                                 drop(g);
-                                let _ = cmd_tx.send(TuiCmd::OpenSessions);
+                                let _ = cmd_tx.try_send(TuiCmd::OpenSessions);
                             }
                             KeyCode::Char('n') | KeyCode::Char('N') => {
                                 drop(g);
-                                let _ = cmd_tx.send(TuiCmd::NewSession);
+                                let _ = cmd_tx.try_send(TuiCmd::NewSession);
                             }
                             KeyCode::Char('c') | KeyCode::Char('C') => {
                                 drop(g);
-                                let _ = cmd_tx.send(TuiCmd::RunCompact);
+                                let _ = cmd_tx.try_send(TuiCmd::RunCompact);
                             }
                             KeyCode::Char('s') | KeyCode::Char('S') => {
                                 drop(g);
-                                let _ = cmd_tx.send(TuiCmd::OpenStatus);
+                                let _ = cmd_tx.try_send(TuiCmd::OpenStatus);
                             }
                             KeyCode::Char('a') | KeyCode::Char('A') => {
                                 drop(g);
-                                let _ = cmd_tx.send(TuiCmd::OpenAgentPicker);
+                                let _ = cmd_tx.try_send(TuiCmd::OpenAgentPicker);
                             }
                             KeyCode::Char('h') | KeyCode::Char('H') => {
                                 drop(g);
-                                let _ = cmd_tx.send(TuiCmd::OpenHelp);
+                                let _ = cmd_tx.try_send(TuiCmd::OpenHelp);
                             }
                             KeyCode::Char('q') | KeyCode::Char('Q') => {
                                 g.should_exit = true;
-                                let _ = cmd_tx.send(TuiCmd::Exit);
+                                let _ = cmd_tx.try_send(TuiCmd::Exit);
                                 break;
                             }
                             _ => {}
@@ -3436,31 +2620,36 @@ pub fn run_blocking(
                             if let Some(ref flag) = cancel_flag {
                                 flag.store(true, std::sync::atomic::Ordering::SeqCst);
                             }
+                            g.dismiss_interactive_prompts();
                             g.blocks
                                 .push(DisplayBlock::System("Cancelling current run...".into()));
-                            let _ = cmd_tx.send(TuiCmd::CancelTurn);
+                            let _ = cmd_tx.try_send(TuiCmd::CancelTurn);
                         }
-                        (KeyCode::Char('q'), KeyModifiers::CONTROL) => {
-                            g.should_exit = true;
-                            let _ = cmd_tx.send(TuiCmd::Exit);
-                            break;
+                        (KeyCode::Char('c' | 'C'), mods)
+                            if mods.contains(KeyModifiers::CONTROL)
+                                && mods.contains(KeyModifiers::SHIFT) =>
+                        {
+                            drop(g);
+                            let _ = cmd_tx.try_send(TuiCmd::CopyLastAssistant);
                         }
                         (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                             if let Some(ref flag) = cancel_flag {
                                 flag.store(true, std::sync::atomic::Ordering::SeqCst);
                             }
-                            let _ = cmd_tx.send(TuiCmd::CancelTurn);
+                            g.dismiss_interactive_prompts();
+                            let _ = cmd_tx.try_send(TuiCmd::CancelTurn);
                         }
                         (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
                             g.blocks.clear();
                             g.streaming_assistant = None;
                             g.scroll_lines = 0;
                             g.transcript_follow_tail = true;
+                            g.mark_transcript_dirty();
                         }
                         (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
-                            g.command_palette_open = true;
-                            g.command_palette_query.clear();
-                            g.palette_index = 0;
+                            g.open_command_palette();
+                            g.command_palette_query_mut().unwrap().clear();
+                            *g.palette_index_mut().unwrap() = 0;
                         }
                         (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
                             g.leader_pending = true;
@@ -3469,27 +2658,22 @@ pub fn run_blocking(
                             if g.active_approval.is_some() || g.active_question.is_some() {
                                 continue;
                             }
-                            let ws = g.workspace_root.clone();
-                            let sid = g.session_id.clone();
-                            match crate::image_attach::paste_clipboard_image(&ws, &sid) {
-                                Ok(att) => {
-                                    let label = att.path.clone();
-                                    g.staged_image_attachments.push(att);
-                                    g.blocks.push(DisplayBlock::System(format!(
-                                        "[image] staged {label} — Enter to send"
-                                    )));
-                                }
-                                Err(e) => g.push_error(format!("[image] {e}")),
-                            }
+                            g.blocks
+                                .push(DisplayBlock::System("[image] reading clipboard…".into()));
+                            g.mark_transcript_dirty();
+                            drop(g);
+                            let _ = cmd_tx.try_send(TuiCmd::PasteClipboard);
                         }
                         (KeyCode::Tab, _) => {
-                            if let Some((buf, cidx)) = apply_selected_at_completion(
-                                &workspace_files,
-                                &g.input_buffer,
-                                g.cursor_char_idx,
-                                g.at_menu_index,
-                                false,
-                            ) {
+                            if !workspace_files_indexing
+                                && let Some((buf, cidx)) = apply_selected_at_completion(
+                                    &workspace_files,
+                                    &g.input_buffer,
+                                    g.cursor_char_idx,
+                                    g.at_menu_index,
+                                    false,
+                                )
+                            {
                                 g.input_buffer = buf;
                                 g.cursor_char_idx = cidx;
                             } else {
@@ -3503,17 +2687,17 @@ pub fn run_blocking(
                                     g.cursor_char_idx = g.input_buffer.chars().count();
                                 } else {
                                     drop(g);
-                                    let _ = cmd_tx.send(TuiCmd::CycleAgent);
+                                    let _ = cmd_tx.try_send(TuiCmd::CycleAgent);
                                 }
                             }
                         }
                         (KeyCode::F(2), KeyModifiers::NONE) => {
                             drop(g);
-                            let _ = cmd_tx.send(TuiCmd::CycleModel(true));
+                            let _ = cmd_tx.try_send(TuiCmd::CycleModel(true));
                         }
                         (KeyCode::F(2), KeyModifiers::SHIFT) => {
                             drop(g);
-                            let _ = cmd_tx.send(TuiCmd::CycleModel(false));
+                            let _ = cmd_tx.try_send(TuiCmd::CycleModel(false));
                         }
                         (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
                             if let Some(req) = g.active_approval.clone() {
@@ -3522,7 +2706,7 @@ pub fn run_blocking(
                                 g.cursor_char_idx = 0;
                                 drop(g);
                                 if let Some(ref tx) = approval_answer_tx {
-                                    let _ = tx.send(ApprovalAnswer::Verdict {
+                                    let _ = tx.try_send(ApprovalAnswer::Verdict {
                                         call_id,
                                         approved: true,
                                     });
@@ -3537,7 +2721,7 @@ pub fn run_blocking(
                                 g.cursor_char_idx = 0;
                                 drop(g);
                                 if let Some(ref tx) = approval_answer_tx {
-                                    let _ = tx.send(ApprovalAnswer::Verdict {
+                                    let _ = tx.try_send(ApprovalAnswer::Verdict {
                                         call_id,
                                         approved: false,
                                     });
@@ -3558,20 +2742,24 @@ pub fn run_blocking(
                                 )));
                                 drop(g);
                                 if let Some(ref tx) = approval_answer_tx {
-                                    let _ =
-                                        tx.send(ApprovalAnswer::AllowPattern { call_id, pattern });
+                                    let _ = tx.try_send(ApprovalAnswer::AllowPattern {
+                                        call_id,
+                                        pattern,
+                                    });
                                 }
                                 continue;
                             }
                         }
                         (KeyCode::Enter, _) => {
-                            if let Some((buf, cidx)) = apply_selected_at_completion(
-                                &workspace_files,
-                                &g.input_buffer,
-                                g.cursor_char_idx,
-                                g.at_menu_index,
-                                true,
-                            ) {
+                            if !workspace_files_indexing
+                                && let Some((buf, cidx)) = apply_selected_at_completion(
+                                    &workspace_files,
+                                    &g.input_buffer,
+                                    g.cursor_char_idx,
+                                    g.at_menu_index,
+                                    true,
+                                )
+                            {
                                 g.input_buffer = buf;
                                 g.cursor_char_idx = cidx;
                                 continue;
@@ -3601,27 +2789,29 @@ pub fn run_blocking(
                                         let call_id = req.call_id.clone();
                                         drop(g);
                                         if let Some(ref tx) = approval_answer_tx {
-                                            let _ = tx.send(ApprovalAnswer::Verdict {
+                                            let _ = tx.try_send(ApprovalAnswer::Verdict {
                                                 call_id,
                                                 approved,
                                             });
                                         } else {
-                                            let _ = cmd_tx.send(TuiCmd::CancelTurn);
+                                            let _ = cmd_tx.try_send(TuiCmd::CancelTurn);
                                         }
                                         continue;
                                     }
                                     drop(g);
-                                    let _ = cmd_tx.send(TuiCmd::Submit(line));
+                                    let _ = cmd_tx.try_send(TuiCmd::Submit(line));
                                     continue;
                                 }
                                 if let Some(approved) = parse_approval_verdict(t) {
                                     let call_id = req.call_id.clone();
                                     drop(g);
                                     if let Some(ref tx) = approval_answer_tx {
-                                        let _ =
-                                            tx.send(ApprovalAnswer::Verdict { call_id, approved });
+                                        let _ = tx.try_send(ApprovalAnswer::Verdict {
+                                            call_id,
+                                            approved,
+                                        });
                                     } else {
-                                        let _ = cmd_tx.send(TuiCmd::CancelTurn);
+                                        let _ = cmd_tx.try_send(TuiCmd::CancelTurn);
                                     }
                                     continue;
                                 }
@@ -3639,9 +2829,9 @@ pub fn run_blocking(
                                     let qid = q.question_id.clone();
                                     drop(g);
                                     if let Some(ref tx) = question_answer_tx {
-                                        let _ = tx.send((qid, QuestionSelection::Suggested));
+                                        let _ = tx.try_send((qid, QuestionSelection::Suggested));
                                     } else {
-                                        let _ = cmd_tx.send(TuiCmd::QuestionAnswer(
+                                        let _ = cmd_tx.try_send(TuiCmd::QuestionAnswer(
                                             QuestionSelection::Suggested,
                                         ));
                                     }
@@ -3649,16 +2839,16 @@ pub fn run_blocking(
                                 }
                                 if t.starts_with('/') {
                                     drop(g);
-                                    let _ = cmd_tx.send(TuiCmd::Submit(line));
+                                    let _ = cmd_tx.try_send(TuiCmd::Submit(line));
                                     continue;
                                 }
                                 if let Some(sel) = parse_tui_question_answer(&line, q) {
                                     let qid = q.question_id.clone();
                                     drop(g);
                                     if let Some(ref tx) = question_answer_tx {
-                                        let _ = tx.send((qid, sel));
+                                        let _ = tx.try_send((qid, sel));
                                     } else {
-                                        let _ = cmd_tx.send(TuiCmd::QuestionAnswer(sel));
+                                        let _ = cmd_tx.try_send(TuiCmd::QuestionAnswer(sel));
                                     }
                                     continue;
                                 }
@@ -3669,7 +2859,7 @@ pub fn run_blocking(
                                 continue;
                             }
                             drop(g);
-                            let _ = cmd_tx.send(TuiCmd::Submit(line));
+                            let _ = cmd_tx.try_send(TuiCmd::Submit(line));
                         }
                         (KeyCode::Char('a'), KeyModifiers::CONTROL) | (KeyCode::Home, _) => {
                             g.cursor_char_idx = 0;
@@ -3830,11 +3020,15 @@ pub fn run_blocking(
 #[cfg(test)]
 mod approval_parse_tests {
     use super::{
-        TuiCmd, apply_selected_at_completion, branch_picker_enter_command,
-        completed_at_mention_range_before_cursor, composer_line, delete_completed_at_mention,
-        escape_cancels_active_turn, filtered_branch_indices, parse_approval_verdict,
+        ApprovalShortcutAction, PrimaryInputMode, TuiCmd, apply_selected_at_completion,
+        approval_shortcut_action, branch_picker_enter_command, composer_line,
+        delete_completed_at_mention, escape_cancels_active_turn, filter_slash_entries,
+        filtered_branch_indices, load_slash_entries, primary_input_mode,
     };
+    use crate::tui::composer::completed_at_mention_range_before_cursor;
     use crate::tui::state::TuiSessionState;
+    use crate::tui::transcript::parse_approval_verdict;
+    use crossterm::event::{KeyCode, KeyModifiers};
     use nca_common::event::BusyState;
     use std::path::PathBuf;
 
@@ -3861,6 +3055,23 @@ mod approval_parse_tests {
         assert_eq!(parse_approval_verdict("maybe"), None);
         assert_eq!(parse_approval_verdict("nope"), None);
         assert_eq!(parse_approval_verdict(""), None);
+    }
+
+    #[test]
+    fn approval_priority_survives_question_modal() {
+        assert_eq!(primary_input_mode(true, true), PrimaryInputMode::Approval);
+        assert_eq!(
+            approval_shortcut_action(KeyCode::Char('y'), KeyModifiers::CONTROL),
+            Some(ApprovalShortcutAction::Approve)
+        );
+        assert_eq!(
+            approval_shortcut_action(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            Some(ApprovalShortcutAction::Deny)
+        );
+        assert_eq!(
+            approval_shortcut_action(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            Some(ApprovalShortcutAction::AllowPattern)
+        );
     }
 
     #[test]
@@ -3893,6 +3104,20 @@ mod approval_parse_tests {
         let branches = vec!["alpha".into(), "main".into(), "main-fix".into()];
         let cmd = branch_picker_enter_command(&branches, "mai", 1);
         assert!(matches!(cmd, Some(TuiCmd::SwitchBranch(name)) if name == "main-fix"));
+    }
+
+    #[test]
+    fn slash_panel_hides_merged_custom_alias() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let entries = load_slash_entries(dir.path(), &[]);
+        let filtered = filter_slash_entries(&entries, "/cus");
+        assert!(filtered.is_empty());
+        let connect = filter_slash_entries(&entries, "/con");
+        assert!(
+            connect
+                .iter()
+                .any(|entry| entry.command_str() == "/connect")
+        );
     }
 
     #[test]
@@ -3969,6 +3194,43 @@ mod approval_parse_tests {
         assert!(escape_cancels_active_turn(&state));
 
         state.set_busy_state(BusyState::ApprovalPending);
-        assert!(!escape_cancels_active_turn(&state));
+        assert!(escape_cancels_active_turn(&state));
+
+        state.set_busy_state(BusyState::Idle);
+        state.active_question = Some(nca_common::event::InteractiveQuestionPayload {
+            question_id: "q".into(),
+            call_id: "c".into(),
+            prompt: "Pick".into(),
+            options: vec![],
+            allow_custom: true,
+            suggested_answer: "a".into(),
+        });
+        assert!(
+            escape_cancels_active_turn(&state),
+            "stuck question while idle must still be dismissable with Esc"
+        );
+    }
+
+    #[test]
+    fn dismiss_interactive_prompts_clears_question_and_approval() {
+        let mut state = TuiSessionState::new(
+            "session".into(),
+            "model".into(),
+            "@build".into(),
+            "AcceptEdits".into(),
+            PathBuf::from("."),
+        );
+        state.active_question = Some(nca_common::event::InteractiveQuestionPayload {
+            question_id: "q".into(),
+            call_id: "c".into(),
+            prompt: "Pick".into(),
+            options: vec![],
+            allow_custom: true,
+            suggested_answer: "a".into(),
+        });
+        state.open_question_modal();
+        state.dismiss_interactive_prompts();
+        assert!(state.active_question.is_none());
+        assert!(!state.question_modal_open());
     }
 }

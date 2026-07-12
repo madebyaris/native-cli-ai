@@ -4,12 +4,13 @@ members = [
     "crates/common",
     "crates/core",
     "crates/runtime",
+    "crates/tui",
     "crates/cli",
     "crates/autoresearch",
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/madebyaris/native-cli-ai"
@@ -46,4 +47,5 @@ cli-prompts = "0.1"
 nca-common = { path = "crates/common" }
 nca-core = { path = "crates/core" }
 nca-runtime = { path = "crates/runtime" }
+nca-tui = { path = "crates/tui" }
 nca-autoresearch = { path = "crates/autoresearch" }

@@ -1,5 +1,5 @@
 use crate::ipc_pending::{ApprovalPendingMap, QuestionPendingMap};
-use nca_common::config::{NcaConfig, PermissionMode};
+use nca_common::config::{NcaConfig, PermissionMode, resolve_sessions_dir};
 use nca_common::event::{AgentEvent, EndReason, QuestionSelection};
 use nca_common::session::{OrchestrationContext, SessionSnapshot};
 use nca_core::approval::{ApprovalHandler, ApprovalVerdict};
@@ -173,9 +173,10 @@ impl SessionRuntime {
     }
 
     pub async fn list_session_ids(&self) -> Result<Vec<String>, String> {
-        let store = nca_runtime::session_store::SessionStore::new(
-            self.workspace_root().join(&self.config.session.history_dir),
-        );
+        let store = nca_runtime::session_store::SessionStore::new(resolve_sessions_dir(
+            &self.config,
+            self.workspace_root(),
+        ));
         store.list().await.map_err(|err| err.to_string())
     }
 
@@ -196,6 +197,10 @@ impl SessionRuntime {
 
     pub fn snapshot(&self) -> SessionSnapshot {
         self.supervisor.snapshot()
+    }
+
+    pub fn todos(&self) -> Vec<nca_common::todo::AgentTodo> {
+        self.supervisor.todos()
     }
 
     pub fn compact_summary(&self) -> String {
@@ -284,4 +289,64 @@ pub async fn build_resumed_session_runtime(
         question_pending,
         config,
     })
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+    use nca_common::event::QuestionSelection;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::oneshot;
+
+    #[test]
+    fn happy_dispatch_suggested_resolves_pending() {
+        let (tx, rx) = oneshot::channel();
+        let qp: QuestionPendingMap = Arc::new(Mutex::new(HashMap::from([("q-1".to_string(), tx)])));
+        assert!(dispatch_question_answer(
+            &Some(qp.clone()),
+            "q-1",
+            QuestionSelection::Suggested
+        ));
+        assert!(matches!(
+            rx.blocking_recv().unwrap(),
+            QuestionSelection::Suggested
+        ));
+        assert!(qp.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn bad_dispatch_unknown_id_returns_false() {
+        let qp: QuestionPendingMap = Arc::new(Mutex::new(HashMap::new()));
+        assert!(!dispatch_question_answer(
+            &Some(qp),
+            "missing",
+            QuestionSelection::Suggested
+        ));
+    }
+
+    #[test]
+    fn bad_dispatch_none_map_returns_false() {
+        assert!(!dispatch_question_answer(
+            &None,
+            "q-1",
+            QuestionSelection::Suggested
+        ));
+    }
+
+    #[test]
+    fn bad_double_dispatch_second_fails() {
+        let (tx, _rx) = oneshot::channel();
+        let qp: QuestionPendingMap = Arc::new(Mutex::new(HashMap::from([("q-1".to_string(), tx)])));
+        assert!(dispatch_question_answer(
+            &Some(qp.clone()),
+            "q-1",
+            QuestionSelection::Suggested
+        ));
+        assert!(!dispatch_question_answer(
+            &Some(qp),
+            "q-1",
+            QuestionSelection::Suggested
+        ));
+    }
 }

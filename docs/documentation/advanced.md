@@ -28,9 +28,12 @@ The agent calls `spawn_subagent` with:
 {
     "task": "Write comprehensive tests for the authentication module",
     "focus_files": ["src/auth.rs", "src/auth/middleware.rs"],
+    "skills": ["testing", "rust-refactor"],
     "use_worktree": true
 }
 ```
+
+`skills` is optional. When provided, the child session receives those skill names as explicit hints and should load the relevant instructions with `invoke_skill` before starting the delegated task. If `skills` is omitted, `spawn_subagent` can automatically inherit the parent's most recently loaded skill. Unknown skill names are rejected before the child starts, and the error includes the discovered skill commands so the parent can retry with valid names.
 
 ### Git Worktrees
 
@@ -45,6 +48,7 @@ When `use_worktree` is true (default), the child session runs in an isolated git
 - **Permissions:** `bypass-permissions` (no interactive approval needed)
 - **Approvals:** Auto-deny handler (no blocking waits)
 - **Context:** Inherits a summary of the parent's last ~10 messages
+- **Skills:** Can receive explicit skill hints from the parent via `spawn_subagent.skills`
 - **Timeout:** 600 seconds (10 minutes)
 - **Lineage:** Parent and child session IDs are cross-referenced in metadata
 
