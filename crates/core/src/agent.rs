@@ -17,6 +17,10 @@ use crate::hooks::{HookEventKind, HookRunner};
 use crate::provider::{Provider, ProviderError, StreamChunk};
 use crate::tools::ToolRegistry;
 
+fn is_interactive_tool(name: &str) -> bool {
+    matches!(name, "ask_question")
+}
+
 /// Drives the multi-turn conversation and tool-use loop.
 pub struct AgentLoop {
     pub provider: Box<dyn Provider>,
@@ -457,31 +461,33 @@ impl AgentLoop {
                 }
             }
 
-            // ── Phase 2: concurrent execution ────────────────────────────────────────
+            // ── Phase 2: execution ───────────────────────────────────────────────────
             //
-            // All approved calls run simultaneously. `ToolRegistry::execute` takes
-            // `&self` so multiple concurrent borrows are safe.
-            //
-            // We keep a parallel `Option<ToolResult>` vec (None = still executing)
-            // and fill it from the join results.
+            // Non-interactive tools run concurrently. `ask_question` is always
+            // sequential so the UI can show one prompt at a time; parallel asks
+            // would leave unanswered ones pending forever after the user answers
+            // only the latest modal.
             let n = tickets.len();
             let mut results: Vec<Option<ToolResult>> = (0..n).map(|_| None).collect();
 
-            // Gather indices and refs for calls that actually need execution
-            let to_execute: Vec<(usize, &ToolCall)> = tickets
+            let to_execute: Vec<(usize, ToolCall)> = tickets
                 .iter()
                 .enumerate()
                 .filter_map(|(i, t)| {
                     if let Ticket::Execute(call) = t {
-                        Some((i, call))
+                        Some((i, call.clone()))
                     } else {
                         None
                     }
                 })
                 .collect();
 
-            if !to_execute.is_empty() {
-                let futs = to_execute.iter().map(|(i, call)| {
+            let (interactive, parallel): (Vec<_>, Vec<_>) = to_execute
+                .into_iter()
+                .partition(|(_, call)| is_interactive_tool(&call.name));
+
+            if !parallel.is_empty() {
+                let futs = parallel.iter().map(|(i, call)| {
                     let fut = self.tools.execute(call);
                     async move { (*i, fut.await) }
                 });
@@ -489,6 +495,19 @@ impl AgentLoop {
                 for (i, result) in executed {
                     results[i] = Some(result);
                 }
+            }
+
+            for (i, call) in interactive {
+                if self.is_cancelled() {
+                    results[i] = Some(ToolResult {
+                        call_id: call.id.clone(),
+                        success: false,
+                        output: String::new(),
+                        error: Some("run cancelled while waiting for interactive tool".into()),
+                    });
+                    continue;
+                }
+                results[i] = Some(self.tools.execute(&call).await);
             }
 
             // Fill pre-resolved slots
@@ -665,5 +684,18 @@ fn format_tool_result(result: &nca_common::tool::ToolResult) -> String {
             .error
             .clone()
             .unwrap_or_else(|| "tool failed".to_string())
+    }
+}
+
+#[cfg(test)]
+mod interactive_tool_tests {
+    use super::is_interactive_tool;
+
+    #[test]
+    fn only_ask_question_is_interactive() {
+        assert!(is_interactive_tool("ask_question"));
+        assert!(!is_interactive_tool("list_directory"));
+        assert!(!is_interactive_tool("invoke_skill"));
+        assert!(!is_interactive_tool("update_todos"));
     }
 }

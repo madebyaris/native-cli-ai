@@ -290,3 +290,63 @@ pub async fn build_resumed_session_runtime(
         config,
     })
 }
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+    use nca_common::event::QuestionSelection;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::oneshot;
+
+    #[test]
+    fn happy_dispatch_suggested_resolves_pending() {
+        let (tx, rx) = oneshot::channel();
+        let qp: QuestionPendingMap = Arc::new(Mutex::new(HashMap::from([("q-1".to_string(), tx)])));
+        assert!(dispatch_question_answer(
+            &Some(qp.clone()),
+            "q-1",
+            QuestionSelection::Suggested
+        ));
+        assert!(matches!(
+            rx.blocking_recv().unwrap(),
+            QuestionSelection::Suggested
+        ));
+        assert!(qp.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn bad_dispatch_unknown_id_returns_false() {
+        let qp: QuestionPendingMap = Arc::new(Mutex::new(HashMap::new()));
+        assert!(!dispatch_question_answer(
+            &Some(qp),
+            "missing",
+            QuestionSelection::Suggested
+        ));
+    }
+
+    #[test]
+    fn bad_dispatch_none_map_returns_false() {
+        assert!(!dispatch_question_answer(
+            &None,
+            "q-1",
+            QuestionSelection::Suggested
+        ));
+    }
+
+    #[test]
+    fn bad_double_dispatch_second_fails() {
+        let (tx, _rx) = oneshot::channel();
+        let qp: QuestionPendingMap = Arc::new(Mutex::new(HashMap::from([("q-1".to_string(), tx)])));
+        assert!(dispatch_question_answer(
+            &Some(qp.clone()),
+            "q-1",
+            QuestionSelection::Suggested
+        ));
+        assert!(!dispatch_question_answer(
+            &Some(qp),
+            "q-1",
+            QuestionSelection::Suggested
+        ));
+    }
+}

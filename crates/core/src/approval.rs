@@ -174,6 +174,7 @@ impl ApprovalPolicy {
                 | "fetch_url"
                 | "ask_question"
                 | "update_todos"
+                | "invoke_skill"
         );
         let file_edit = matches!(
             tool_name,
@@ -440,5 +441,31 @@ mod tests {
             &serde_json::json!({"command": "rm -rf /"}).to_string(),
         );
         assert_eq!(tier, PermissionTier::Denied);
+    }
+
+    #[test]
+    fn invoke_skill_is_readonly_allowed_in_plan_and_bypass() {
+        for mode in [
+            PermissionMode::Plan,
+            PermissionMode::DontAsk,
+            PermissionMode::AcceptEdits,
+            PermissionMode::BypassPermissions,
+            PermissionMode::Default,
+        ] {
+            let policy = ApprovalPolicy::new(PermissionConfig {
+                mode,
+                ..Default::default()
+            });
+            assert_eq!(
+                policy.check("invoke_skill", r#"{"skill_name":"x"}"#),
+                PermissionTier::Allowed,
+                "invoke_skill should be allowed in {mode:?}"
+            );
+            assert_eq!(
+                policy.check("ask_question", r#"{"prompt":"q"}"#),
+                PermissionTier::Allowed,
+                "ask_question should be allowed in {mode:?}"
+            );
+        }
     }
 }

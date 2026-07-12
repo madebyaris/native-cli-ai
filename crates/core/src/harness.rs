@@ -58,7 +58,7 @@ const TOOL_PLAYBOOK: &str = r#"Tool playbook:
 - Empty provider completions, empty tool results, or obviously invalid outputs must fail loudly instead of being treated as success.
 - Do not pretend a tool, provider, or validation step succeeded if it did not.
 - When the user attaches images via nca (pasted or `/image`), the runtime already runs MiniMax native vision and injects a text description. Do **not** use `fetch_url` for session attachment paths or `file:` URLs to "load" those images.
-- When you need structured choices from the user, use `ask_question` with clear options and always set `suggested_answer`.
+- When you need structured choices from the user, use `ask_question` with clear options and always set `suggested_answer`. Ask **one** question per tool call (do not batch multiple `ask_question` calls in the same turn).
 - For multi-step work, keep an explicit session todo list via `update_todos` (full list replacement each call). Keep at most one item `in_progress`.
 - If a command or edit could be destructive, expensive, or policy-sensitive, ask for approval or explain why it is needed.
 "#;

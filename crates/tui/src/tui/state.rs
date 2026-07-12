@@ -20,7 +20,7 @@ pub struct TranscriptCache {
     pub built_for_version: u64,
     pub built_for_width: u16,
     pub lines: Vec<Line<'static>>,
-    pub hits: Vec<Option<QuestionSelection>>,
+    pub hits: Vec<Option<(String, QuestionSelection)>>,
 }
 
 impl TranscriptCache {

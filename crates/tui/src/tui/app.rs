@@ -1733,12 +1733,7 @@ pub fn run_blocking(
                                         } else {
                                             None
                                         };
-                                        let picked = hit.zip(
-                                            g.active_question
-                                                .as_ref()
-                                                .map(|q| q.question_id.clone()),
-                                        );
-                                        if let Some((sel, qid)) = picked {
+                                        if let Some((qid, sel)) = hit {
                                             drop(g);
                                             if let Some(ref tx) = question_answer_tx {
                                                 let _ = tx.try_send((qid, sel));
@@ -2361,12 +2356,20 @@ pub fn run_blocking(
                                     if let Some(sel) = sel {
                                         let qid = q.question_id.clone();
                                         g.close_question_modal();
-                                        g.active_question = None;
                                         drop(g);
-                                        if let Some(ref tx) = question_answer_tx {
-                                            let _ = tx.try_send((qid, sel));
+                                        let sent = if let Some(ref tx) = question_answer_tx {
+                                            tx.try_send((qid.clone(), sel.clone())).is_ok()
                                         } else {
-                                            let _ = cmd_tx.try_send(TuiCmd::QuestionAnswer(sel));
+                                            cmd_tx.try_send(TuiCmd::QuestionAnswer(sel)).is_ok()
+                                        };
+                                        if !sent && let Ok(mut g) = state.lock() {
+                                            // Restore so the user can retry if the side-channel dropped.
+                                            g.active_question = Some(q.clone());
+                                            g.open_question_modal();
+                                            g.push_error(
+                                                "failed to submit question answer; try again"
+                                                    .into(),
+                                            );
                                         }
                                     } else {
                                         // "Chat about this" — close modal, keep active_question

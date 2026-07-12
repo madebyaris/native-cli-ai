@@ -16,9 +16,9 @@ use syntect::highlighting::{Style as SynStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
-/// Per flattened transcript line: click selects this answer (same indices as
-/// `transcript_lines_and_hits`).
-pub type LineAnswerHit = Option<QuestionSelection>;
+/// Per flattened transcript line: click selects this answer for `question_id`
+/// (same indices as `transcript_lines_and_hits`).
+pub type LineAnswerHit = Option<(String, QuestionSelection)>;
 
 #[inline]
 pub fn push_transcript_line(
@@ -208,7 +208,7 @@ pub fn transcript_lines_and_hits(
                             ),
                             Span::styled("(click)", Style::default().fg(theme::MUTED)),
                         ]),
-                        Some(QuestionSelection::Suggested),
+                        Some((q.question_id.clone(), QuestionSelection::Suggested)),
                     );
                     for (i, o) in q.options.iter().enumerate() {
                         push_transcript_line(
@@ -223,9 +223,12 @@ pub fn transcript_lines_and_hits(
                                 ),
                                 Span::styled("(click)", Style::default().fg(theme::MUTED)),
                             ]),
-                            Some(QuestionSelection::Option {
-                                option_id: o.id.clone(),
-                            }),
+                            Some((
+                                q.question_id.clone(),
+                                QuestionSelection::Option {
+                                    option_id: o.id.clone(),
+                                },
+                            )),
                         );
                     }
                     if q.allow_custom {
