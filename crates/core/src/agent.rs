@@ -1,4 +1,5 @@
 use futures_util::future::join_all;
+use nca_common::config::SmartCompactionMode;
 use nca_common::event::{AgentEvent, BusyState};
 use nca_common::message::{ContentPart, ImageAttachment, Message, MessageToolCall};
 use nca_common::tool::{PermissionTier, ToolCall, ToolDefinition, ToolResult};
@@ -10,10 +11,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::approval::{ApprovalPolicy, ApprovalVerdict};
+use crate::context_view::plan_context_view;
 use crate::cost::CostTracker;
 use crate::hooks::{HookEventKind, HookRunner};
 use crate::provider::{Provider, ProviderError, StreamChunk};
 use crate::tools::ToolRegistry;
+
+fn is_interactive_tool(name: &str) -> bool {
+    matches!(name, "ask_question")
+}
 
 /// Drives the multi-turn conversation and tool-use loop.
 pub struct AgentLoop {
@@ -29,6 +35,8 @@ pub struct AgentLoop {
     checkpoint_interval: u32,
     cancel_flag: Arc<AtomicBool>,
     hooks: Option<HookRunner>,
+    /// Opt-in provider-request smart compaction (canonical history always kept).
+    smart_compaction_mode: SmartCompactionMode,
 }
 
 impl AgentLoop {
@@ -57,7 +65,16 @@ impl AgentLoop {
             checkpoint_interval,
             cancel_flag: Arc::new(AtomicBool::new(false)),
             hooks,
+            smart_compaction_mode: SmartCompactionMode::Off,
         }
+    }
+
+    pub fn set_smart_compaction_mode(&mut self, mode: SmartCompactionMode) {
+        self.smart_compaction_mode = mode;
+    }
+
+    pub fn smart_compaction_mode(&self) -> SmartCompactionMode {
+        self.smart_compaction_mode
     }
 
     /// Add a system prompt once at startup.
@@ -147,10 +164,41 @@ impl AgentLoop {
             self.provider
                 .prepare_messages_for_request(&mut self.messages, workspace_root)
                 .await?;
+
+            // Smart compaction builds a provider-only view; canonical history stays intact.
+            let request_messages = if self.smart_compaction_mode.is_enabled() {
+                let plan = plan_context_view(&self.messages, self.smart_compaction_mode);
+                let report = &plan.report;
+                if report.tokens_after < report.tokens_before
+                    || matches!(self.smart_compaction_mode, SmartCompactionMode::DryRun)
+                {
+                    let phase = match self.smart_compaction_mode {
+                        SmartCompactionMode::DryRun => "dry_run",
+                        SmartCompactionMode::On => "completed",
+                        SmartCompactionMode::Off => "off",
+                    };
+                    self.emit(AgentEvent::ContextCompaction {
+                        phase: phase.into(),
+                        message: report.summary_line(),
+                        tokens_before: Some(report.tokens_before),
+                        tokens_after: Some(report.tokens_after),
+                        retained_groups: Some(report.retained_groups),
+                        dropped_groups: Some(report.dropped_groups),
+                    })
+                    .await;
+                }
+                match self.smart_compaction_mode {
+                    SmartCompactionMode::On => plan.messages,
+                    SmartCompactionMode::DryRun | SmartCompactionMode::Off => self.messages.clone(),
+                }
+            } else {
+                self.messages.clone()
+            };
+
             let mut stream = self
                 .provider
                 .chat(
-                    &self.messages,
+                    &request_messages,
                     &self.tool_definitions(),
                     &self.model,
                     workspace_root,
@@ -226,10 +274,12 @@ impl AgentLoop {
                 if assistant_text.trim().is_empty() {
                     empty_retries += 1;
                     if empty_retries <= MAX_EMPTY_RETRIES && got_usage {
-                        self.emit(AgentEvent::Error {
-                            message: format!(
-                                "Provider returned empty response (retry {empty_retries}/{MAX_EMPTY_RETRIES})"
+                        self.emit(AgentEvent::Checkpoint {
+                            phase: "provider_retry".into(),
+                            detail: format!(
+                                "Empty response — retry {empty_retries}/{MAX_EMPTY_RETRIES}"
                             ),
+                            turn,
                         })
                         .await;
                         continue;
@@ -413,31 +463,33 @@ impl AgentLoop {
                 }
             }
 
-            // ── Phase 2: concurrent execution ────────────────────────────────────────
+            // ── Phase 2: execution ───────────────────────────────────────────────────
             //
-            // All approved calls run simultaneously. `ToolRegistry::execute` takes
-            // `&self` so multiple concurrent borrows are safe.
-            //
-            // We keep a parallel `Option<ToolResult>` vec (None = still executing)
-            // and fill it from the join results.
+            // Non-interactive tools run concurrently. `ask_question` is always
+            // sequential so the UI can show one prompt at a time; parallel asks
+            // would leave unanswered ones pending forever after the user answers
+            // only the latest modal.
             let n = tickets.len();
             let mut results: Vec<Option<ToolResult>> = (0..n).map(|_| None).collect();
 
-            // Gather indices and refs for calls that actually need execution
-            let to_execute: Vec<(usize, &ToolCall)> = tickets
+            let to_execute: Vec<(usize, ToolCall)> = tickets
                 .iter()
                 .enumerate()
                 .filter_map(|(i, t)| {
                     if let Ticket::Execute(call) = t {
-                        Some((i, call))
+                        Some((i, call.clone()))
                     } else {
                         None
                     }
                 })
                 .collect();
 
-            if !to_execute.is_empty() {
-                let futs = to_execute.iter().map(|(i, call)| {
+            let (interactive, parallel): (Vec<_>, Vec<_>) = to_execute
+                .into_iter()
+                .partition(|(_, call)| is_interactive_tool(&call.name));
+
+            if !parallel.is_empty() {
+                let futs = parallel.iter().map(|(i, call)| {
                     let fut = self.tools.execute(call);
                     async move { (*i, fut.await) }
                 });
@@ -445,6 +497,19 @@ impl AgentLoop {
                 for (i, result) in executed {
                     results[i] = Some(result);
                 }
+            }
+
+            for (i, call) in interactive {
+                if self.is_cancelled() {
+                    results[i] = Some(ToolResult {
+                        call_id: call.id.clone(),
+                        success: false,
+                        output: String::new(),
+                        error: Some("run cancelled while waiting for interactive tool".into()),
+                    });
+                    continue;
+                }
+                results[i] = Some(self.tools.execute(&call).await);
             }
 
             // Fill pre-resolved slots
@@ -621,5 +686,18 @@ fn format_tool_result(result: &nca_common::tool::ToolResult) -> String {
             .error
             .clone()
             .unwrap_or_else(|| "tool failed".to_string())
+    }
+}
+
+#[cfg(test)]
+mod interactive_tool_tests {
+    use super::is_interactive_tool;
+
+    #[test]
+    fn only_ask_question_is_interactive() {
+        assert!(is_interactive_tool("ask_question"));
+        assert!(!is_interactive_tool("list_directory"));
+        assert!(!is_interactive_tool("invoke_skill"));
+        assert!(!is_interactive_tool("update_todos"));
     }
 }

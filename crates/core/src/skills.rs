@@ -1,4 +1,4 @@
-use nca_common::config::PermissionMode;
+use nca_common::config::{PermissionMode, nca_product_home};
 use serde::Deserialize;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -36,6 +36,9 @@ impl SkillCatalog {
         skill_directories: &[PathBuf],
     ) -> Result<Vec<Skill>, String> {
         let mut roots = Vec::new();
+        if let Some(product) = nca_product_home() {
+            roots.push(product.join("skills"));
+        }
         if let Some(home) = env::var_os("HOME") {
             let home = PathBuf::from(home);
             roots.push(home.join(".nca/skills"));

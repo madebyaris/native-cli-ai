@@ -51,6 +51,7 @@ fn write_session(
         total_input_tokens: 0,
         total_output_tokens: 0,
         estimated_cost_usd: 0.0,
+        todos: Vec::new(),
     };
 
     let json = serde_json::to_string_pretty(&session).expect("serialize session");
@@ -450,7 +451,7 @@ fn index_build_writes_cli_index_json_under_nca_home() {
         .success()
         .stdout(predicates::str::contains("wrote"));
 
-    let workspaces = home.path().join(".nca/workspaces");
+    let workspaces = home.path().join(".local/share/ncacli/workspaces");
     assert!(workspaces.is_dir(), "expected {:?}", workspaces);
     let mut index_path = None;
     for entry in fs::read_dir(&workspaces).expect("read workspaces") {

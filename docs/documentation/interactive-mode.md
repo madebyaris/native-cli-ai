@@ -107,6 +107,8 @@ Available agent profiles:
 | Command | Description |
 |---------|-------------|
 | `/compact` | Compact session context (summarize and trim history) |
+| `/copy` | Copy the latest assistant response to the clipboard (TUI) |
+| `/todos` | Show the session todo list (sidebar also shows a compact view) |
 | `/thinking` | Toggle thinking/reasoning visibility |
 | `/sessions` | List and switch between sessions |
 | `/agents` | List child sub-agent sessions |
@@ -180,6 +182,7 @@ Available agent profiles:
 |----------|--------|
 | `Ctrl+P` | Open command palette |
 | `Ctrl+V` | Paste image from clipboard (TUI only) |
+| `Ctrl+Shift+C` | Copy last assistant response (TUI only) |
 | `Ctrl+X M` | Switch model (model picker) |
 | `Ctrl+X E` | Open external editor |
 | `Ctrl+X L` | Switch session |
@@ -226,8 +229,19 @@ The TUI displays a status bar at the bottom showing:
 - Available shortcuts hint
 
 ```
-Tab  agent   Ctrl+V  image   Ctrl+P  commands   !cmd  shell   @path  search   /  inline   wheel  scroll
+Tab  agent   Ctrl+V  image   Ctrl+Shift+C  copy   Ctrl+P  commands   !cmd  shell   @path  search   /  inline   wheel  scroll
 ```
+
+## Copying Text
+
+Mouse drag-selection is limited while the TUI owns the terminal. Use:
+
+- `/copy` or `Ctrl+Shift+C` to copy the latest assistant response
+- Native terminal **Shift+drag** selection as a fallback when you need arbitrary transcript text
+
+## Session Todos
+
+The agent maintains a session checklist through the `update_todos` tool (full-list replacement). The TUI sidebar shows a compact progress view; `/todos` opens the full list (useful on narrow terminals). Todos persist in session JSON and replay via `TodosUpdated` events.
 
 ## Image Attachments
 

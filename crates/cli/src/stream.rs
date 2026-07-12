@@ -2,11 +2,11 @@
 //!
 //! This module provides streaming event rendering with Claude Code-inspired styling.
 
-use crate::ipc_pending::{ApprovalPendingMap, QuestionPendingMap};
 use colored::Colorize;
 use nca_common::event::{AgentEvent, EventEnvelope, InteractiveQuestionPayload, QuestionSelection};
 use nca_runtime::ipc::IpcHandle;
 use nca_runtime::supervisor;
+use nca_tui::ipc_pending::{ApprovalPendingMap, QuestionPendingMap};
 use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -415,6 +415,43 @@ fn render_event(event: &AgentEvent, stats: &StreamStats) {
                 question_id.color(theme::TEXT_DIM),
                 selection
             );
+        }
+        AgentEvent::TodosUpdated { todos } => {
+            print!("{}", theme::CLEAR_LINE);
+            let done = todos
+                .iter()
+                .filter(|t| {
+                    matches!(
+                        t.status,
+                        nca_common::todo::TodoStatus::Completed
+                            | nca_common::todo::TodoStatus::Cancelled
+                    )
+                })
+                .count();
+            println!(
+                "  {} todos updated ({}/{} done)",
+                "✓".color(theme::SUCCESS),
+                done,
+                todos.len()
+            );
+        }
+        AgentEvent::ContextWarning { message } => {
+            print!("{}", theme::CLEAR_LINE);
+            println!(
+                "  {} {}",
+                "!".color(theme::WARNING),
+                message.color(theme::WARNING)
+            );
+        }
+        AgentEvent::ContextCompaction { phase, message, .. } => {
+            if phase == "completed" || phase == "dry_run" {
+                print!("{}", theme::CLEAR_LINE);
+                println!(
+                    "  {} {}",
+                    "↻".color(theme::TOOL_BG),
+                    message.color(theme::TEXT_DIM)
+                );
+            }
         }
         AgentEvent::CostUpdated {
             input_tokens,

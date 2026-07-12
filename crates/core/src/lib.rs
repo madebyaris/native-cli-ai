@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod approval;
 pub mod code_intel;
+pub mod context_view;
 pub mod cost;
 pub mod harness;
 pub mod hooks;

@@ -1,0 +1,15 @@
+---
+source: crates/tui/tests/transcript_rendering.rs
+expression: rendered
+---
+[
+    "                     # Heading => Heading",
+    "                 ## Subheading => Subheading",
+    "                 - bullet item => - ",
+    "              1. numbered item => - ",
+    "                 > quoted text => quoted text",
+    "               plain paragraph => plain paragraph",
+    "                 `inline code` => inline code",
+    "                       ```rust => ```rust",
+    "           indented code block =>   indented code block",
+]

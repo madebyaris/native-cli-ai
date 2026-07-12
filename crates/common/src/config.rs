@@ -35,7 +35,7 @@ impl NcaConfig {
     pub fn load_for_workspace(workspace_root: &Path) -> Result<Self, ConfigError> {
         let mut config = Self::default();
 
-        if let Some(path) = global_config_path()
+        if let Some(path) = global_config_path_for_load()
             && path.exists()
         {
             let partial = load_partial(&path)?;
@@ -49,13 +49,19 @@ impl NcaConfig {
         }
 
         config.apply_env();
+
+        // Best-effort migrate legacy project/.nca and ~/.nca into the product home.
+        if let Err(err) = migrate_workspace_data_if_needed(workspace_root) {
+            tracing::warn!(error = %err, "workspace data migration skipped");
+        }
+
         Ok(config)
     }
 
     /// Load only the persisted global config file layered over defaults.
     pub fn load_global_file() -> Result<Self, ConfigError> {
         let mut config = Self::default();
-        if let Some(path) = global_config_path()
+        if let Some(path) = global_config_path_for_load()
             && path.exists()
         {
             let partial = load_partial(&path)?;
@@ -77,7 +83,7 @@ impl NcaConfig {
 
     /// Save the full config as the user's global defaults.
     pub fn save_global(&self) -> Result<(), ConfigError> {
-        let path = global_config_path().ok_or(ConfigError::NoHomeDir)?;
+        let path = global_config_path_for_save().ok_or(ConfigError::NoHomeDir)?;
         save_config_to_path(self, &path)
     }
 
@@ -381,12 +387,74 @@ impl UiConfig {
 }
 
 pub fn global_config_path() -> Option<PathBuf> {
-    env::var_os("HOME").map(|home| PathBuf::from(home).join(".nca/config.toml"))
+    // Prefer the unified product home; fall back to legacy ~/.nca for reads via
+    // `global_config_path_for_load`.
+    nca_product_home().map(|home| home.join("config.toml"))
 }
 
-/// `$HOME/.nca` when `HOME` is set.
-pub fn nca_home_dir() -> Option<PathBuf> {
+/// Path used when *loading* global config: product home first, then legacy `~/.nca`.
+pub fn global_config_path_for_load() -> Option<PathBuf> {
+    if let Some(path) = nca_product_home().map(|h| h.join("config.toml"))
+        && path.exists()
+    {
+        return Some(path);
+    }
+    legacy_nca_home_dir().map(|h| h.join("config.toml"))
+}
+
+/// Path used when *saving* global config (always the product home).
+pub fn global_config_path_for_save() -> Option<PathBuf> {
+    nca_product_home().map(|home| home.join("config.toml"))
+}
+
+/// Unified product data root.
+///
+/// Resolution order:
+/// 1. `$NCA_HOME` (explicit override)
+/// 2. `$XDG_DATA_HOME/ncacli` when `XDG_DATA_HOME` is set
+/// 3. `$HOME/.local/share/ncacli` (XDG Base Directory default)
+pub fn nca_product_home() -> Option<PathBuf> {
+    if let Ok(override_home) = env::var("NCA_HOME") {
+        let trimmed = override_home.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+    if let Ok(xdg) = env::var("XDG_DATA_HOME") {
+        let trimmed = xdg.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed).join("ncacli"));
+        }
+    }
+    env::var_os("HOME").map(|home| {
+        PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("ncacli")
+    })
+}
+
+/// Legacy `$HOME/.nca` directory (pre-unification).
+pub fn legacy_nca_home_dir() -> Option<PathBuf> {
     env::var_os("HOME").map(|home| PathBuf::from(home).join(".nca"))
+}
+
+/// Accidental personal path from an early unification prototype (`~/.aris/ncacli`).
+fn legacy_aris_product_home() -> Option<PathBuf> {
+    env::var_os("HOME").map(|home| PathBuf::from(home).join(".aris").join("ncacli"))
+}
+
+/// Prefer product home; fall back to legacy `~/.nca` when the product root does not exist yet.
+///
+/// New writes should use [`nca_product_home`]. This helper is for discovering
+/// existing data during migration / compat reads.
+pub fn nca_home_dir() -> Option<PathBuf> {
+    if let Some(product) = nca_product_home()
+        && (product.exists() || legacy_nca_home_dir().is_none_or(|legacy| !legacy.exists()))
+    {
+        return Some(product);
+    }
+    legacy_nca_home_dir().or_else(nca_product_home)
 }
 
 /// Stable per-workspace id: `{slug}-{hex}` derived from the canonical workspace path.
@@ -404,16 +472,249 @@ pub fn workspace_cache_id(workspace_root: &Path) -> Result<(String, PathBuf), Wo
     Ok((format!("{slug}-{suffix}"), canonical))
 }
 
-/// `~/.nca/workspaces/<workspace-id>/`
+/// `$NCA_HOME/workspaces/<workspace-id>/` (or the XDG-resolved product home).
 pub fn workspace_cache_dir(workspace_root: &Path) -> Result<PathBuf, WorkspaceCacheError> {
     let (id, _) = workspace_cache_id(workspace_root)?;
-    let home = nca_home_dir().ok_or(WorkspaceCacheError::NoHomeDir)?;
+    let home = nca_product_home().ok_or(WorkspaceCacheError::NoHomeDir)?;
     Ok(home.join("workspaces").join(id))
 }
 
 /// Cached CLI index JSON for this workspace.
 pub fn workspace_cli_index_path(workspace_root: &Path) -> Result<PathBuf, WorkspaceCacheError> {
     Ok(workspace_cache_dir(workspace_root)?.join("cli-index.json"))
+}
+
+/// Session JSON/JSONL directory under the product home workspace cache.
+pub fn workspace_sessions_dir(workspace_root: &Path) -> Result<PathBuf, WorkspaceCacheError> {
+    Ok(workspace_cache_dir(workspace_root)?.join("sessions"))
+}
+
+/// Per-workspace memory notes path under the product home.
+pub fn workspace_memory_path(workspace_root: &Path) -> Result<PathBuf, WorkspaceCacheError> {
+    Ok(workspace_cache_dir(workspace_root)?.join("memory.json"))
+}
+
+/// Per-workspace last-session pointer under the product home.
+pub fn workspace_last_session_path(workspace_root: &Path) -> Result<PathBuf, WorkspaceCacheError> {
+    Ok(workspace_cache_dir(workspace_root)?.join("last_session"))
+}
+
+/// Resolve where session files live for this config + workspace.
+///
+/// - Absolute `history_dir` is used as-is.
+/// - Default `.nca/sessions` resolves to the product home sessions dir.
+/// - Any other relative path is joined onto the workspace (explicit escape hatch).
+pub fn resolve_sessions_dir(config: &NcaConfig, workspace_root: &Path) -> PathBuf {
+    let configured = &config.session.history_dir;
+    if configured.is_absolute() {
+        return configured.clone();
+    }
+    if configured == Path::new(".nca/sessions") {
+        return workspace_sessions_dir(workspace_root)
+            .unwrap_or_else(|_| workspace_root.join(".nca").join("sessions"));
+    }
+    workspace_root.join(configured)
+}
+
+/// Resolve the last-session pointer path.
+pub fn resolve_last_session_path(config: &NcaConfig, workspace_root: &Path) -> PathBuf {
+    let configured = &config.session.last_session_file;
+    if configured.is_absolute() {
+        return configured.clone();
+    }
+    if configured == Path::new(".nca/.last_session") {
+        return workspace_last_session_path(workspace_root)
+            .unwrap_or_else(|_| workspace_root.join(".nca").join(".last_session"));
+    }
+    workspace_root.join(configured)
+}
+
+/// Resolve the memory notes path.
+pub fn resolve_memory_path(config: &NcaConfig, workspace_root: &Path) -> PathBuf {
+    let configured = &config.memory.file_path;
+    if configured.is_absolute() {
+        return configured.clone();
+    }
+    if configured == Path::new(".nca/memory.json") {
+        return workspace_memory_path(workspace_root)
+            .unwrap_or_else(|_| workspace_root.join(".nca").join("memory.json"));
+    }
+    workspace_root.join(configured)
+}
+
+/// Ensure the product workspace cache exists and write `workspace.json` for reverse lookup.
+pub fn ensure_workspace_cache(workspace_root: &Path) -> Result<PathBuf, WorkspaceCacheError> {
+    let (id, canonical) = workspace_cache_id(workspace_root)?;
+    let home = nca_product_home().ok_or(WorkspaceCacheError::NoHomeDir)?;
+    let dir = home.join("workspaces").join(&id);
+    std::fs::create_dir_all(&dir).map_err(|source| WorkspaceCacheError::Io {
+        action: "create workspace cache",
+        path: dir.clone(),
+        source,
+    })?;
+    let meta_path = dir.join("workspace.json");
+    let meta = serde_json::json!({
+        "id": id,
+        "path": canonical,
+    });
+    if let Ok(raw) = serde_json::to_string_pretty(&meta) {
+        let _ = std::fs::write(&meta_path, raw);
+    }
+    Ok(dir)
+}
+
+/// One-shot non-destructive migration from legacy project `.nca/` and `~/.nca` into the product home.
+///
+/// Returns `true` when any data was copied.
+pub fn migrate_workspace_data_if_needed(
+    workspace_root: &Path,
+) -> Result<bool, WorkspaceCacheError> {
+    let cache = ensure_workspace_cache(workspace_root)?;
+    let mut migrated = false;
+
+    // Global config: legacy homes → product home
+    let legacy_homes: Vec<PathBuf> = [legacy_nca_home_dir(), legacy_aris_product_home()]
+        .into_iter()
+        .flatten()
+        .collect();
+    if let Some(product_cfg) = nca_product_home().map(|h| h.join("config.toml")) {
+        for legacy_home in &legacy_homes {
+            let legacy_cfg = legacy_home.join("config.toml");
+            if !product_cfg.exists() && legacy_cfg.exists() {
+                if let Some(parent) = product_cfg.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if std::fs::copy(&legacy_cfg, &product_cfg).is_ok() {
+                    migrated = true;
+                    tracing::info!(
+                        from = %legacy_cfg.display(),
+                        to = %product_cfg.display(),
+                        "migrated global config to product home"
+                    );
+                    break;
+                }
+            }
+        }
+        // Global skills catalog
+        if let Some(dest) = nca_product_home().map(|h| h.join("skills")) {
+            for legacy_home in &legacy_homes {
+                let legacy_skills = legacy_home.join("skills");
+                if legacy_skills.is_dir()
+                    && !dest.exists()
+                    && copy_dir_recursive(&legacy_skills, &dest).is_ok()
+                {
+                    migrated = true;
+                    break;
+                }
+            }
+        }
+        // Legacy CLI index workspaces → product workspaces (best-effort per id)
+        if let Ok((id, _)) = workspace_cache_id(workspace_root) {
+            let dest_index = cache.join("cli-index.json");
+            for legacy_home in &legacy_homes {
+                let src_index = legacy_home
+                    .join("workspaces")
+                    .join(&id)
+                    .join("cli-index.json");
+                if !dest_index.exists()
+                    && src_index.exists()
+                    && std::fs::copy(&src_index, &dest_index).is_ok()
+                {
+                    migrated = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    let sessions_dest = cache.join("sessions");
+    let sessions_src = workspace_root.join(".nca").join("sessions");
+    let sessions_empty = !sessions_dest.exists()
+        || std::fs::read_dir(&sessions_dest)
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(true);
+    if sessions_empty
+        && sessions_src.is_dir()
+        && copy_dir_recursive(&sessions_src, &sessions_dest).is_ok()
+    {
+        migrated = true;
+        tracing::info!(
+            from = %sessions_src.display(),
+            to = %sessions_dest.display(),
+            "migrated session store to product home"
+        );
+    }
+
+    // Also pull sessions from the early ~/.aris/ncacli prototype if present.
+    if let Some(aris) = legacy_aris_product_home()
+        && let Ok((id, _)) = workspace_cache_id(workspace_root)
+    {
+        let aris_sessions = aris.join("workspaces").join(&id).join("sessions");
+        let still_empty = !sessions_dest.exists()
+            || std::fs::read_dir(&sessions_dest)
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(true);
+        if still_empty
+            && aris_sessions.is_dir()
+            && copy_dir_recursive(&aris_sessions, &sessions_dest).is_ok()
+        {
+            migrated = true;
+            tracing::info!(
+                from = %aris_sessions.display(),
+                to = %sessions_dest.display(),
+                "migrated session store from legacy aris product home"
+            );
+        }
+        let memory_dest = cache.join("memory.json");
+        let aris_memory = aris.join("workspaces").join(&id).join("memory.json");
+        if !memory_dest.exists()
+            && aris_memory.is_file()
+            && std::fs::copy(&aris_memory, &memory_dest).is_ok()
+        {
+            migrated = true;
+        }
+        let last_dest = cache.join("last_session");
+        let aris_last = aris.join("workspaces").join(&id).join("last_session");
+        if !last_dest.exists()
+            && aris_last.is_file()
+            && std::fs::copy(&aris_last, &last_dest).is_ok()
+        {
+            migrated = true;
+        }
+    }
+
+    let memory_dest = cache.join("memory.json");
+    let memory_src = workspace_root.join(".nca").join("memory.json");
+    if !memory_dest.exists()
+        && memory_src.is_file()
+        && std::fs::copy(&memory_src, &memory_dest).is_ok()
+    {
+        migrated = true;
+    }
+
+    let last_dest = cache.join("last_session");
+    let last_src = workspace_root.join(".nca").join(".last_session");
+    if !last_dest.exists() && last_src.is_file() && std::fs::copy(&last_src, &last_dest).is_ok() {
+        migrated = true;
+    }
+
+    Ok(migrated)
+}
+
+fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let from = entry.path();
+        let to = dest.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else if ty.is_file() {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 
 fn workspace_dir_slug(path: &Path) -> String {
@@ -456,6 +757,12 @@ pub enum WorkspaceCacheError {
     NoHomeDir,
     #[error("failed to canonicalize workspace path {path}: {source}")]
     Canonicalize {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to {action} {path}: {source}")]
+    Io {
+        action: &'static str,
         path: PathBuf,
         source: std::io::Error,
     },
@@ -1174,6 +1481,36 @@ pub struct ContextConfig {
     /// Enable automatic context summarization.
     #[serde(default = "default_true")]
     pub enable_auto_summarize: bool,
+    /// Opt-in deterministic provider-request compaction.
+    /// `off` (default) sends canonical history unchanged.
+    /// `dry_run` computes savings diagnostics but still sends the full history.
+    /// `on` sends a compact cloned view while persisting canonical history.
+    #[serde(default)]
+    pub smart_compaction_mode: SmartCompactionMode,
+}
+
+/// Provider-request smart compaction mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SmartCompactionMode {
+    #[default]
+    Off,
+    DryRun,
+    On,
+}
+
+impl SmartCompactionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::DryRun => "dry_run",
+            Self::On => "on",
+        }
+    }
+
+    pub fn is_enabled(self) -> bool {
+        !matches!(self, Self::Off)
+    }
 }
 
 impl Default for ContextConfig {
@@ -1185,6 +1522,7 @@ impl Default for ContextConfig {
             max_retained_messages: default_max_retained_messages(),
             auto_summarize_threshold: default_summarize_threshold(),
             enable_auto_summarize: default_true(),
+            smart_compaction_mode: SmartCompactionMode::Off,
         }
     }
 }
@@ -1348,6 +1686,9 @@ impl ContextConfig {
         }
         if let Some(query_provider_models_api) = partial.query_provider_models_api {
             self.query_provider_models_api = query_provider_models_api;
+        }
+        if let Some(smart_compaction_mode) = partial.smart_compaction_mode {
+            self.smart_compaction_mode = smart_compaction_mode;
         }
     }
 }
@@ -1544,6 +1885,7 @@ struct PartialContextConfig {
     max_retained_messages: Option<usize>,
     auto_summarize_threshold: Option<u8>,
     enable_auto_summarize: Option<bool>,
+    smart_compaction_mode: Option<SmartCompactionMode>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -1600,10 +1942,17 @@ fn resolve_api_key_value(inline: &Option<String>, env_name: &str) -> Option<Stri
 }
 
 fn default_skill_directories() -> Vec<PathBuf> {
-    vec![
+    let mut dirs = vec![
         PathBuf::from(".nca/skills"),
         PathBuf::from(".claude/skills"),
-    ]
+    ];
+    if let Some(product) = nca_product_home() {
+        dirs.push(product.join("skills"));
+    }
+    if let Some(legacy) = legacy_nca_home_dir() {
+        dirs.push(legacy.join("skills"));
+    }
+    dirs
 }
 
 #[cfg(test)]
@@ -1700,10 +2049,13 @@ mod tests {
 
     struct EnvGuard {
         previous: Vec<(String, Option<String>)>,
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl EnvGuard {
         fn set(vars: &[(&str, Option<&str>)]) -> Self {
+            static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let mut previous = Vec::new();
             for (key, value) in vars {
                 previous.push((key.to_string(), env::var(key).ok()));
@@ -1712,7 +2064,10 @@ mod tests {
                     None => unsafe { env::remove_var(key) },
                 }
             }
-            Self { previous }
+            Self {
+                previous,
+                _lock: lock,
+            }
         }
     }
 
@@ -1736,6 +2091,82 @@ mod tests {
         assert_eq!(p1, p2);
         assert!(id1.contains('-'));
         assert!(id1.len() > 16);
+    }
+
+    #[test]
+    fn product_home_respects_xdg_data_home() {
+        let xdg = tempfile::tempdir().expect("xdg");
+        let _guard = EnvGuard::set(&[
+            ("NCA_HOME", None),
+            ("XDG_DATA_HOME", Some(xdg.path().to_str().unwrap())),
+        ]);
+        let product = nca_product_home().expect("product home");
+        assert_eq!(product, xdg.path().join("ncacli"));
+    }
+
+    #[test]
+    fn product_home_defaults_to_xdg_local_share() {
+        let home = tempfile::tempdir().expect("home");
+        let _guard = EnvGuard::set(&[
+            ("HOME", Some(home.path().to_str().unwrap())),
+            ("NCA_HOME", None),
+            ("XDG_DATA_HOME", None),
+        ]);
+        let product = nca_product_home().expect("product home");
+        assert_eq!(product, home.path().join(".local/share/ncacli"));
+    }
+
+    #[test]
+    fn product_home_and_session_paths_use_nca_home() {
+        let home = tempfile::tempdir().expect("home");
+        let ws = tempfile::tempdir().expect("ws");
+        let _guard = EnvGuard::set(&[("NCA_HOME", Some(home.path().to_str().unwrap()))]);
+        let product = nca_product_home().expect("product home");
+        assert_eq!(product, home.path());
+
+        let config = NcaConfig::default();
+        let sessions = resolve_sessions_dir(&config, ws.path());
+        assert!(sessions.starts_with(home.path().join("workspaces")));
+        assert!(sessions.ends_with("sessions"));
+
+        let memory = resolve_memory_path(&config, ws.path());
+        assert!(memory.ends_with("memory.json"));
+
+        let last = resolve_last_session_path(&config, ws.path());
+        assert!(last.ends_with("last_session"));
+    }
+
+    #[test]
+    fn explicit_relative_history_dir_stays_workspace_local() {
+        let home = tempfile::tempdir().expect("home");
+        let ws = tempfile::tempdir().expect("ws");
+        let _guard = EnvGuard::set(&[("NCA_HOME", Some(home.path().to_str().unwrap()))]);
+        let mut config = NcaConfig::default();
+        config.session.history_dir = PathBuf::from("custom-sessions");
+        let sessions = resolve_sessions_dir(&config, ws.path());
+        assert_eq!(sessions, ws.path().join("custom-sessions"));
+    }
+
+    #[test]
+    fn migrate_copies_legacy_project_sessions() {
+        let home = tempfile::tempdir().expect("home");
+        let ws = tempfile::tempdir().expect("ws");
+        let _guard = EnvGuard::set(&[("NCA_HOME", Some(home.path().to_str().unwrap()))]);
+
+        let legacy = ws.path().join(".nca/sessions");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("s1.json"), "{}").unwrap();
+        std::fs::write(ws.path().join(".nca/.last_session"), "s1").unwrap();
+        std::fs::write(ws.path().join(".nca/memory.json"), "{\"notes\":[]}").unwrap();
+
+        let migrated = migrate_workspace_data_if_needed(ws.path()).expect("migrate");
+        assert!(migrated);
+        let dest = resolve_sessions_dir(&NcaConfig::default(), ws.path());
+        assert!(dest.join("s1.json").exists());
+        assert!(resolve_last_session_path(&NcaConfig::default(), ws.path()).exists());
+        assert!(resolve_memory_path(&NcaConfig::default(), ws.path()).exists());
+        // Legacy left in place
+        assert!(legacy.join("s1.json").exists());
     }
 
     #[test]

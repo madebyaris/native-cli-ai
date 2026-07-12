@@ -54,6 +54,9 @@ pub struct SessionState {
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub estimated_cost_usd: f64,
+    /// Current session todo list (authoritative snapshot; also event-sourced).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub todos: Vec<crate::todo::AgentTodo>,
 }
 
 /// Lightweight session summary for machine-readable orchestration surfaces.
@@ -88,6 +91,8 @@ pub struct SessionSnapshot {
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub estimated_cost_usd: f64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub todos: Vec<crate::todo::AgentTodo>,
 }
 
 /// Optional metadata injected by an external orchestrator for headless runs.
@@ -132,6 +137,7 @@ impl SessionState {
             total_input_tokens: self.total_input_tokens,
             total_output_tokens: self.total_output_tokens,
             estimated_cost_usd: self.estimated_cost_usd,
+            todos: self.todos.clone(),
         }
     }
 }
@@ -194,7 +200,11 @@ pub enum SessionStatus {
 #[cfg(test)]
 mod tests {
     use super::OrchestrationContext;
+    use super::{SessionMeta, SessionState, SessionStatus};
+    use crate::todo::{AgentTodo, TodoStatus};
+    use chrono::Utc;
     use std::env;
+    use std::path::PathBuf;
 
     #[test]
     fn orchestration_context_reads_env_contract() {
@@ -230,5 +240,66 @@ mod tests {
         for (key, _) in vars {
             unsafe { env::remove_var(key) };
         }
+    }
+
+    #[test]
+    fn old_session_json_loads_with_empty_todos() {
+        let raw = r#"{
+            "meta": {
+                "id": "s1",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "workspace": "/tmp",
+                "model": "m",
+                "status": "running"
+            },
+            "messages": [],
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "estimated_cost_usd": 0.0
+        }"#;
+        let state: SessionState = serde_json::from_str(raw).expect("deserialize");
+        assert!(state.todos.is_empty());
+        assert!(state.snapshot().todos.is_empty());
+    }
+
+    #[test]
+    fn session_todos_roundtrip() {
+        let now = Utc::now();
+        let state = SessionState {
+            meta: SessionMeta {
+                id: "s1".into(),
+                created_at: now,
+                updated_at: now,
+                workspace: PathBuf::from("/tmp"),
+                model: "m".into(),
+                status: SessionStatus::Running,
+                pid: None,
+                socket_path: None,
+                worktree_path: None,
+                branch: None,
+                base_branch: None,
+                parent_session_id: None,
+                child_session_ids: Vec::new(),
+                inherited_summary: None,
+                spawn_reason: None,
+                session_summary: None,
+                orchestration: None,
+            },
+            messages: Vec::new(),
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            estimated_cost_usd: 0.0,
+            todos: vec![AgentTodo {
+                id: "1".into(),
+                content: "Ship it".into(),
+                status: TodoStatus::InProgress,
+                source: None,
+            }],
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let back: SessionState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.todos.len(), 1);
+        assert_eq!(back.snapshot().todos[0].content, "Ship it");
     }
 }

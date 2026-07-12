@@ -105,18 +105,18 @@ The terminal app (`nca`) is the primary interface. Session state and optional `N
 
 ```mermaid
 flowchart LR
-  Cli[nca CLI] --> Config["~/.nca/config.toml"]
+  Cli[nca CLI] --> Config["~/.local/share/ncacli/config.toml"]
   Cli --> RuntimeService[Supervisor]
   RuntimeService --> AgentRuns[AgentLoop]
   RuntimeService --> EventStore["EventEnvelope logs"]
-  RuntimeService --> SessionFiles[".nca/sessions"]
+  RuntimeService --> SessionFiles["~/.local/share/ncacli/workspaces/.../sessions"]
   RuntimeService --> WorktreeManager
 ```
 
 ### Key modules
 
-- **`runtime::supervisor`**: Session lifecycle manager used by the CLI (`nca serve`, attach, spawn, etc.).
-- **`runtime::session_store`**: Persist and load session JSON under `<workspace>/.nca/sessions/`.
+- **`runtime::supervisor`**: Session lifecycle manager used by the CLI (`nca serve`, attach, spawn, etc.). Builds a `HarnessSnapshot` and refreshes the system prompt on create/resume/config and each turn.
+- **`runtime::session_store`**: Persist and load session JSON under `~/.local/share/ncacli/workspaces/<id>/sessions/`.
 - **`runtime::worktree`**: Isolated git worktree creation, cleanup, and merge per agent run.
 - **`runtime::bash_tool`**: PTY-backed bash execution, registered by the supervisor.
 
@@ -127,15 +127,19 @@ flowchart LR
 The central execution model is a **tool-use loop** driven by `core::agent::AgentLoop`.
 
 The current default provider path is `MiniMaxProvider`, selected by `core::provider::factory`
-from `common::config::NcaConfig`. The CLI resolves configuration from defaults, `~/.nca/config.toml`,
-`.nca/config.local.toml`, and environment variables such as `MINIMAX_API_KEY`.
+from `common::config::NcaConfig`. The CLI resolves configuration from defaults, `~/.local/share/ncacli/config.toml`
+(with legacy `~/.nca/config.toml` read fallback), `.nca/config.local.toml`, and environment variables such as `MINIMAX_API_KEY`.
 
-The system prompt is layered by `core::harness::build_system_prompt`:
+The system prompt is layered by `core::harness::build_system_prompt` from a runtime-built `HarnessSnapshot`:
 
-1. built-in harness prompt
-2. project instructions from `.ncarc`
-3. local instructions from `.nca/instructions.md`
-4. optional orchestration metadata from `NCA_ORCH_*`
+1. built-in identity + permission mode
+2. **Environment** (cwd, git branch, model, permission mode, agent profile)
+3. **Todos** (capped session todo list)
+4. **Memory** (newest notes from the home workspace cache)
+5. `AGENTS.md` / project (`.ncarc`) / local instructions
+6. skills catalog
+7. optional orchestration metadata from `NCA_ORCH_*`
+8. tool playbook (prefer `replace_match` → `edit_file` → `apply_patch` → `write_file`)
 
 ```mermaid
 sequenceDiagram
@@ -324,7 +328,7 @@ This trait allows swapping tmux for zellij or a built-in multiplexer later.
 
 ### Persistence
 
-Sessions are stored as JSON files in `.nca/sessions/<session-id>.json`:
+Sessions are stored as JSON files under `~/.local/share/ncacli/workspaces/<workspace-id>/sessions/<session-id>.json`:
 
 ```json
 {
@@ -340,10 +344,11 @@ Sessions are stored as JSON files in `.nca/sessions/<session-id>.json`:
 }
 ```
 
-Persistence is workspace-local:
+Persistence is per-workspace under the product home:
 
-- `<workspace>/.nca/sessions/*.json` stores session snapshots and conversation state.
-- `<workspace>/.nca/sessions/*.events.jsonl` stores append-only event streams for replay and live attach.
+- `~/.local/share/ncacli/workspaces/<id>/sessions/*.json` stores session snapshots and conversation state.
+- `~/.local/share/ncacli/workspaces/<id>/sessions/*.events.jsonl` stores append-only event streams for replay and live attach.
+- Git worktrees remain under `<repo>/.nca/worktrees/` (repo-coupled).
 
 ### Lifecycle
 
@@ -380,7 +385,7 @@ workspace_root/
 
 - **Inside workspace**: Read and write allowed by default.
 - **Outside workspace**: Read only if explicitly allowed in config. Write always denied.
-- **Home directory config**: `~/.nca/config.toml` for global defaults.
+- **Home directory config**: product home config (`$NCA_HOME`, `$XDG_DATA_HOME/ncacli`, or `~/.local/share/ncacli/config.toml`) for global defaults.
 
 ### Threat Model
 
@@ -399,9 +404,9 @@ workspace_root/
 Config values are resolved with later sources overriding earlier ones:
 
 1. Compiled defaults
-2. `~/.nca/config.toml` (global)
+2. `~/.local/share/ncacli/config.toml` (global; legacy `~/.nca/config.toml` read fallback)
 3. `.nca/config.local.toml` (workspace, gitignored)
-4. Environment variables (`NCA_API_KEY`, `NCA_MODEL`, etc.)
+4. Environment variables (`NCA_API_KEY`, `NCA_MODEL`, `NCA_HOME`, etc.)
 5. CLI flags (`--model`, `--safe`, `--verbose`)
 
 ---

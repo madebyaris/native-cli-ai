@@ -20,12 +20,14 @@ pub mod search;
 pub mod skill_hints;
 pub mod spawn_subagent;
 pub mod types;
+pub mod update_todos;
 pub mod web_search;
 pub mod write_file;
 
 pub use ask_question::AskQuestionTool;
 pub use invoke_skill::InvokeSkillTool;
 pub use skill_hints::RecentSkillHints;
+pub use update_todos::{TodoStore, UpdateTodosTool, validate_todos};
 
 use nca_common::config::WebConfig;
 use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};

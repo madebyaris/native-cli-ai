@@ -36,15 +36,20 @@ pub fn frame_for_state(state: BusyState, elapsed_ms: u128) -> &'static str {
     frames[frame_idx]
 }
 
-/// Build the busy indicator span with animation.
+/// Build the busy indicator span with animation and elapsed wait time.
 pub fn render_indicator(state: BusyState, state_since: Instant) -> String {
     let elapsed_ms = state_since.elapsed().as_millis();
+    let secs = state_since.elapsed().as_secs();
     let frame = frame_for_state(state, elapsed_ms);
     let label = state.label();
 
     match state {
         BusyState::Idle => format!(" ○ {label} "),
-        _ => format!(" {frame} {label} "),
+        BusyState::Error => format!(" ✗ {label} "),
+        BusyState::Thinking => format!(" {frame} {label} {secs}s "),
+        BusyState::Streaming => format!(" {frame} {label} {secs}s "),
+        BusyState::ToolRunning => format!(" {frame} {label} {secs}s "),
+        BusyState::ApprovalPending => format!(" {frame} {label} {secs}s "),
     }
 }
 
@@ -95,6 +100,7 @@ mod tests {
     fn render_indicator_thinking() {
         let ind = render_indicator(BusyState::Thinking, Instant::now());
         assert!(ind.contains("thinking"));
+        assert!(ind.contains("s"));
         // Should contain one of the thinking frames
         assert!(ind.contains("◐") || ind.contains("◓") || ind.contains("◑") || ind.contains("◒"));
     }

@@ -14,6 +14,7 @@ nca-autoresearch = { workspace = true }
 nca-common = { workspace = true }
 nca-core = { workspace = true }
 nca-runtime = { workspace = true }
+nca-tui = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
@@ -23,18 +24,11 @@ tracing-subscriber = { workspace = true }
 cli-prompts = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
-ratatui = "0.30"
-crossterm = "0.29"
 futures = "0.3"
-reedline = "0.38"
-syntect = "5"
-pulldown-cmark = "0.12"
 colored = "3"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["clock"] }
 similar = "2"
-arboard = "3"
-image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 nca-runtime = { workspace = true }
