@@ -9,6 +9,16 @@
 
 ## Installation
 
+### One-line install (macOS and Linux)
+
+```bash
+curl -fsSL https://nca-cli.com/install | bash
+```
+
+### GitHub Releases
+
+Pre-built binaries ship for Linux, macOS, and Windows (x86_64 and ARM64). Grab the matching archive from [Releases](https://github.com/madebyaris/native-cli-ai/releases).
+
 ### Build from Source
 
 ```bash
@@ -18,7 +28,7 @@ cd native-cli-ai
 # Build optimized release binary
 cargo build --release
 
-# Install to your PATH
+# Install to your PATH (Unix)
 cp target/release/nca /usr/local/bin/
 ```
 
@@ -51,10 +61,12 @@ export OPENROUTER_API_KEY="your-key-here"
 To persist the key, add it to your shell profile (`~/.zshrc`, `~/.bashrc`) or store it in the config file:
 
 ```toml
-# ~/.nca/config.toml
+# ~/.local/share/ncacli/config.toml  (or $NCA_HOME/config.toml)
 [provider.minimax]
 api_key = "your-key-here"
 ```
+
+Legacy `~/.nca/config.toml` is still read if the product-home config is missing.
 
 ### 2. First Run
 

@@ -15,6 +15,21 @@ Force line REPL mode:
 nca --no-tui
 ```
 
+## Live Busy Activity
+
+While the agent is working, the TUI keeps progress visible so long model waits do not look stuck:
+
+| Busy state | What you see |
+|------------|--------------|
+| **thinking** | Animated spinner + elapsed seconds (`thinking 12s`) and a transcript footer like `waiting for model · 12s` |
+| **streaming** | Stream progress with character count |
+| **tool** | Tool name plus a one-liner (file path for `write_file` / `edit_file`, command for `execute_bash`) |
+| **approval** | Waiting for y/n or Ctrl+Y / Ctrl+N / Ctrl+U |
+
+Empty provider responses that are still retrying stay in **thinking** (soft retry), instead of flipping the status bar to a hard error mid-turn. The sidebar `status` field mirrors the same busy label.
+
+---
+
 ## Input Modes
 
 ### Regular Text

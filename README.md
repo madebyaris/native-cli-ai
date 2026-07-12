@@ -5,11 +5,13 @@
 </p>
 
 <p align="center">
-  <strong>Rust-native coding agent. Single binary. Terminal-first.</strong>
+  <strong>Rust-native coding agent. Single binary. Terminal-first.</strong><br />
+  <sub>v0.4 — dedicated TUI crate, unified product home, live busy activity</sub>
 </p>
 
 <p align="center">
   <a href="#installation">Install</a> &middot;
+  <a href="#whats-new-in-04">What's New</a> &middot;
   <a href="#quick-start">Quick Start</a> &middot;
   <a href="#core-commands">Commands</a> &middot;
   <a href="#interactive-ux">Interactive UX</a> &middot;
@@ -24,6 +26,15 @@
 It is meant for people who like their AI tooling close to the terminal: fast to start, easy to script, and capable of running real session workflows without dragging in a browser shell.
 
 The product surface is the CLI. No desktop wrapper, no Electron, no browser in the default path.
+
+## What's New in 0.4
+
+- **Dedicated `nca-tui` crate** — full-screen transcript, overlays, sidebar, and REPL live in their own crate; `nca-cli` stays the thin entrypoint.
+- **Unified product home** — sessions, memory, and CLI index land under `$NCA_HOME` / `$XDG_DATA_HOME/ncacli` / `~/.local/share/ncacli` (legacy `~/.nca` still migrates).
+- **Live busy activity** — status bar and transcript footer show thinking / streaming / tool path with elapsed time so long model waits never look stuck.
+- **Soft provider retries** — empty-response retries stay in thinking state instead of flipping to a red error mid-turn.
+- **Tool path previews** — in-flight `write_file` / `edit_file` / bash calls show the path or command one-liner.
+- **Multi-OS releases** — GitHub Releases build Linux, macOS, and Windows (x86_64 + ARM where available).
 
 ## What It Does
 
@@ -69,15 +80,19 @@ curl -fsSL https://nca-cli.com/install | bash
 
 This detects your platform, downloads the latest release from GitHub, and installs `nca` to `/usr/local/bin`. Set `NCA_INSTALL_DIR` to change the install path.
 
+Windows: download the matching `.zip` from [Releases](https://github.com/madebyaris/native-cli-ai/releases) and put `nca.exe` on your `PATH`.
+
 ### GitHub Releases
 
 Pre-built binaries for every release are available on the [Releases](https://github.com/madebyaris/native-cli-ai/releases) page:
 
-| Platform | Target |
-|---|---|
-| macOS (Apple Silicon) | `aarch64-apple-darwin` |
-| macOS (Intel) | `x86_64-apple-darwin` |
-| Linux (x86_64) | `x86_64-unknown-linux-gnu` |
+| Platform | Target | Archive |
+|---|---|---|
+| macOS (Apple Silicon) | `aarch64-apple-darwin` | `.tar.gz` |
+| macOS (Intel) | `x86_64-apple-darwin` | `.tar.gz` |
+| Linux (x86_64) | `x86_64-unknown-linux-gnu` | `.tar.gz` |
+| Linux (ARM64) | `aarch64-unknown-linux-gnu` | `.tar.gz` |
+| Windows (x86_64) | `x86_64-pc-windows-msvc` | `.zip` |
 
 ### Build from source
 
@@ -208,6 +223,8 @@ Slash commands, the Ctrl+P command palette, autocomplete, and `/help` all come f
 | `@ <path>` | File mention with fuzzy completion (indexes in the background on open). |
 
 Click the branch chip in the status line to open the branch picker (list/switch/create via background git).
+
+While the agent is working, the status bar shows an animated busy state with elapsed seconds (`thinking 12s`, `tool 3s`) and a short detail (model wait, stream size, or file path). The transcript footer mirrors the same live activity so long provider waits do not look frozen.
 
 ![branch picker](docs/images/git-branch.png)
 

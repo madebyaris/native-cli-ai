@@ -262,7 +262,7 @@ Environment variables override config file values.
 ### Minimal Setup
 
 ```toml
-# ~/.nca/config.toml
+# ~/.local/share/ncacli/config.toml
 [provider]
 default = "minimax"
 
@@ -273,7 +273,7 @@ api_key = "your-key-here"
 ### Multi-Provider Setup
 
 ```toml
-# ~/.nca/config.toml
+# ~/.local/share/ncacli/config.toml
 [provider]
 default = "minimax"
 

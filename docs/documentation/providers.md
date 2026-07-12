@@ -25,7 +25,7 @@ export MINIMAX_API_KEY="your-minimax-api-key"
 Or in config:
 
 ```toml
-# ~/.nca/config.toml
+# ~/.local/share/ncacli/config.toml
 [provider]
 default = "minimax"
 
