@@ -412,7 +412,8 @@ pub fn global_config_path_for_save() -> Option<PathBuf> {
 /// Resolution order:
 /// 1. `$NCA_HOME` (explicit override)
 /// 2. `$XDG_DATA_HOME/ncacli` when `XDG_DATA_HOME` is set
-/// 3. `$HOME/.local/share/ncacli` (XDG Base Directory default)
+/// 3. The platform user home (`$HOME`, or `%USERPROFILE%` on Windows)
+///    under `.local/share/ncacli`
 pub fn nca_product_home() -> Option<PathBuf> {
     if let Ok(override_home) = env::var("NCA_HOME") {
         let trimmed = override_home.trim();
@@ -426,22 +427,39 @@ pub fn nca_product_home() -> Option<PathBuf> {
             return Some(PathBuf::from(trimmed).join("ncacli"));
         }
     }
-    env::var_os("HOME").map(|home| {
-        PathBuf::from(home)
-            .join(".local")
-            .join("share")
-            .join("ncacli")
-    })
+    user_home_dir().map(|home| home.join(".local").join("share").join("ncacli"))
+}
+
+/// Resolve the current user's home directory on Unix and Windows.
+pub fn user_home_dir() -> Option<PathBuf> {
+    if let Some(home) = env::var_os("HOME")
+        && !home.is_empty()
+    {
+        return Some(PathBuf::from(home));
+    }
+    #[cfg(windows)]
+    if let Some(home) = env::var_os("USERPROFILE")
+        && !home.is_empty()
+    {
+        return Some(PathBuf::from(home));
+    }
+    #[cfg(windows)]
+    if let (Some(drive), Some(path)) = (env::var_os("HOMEDRIVE"), env::var_os("HOMEPATH")) {
+        let mut home = PathBuf::from(drive);
+        home.push(path);
+        return Some(home);
+    }
+    None
 }
 
 /// Legacy `$HOME/.nca` directory (pre-unification).
 pub fn legacy_nca_home_dir() -> Option<PathBuf> {
-    env::var_os("HOME").map(|home| PathBuf::from(home).join(".nca"))
+    user_home_dir().map(|home| home.join(".nca"))
 }
 
 /// Accidental personal path from an early unification prototype (`~/.aris/ncacli`).
 fn legacy_aris_product_home() -> Option<PathBuf> {
-    env::var_os("HOME").map(|home| PathBuf::from(home).join(".aris").join("ncacli"))
+    user_home_dir().map(|home| home.join(".aris").join("ncacli"))
 }
 
 /// Prefer product home; fall back to legacy `~/.nca` when the product root does not exist yet.

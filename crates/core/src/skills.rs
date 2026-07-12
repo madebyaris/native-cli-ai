@@ -1,6 +1,5 @@
-use nca_common::config::{PermissionMode, nca_product_home};
+use nca_common::config::{PermissionMode, nca_product_home, user_home_dir};
 use serde::Deserialize;
-use std::env;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -39,8 +38,7 @@ impl SkillCatalog {
         if let Some(product) = nca_product_home() {
             roots.push(product.join("skills"));
         }
-        if let Some(home) = env::var_os("HOME") {
-            let home = PathBuf::from(home);
+        if let Some(home) = user_home_dir() {
             roots.push(home.join(".nca/skills"));
             roots.push(home.join(".claude/skills"));
         }
