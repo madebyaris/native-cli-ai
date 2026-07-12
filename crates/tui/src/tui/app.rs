@@ -120,11 +120,50 @@ fn toolbar_permission_is_bypass(mode: &str) -> bool {
     mode.contains("BypassPermissions")
 }
 
+fn permission_status_span(mode: &str) -> Span<'static> {
+    if toolbar_permission_is_bypass(mode) {
+        Span::styled(
+            " bypass ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(theme::WARN)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if mode.contains("AcceptEdits") || mode == "Default" {
+        Span::styled(
+            " edits ok ",
+            Style::default()
+                .fg(theme::SUCCESS)
+                .add_modifier(Modifier::DIM),
+        )
+    } else if mode.contains("Plan") {
+        Span::styled(
+            " plan ",
+            Style::default()
+                .fg(theme::ASSISTANT)
+                .add_modifier(Modifier::DIM),
+        )
+    } else if mode.contains("DontAsk") {
+        Span::styled(
+            " readonly ",
+            Style::default()
+                .fg(theme::MUTED)
+                .add_modifier(Modifier::DIM),
+        )
+    } else {
+        Span::styled(format!(" {mode} "), Style::default().fg(theme::MUTED))
+    }
+}
+
 fn escape_cancels_active_turn(state: &TuiSessionState) -> bool {
     matches!(
         state.current_busy_state,
-        BusyState::Thinking | BusyState::Streaming | BusyState::ToolRunning
-    )
+        BusyState::Thinking
+            | BusyState::Streaming
+            | BusyState::ToolRunning
+            | BusyState::ApprovalPending
+    ) || state.active_question.is_some()
+        || state.active_approval.is_some()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -519,30 +558,29 @@ pub fn run_blocking(
                     crate::tui::busy_indicator::color_for_state(g.current_busy_state);
                 let busy = Span::styled(indicator_text, Style::default().fg(indicator_color));
                 let approval_hint = if g.active_approval.is_some() {
-                    Span::styled(" !approve ", Style::default().fg(theme::ERROR))
+                    Span::styled(
+                        " approve ",
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(theme::WARN)
+                            .add_modifier(Modifier::BOLD),
+                    )
                 } else {
                     Span::raw("")
                 };
                 let q_hint = if g.active_question.is_some() {
-                    Span::styled(" ?answer ", Style::default().fg(theme::WARN))
-                } else {
-                    Span::raw("")
-                };
-                // Session / tokens / cost live in the sidebar; keep the bar short and obvious about bypass.
-                let perm_span = if toolbar_permission_is_bypass(&g.permission_mode) {
                     Span::styled(
-                        " BYPASS — tools run without approval ",
+                        " answer ",
                         Style::default()
                             .fg(Color::Black)
-                            .bg(theme::ERROR)
+                            .bg(theme::ASSISTANT)
                             .add_modifier(Modifier::BOLD),
                     )
                 } else {
-                    Span::styled(
-                        format!(" perm:{} ", g.permission_mode),
-                        Style::default().fg(theme::MUTED),
-                    )
+                    Span::raw("")
                 };
+                // Session / tokens / cost live in the sidebar; keep the bar short.
+                let perm_span = permission_status_span(&g.permission_mode);
                 let time_span = Span::styled(
                     format!("{:02}:{:02}", elapsed / 60, elapsed % 60),
                     Style::default().fg(theme::MUTED),
@@ -772,11 +810,23 @@ pub fn run_blocking(
                 };
 
                 let input_title = if g.active_approval.is_some() {
-                    " approval "
+                    Span::styled(
+                        " approve ",
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(theme::WARN)
+                            .add_modifier(Modifier::BOLD),
+                    )
                 } else if g.active_question.is_some() {
-                    " answer "
+                    Span::styled(
+                        " answer ",
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(theme::ASSISTANT)
+                            .add_modifier(Modifier::BOLD),
+                    )
                 } else {
-                    " message "
+                    Span::styled(" message ", Style::default().fg(theme::MUTED))
                 };
                 let mut input_lines = vec![input_line];
                 if !g.staged_image_attachments.is_empty() {
@@ -793,8 +843,14 @@ pub fn run_blocking(
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
-                            .border_style(Style::default().fg(theme::BORDER))
-                            .title(Span::styled(input_title, Style::default().fg(theme::MUTED))),
+                            .border_style(Style::default().fg(if g.active_approval.is_some() {
+                                theme::WARN
+                            } else if g.active_question.is_some() {
+                                theme::ASSISTANT
+                            } else {
+                                theme::BORDER
+                            }))
+                            .title(input_title),
                     )
                     .style(Style::default().bg(theme::SURFACE));
 
@@ -2543,6 +2599,7 @@ pub fn run_blocking(
                             if let Some(ref flag) = cancel_flag {
                                 flag.store(true, std::sync::atomic::Ordering::SeqCst);
                             }
+                            g.dismiss_interactive_prompts();
                             g.blocks
                                 .push(DisplayBlock::System("Cancelling current run...".into()));
                             let _ = cmd_tx.try_send(TuiCmd::CancelTurn);
@@ -2558,6 +2615,7 @@ pub fn run_blocking(
                             if let Some(ref flag) = cancel_flag {
                                 flag.store(true, std::sync::atomic::Ordering::SeqCst);
                             }
+                            g.dismiss_interactive_prompts();
                             let _ = cmd_tx.try_send(TuiCmd::CancelTurn);
                         }
                         (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
@@ -3115,6 +3173,43 @@ mod approval_parse_tests {
         assert!(escape_cancels_active_turn(&state));
 
         state.set_busy_state(BusyState::ApprovalPending);
-        assert!(!escape_cancels_active_turn(&state));
+        assert!(escape_cancels_active_turn(&state));
+
+        state.set_busy_state(BusyState::Idle);
+        state.active_question = Some(nca_common::event::InteractiveQuestionPayload {
+            question_id: "q".into(),
+            call_id: "c".into(),
+            prompt: "Pick".into(),
+            options: vec![],
+            allow_custom: true,
+            suggested_answer: "a".into(),
+        });
+        assert!(
+            escape_cancels_active_turn(&state),
+            "stuck question while idle must still be dismissable with Esc"
+        );
+    }
+
+    #[test]
+    fn dismiss_interactive_prompts_clears_question_and_approval() {
+        let mut state = TuiSessionState::new(
+            "session".into(),
+            "model".into(),
+            "@build".into(),
+            "AcceptEdits".into(),
+            PathBuf::from("."),
+        );
+        state.active_question = Some(nca_common::event::InteractiveQuestionPayload {
+            question_id: "q".into(),
+            call_id: "c".into(),
+            prompt: "Pick".into(),
+            options: vec![],
+            allow_custom: true,
+            suggested_answer: "a".into(),
+        });
+        state.open_question_modal();
+        state.dismiss_interactive_prompts();
+        assert!(state.active_question.is_none());
+        assert!(!state.question_modal_open());
     }
 }

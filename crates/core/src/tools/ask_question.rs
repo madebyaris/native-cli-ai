@@ -218,11 +218,7 @@ impl ToolExecutor for AskQuestionTool {
                         call_id: call.id.clone(),
                         success: false,
                         output: String::new(),
-                        error: Some(
-                            "timed out or channel closed waiting for question answer; use IPC \
-                         AnswerQuestion or an interactive terminal"
-                                .into(),
-                        ),
+                        error: Some("question cancelled or timed out waiting for an answer".into()),
                     };
                 }
             };

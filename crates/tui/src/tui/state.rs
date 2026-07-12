@@ -1112,6 +1112,21 @@ impl TuiSessionState {
         lines
     }
 
+    /// Drop live approval/question prompts so cancel returns the composer to normal input.
+    pub fn dismiss_interactive_prompts(&mut self) {
+        let had = self.active_approval.is_some() || self.active_question.is_some();
+        self.active_approval = None;
+        self.active_question = None;
+        self.close_question_modal();
+        if had {
+            self.blocks.push(DisplayBlock::System(
+                "Dismissed pending approval/question (cancelled)".into(),
+            ));
+            self.mark_transcript_dirty();
+            self.mark_dirty();
+        }
+    }
+
     /// Approval/question prompts from replayed history are transcript only.
     /// The live pending channels are not restored on resume, so these must not
     /// keep the input box in approval/answer mode.

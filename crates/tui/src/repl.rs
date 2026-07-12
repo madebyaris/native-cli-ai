@@ -1942,6 +1942,22 @@ impl Repl {
                 }
                 TuiCmd::CancelTurn => {
                     self.runtime.request_cancel();
+                    // Unblock ask_question / approval waiters so the turn can exit.
+                    if let Some(qp) = self.runtime.question_pending()
+                        && let Ok(mut m) = qp.lock()
+                    {
+                        m.clear();
+                    }
+                    if let Some(ref ap) = approval
+                        && let Ok(mut m) = ap.lock()
+                    {
+                        for (_, tx) in m.drain() {
+                            let _ = tx.send(nca_core::approval::ApprovalVerdict::Denied);
+                        }
+                    }
+                    if let Ok(mut g) = tui_state.lock() {
+                        g.dismiss_interactive_prompts();
+                    }
                 }
                 TuiCmd::OpenBranchPicker => {
                     if let Ok(mut g) = tui_state.lock() {

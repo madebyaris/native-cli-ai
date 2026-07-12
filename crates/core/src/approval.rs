@@ -200,7 +200,9 @@ impl ApprovalPolicy {
                     PermissionTier::Denied
                 }
             }
-            PermissionMode::AcceptEdits => {
+            // Default and AcceptEdits: allow reads + file/dir edits; ask for shell
+            // and other non-edit tools; always ask for destructive deletes.
+            PermissionMode::Default | PermissionMode::AcceptEdits => {
                 if destructive {
                     PermissionTier::Ask
                 } else if explicitly_allowed || readonly || file_edit {
@@ -214,13 +216,6 @@ impl ApprovalPolicy {
                     PermissionTier::Allowed
                 } else {
                     PermissionTier::Denied
-                }
-            }
-            PermissionMode::Default => {
-                if explicitly_allowed || readonly {
-                    PermissionTier::Allowed
-                } else {
-                    PermissionTier::Ask
                 }
             }
         }
@@ -467,5 +462,33 @@ mod tests {
                 "ask_question should be allowed in {mode:?}"
             );
         }
+    }
+
+    #[test]
+    fn default_allows_edits_but_asks_for_bash_and_delete() {
+        let policy = ApprovalPolicy::new(PermissionConfig {
+            mode: PermissionMode::Default,
+            ..Default::default()
+        });
+        assert_eq!(
+            policy.check("write_file", r#"{"path":"a.rs"}"#),
+            PermissionTier::Allowed
+        );
+        assert_eq!(
+            policy.check("create_directory", r#"{"path":"site"}"#),
+            PermissionTier::Allowed
+        );
+        assert_eq!(
+            policy.check("edit_file", r#"{"path":"a.rs"}"#),
+            PermissionTier::Allowed
+        );
+        assert_eq!(
+            policy.check("execute_bash", r#"{"command":"pwd"}"#),
+            PermissionTier::Ask
+        );
+        assert_eq!(
+            policy.check("delete_path", r#"{"path":"a.rs"}"#),
+            PermissionTier::Ask
+        );
     }
 }

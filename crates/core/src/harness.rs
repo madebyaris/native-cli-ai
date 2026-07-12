@@ -263,15 +263,14 @@ fn permission_mode_section(mode: PermissionMode) -> Option<String> {
             "Permission Mode: dont-ask\n- Only use automatically allowed tools.\n- If a task needs blocked tools, explain the limitation instead of pretending it succeeded."
                 .into(),
         ),
-        PermissionMode::AcceptEdits => Some(
-            "Permission Mode: accept-edits\n- File edits are allowed automatically.\n- Destructive actions and shell execution may still require caution."
+        PermissionMode::AcceptEdits | PermissionMode::Default => Some(
+            "Permission Mode: accept-edits (default)\n- File and directory create/edit tools are allowed automatically.\n- Shell commands and destructive deletes still require user approval unless explicitly allowed."
                 .into(),
         ),
         PermissionMode::BypassPermissions => Some(
             "Permission Mode: bypass-permissions\n- Tools are broadly available, but still work carefully and verify before claiming success."
                 .into(),
         ),
-        PermissionMode::Default => None,
     }
 }
 

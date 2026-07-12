@@ -443,11 +443,14 @@ pub fn render_approval_block(
         hits,
         Line::from(vec![
             Span::styled(
-                " ? ",
-                Style::default().fg(Color::Black).bg(theme::WARN).bold(),
+                " approve ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(theme::WARN)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!(" approval required: {}", req.tool),
+                format!(" {}", pretty_tool_label(&req.tool)),
                 Style::default()
                     .fg(theme::WARN)
                     .add_modifier(Modifier::BOLD),
@@ -456,11 +459,29 @@ pub fn render_approval_block(
         None,
     );
     push_transcript_line(lines, hits, Line::default(), None);
-    for text_line in wrap_text(&req.description, width) {
+    if !req.description.is_empty()
+        && req.description != format!("Tool `{}` requires approval", req.tool)
+    {
+        for text_line in wrap_text(&req.description, width) {
+            push_transcript_line(
+                lines,
+                hits,
+                Line::from(Span::styled(text_line, Style::default().fg(theme::TEXT))),
+                None,
+            );
+        }
+        push_transcript_line(lines, hits, Line::default(), None);
+    }
+
+    let preview = pretty_approval_input(&req.tool, &req.input);
+    for text_line in wrap_preformatted_line(&preview, width) {
         push_transcript_line(
             lines,
             hits,
-            Line::from(Span::styled(text_line, Style::default().fg(theme::TEXT))),
+            Line::from(Span::styled(
+                format!("  {text_line}"),
+                Style::default().fg(theme::TEXT),
+            )),
             None,
         );
     }
@@ -468,31 +489,62 @@ pub fn render_approval_block(
     push_transcript_line(
         lines,
         hits,
-        Line::from(Span::styled(
-            " Input ",
-            Style::default()
-                .fg(theme::MUTED)
-                .add_modifier(Modifier::BOLD),
-        )),
-        None,
-    );
-    push_wrapped_plain_lines(
-        lines,
-        hits,
-        &req.input,
-        width,
-        Style::default().fg(theme::MUTED),
-    );
-    push_transcript_line(
-        lines,
-        hits,
-        Line::from(Span::styled(
-            " Reply: y/n · Ctrl+Y approve · Ctrl+N deny · Ctrl+U always allow · /approve · /deny",
-            Style::default().fg(theme::MUTED),
-        )),
+        Line::from(vec![
+            Span::styled(
+                " y ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(theme::SUCCESS)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" approve  ", Style::default().fg(theme::MUTED)),
+            Span::styled(
+                " n ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(theme::ERROR)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" deny  ", Style::default().fg(theme::MUTED)),
+            Span::styled(
+                " Ctrl+U ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(theme::ASSISTANT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" always allow", Style::default().fg(theme::MUTED)),
+        ]),
         None,
     );
     push_transcript_line(lines, hits, Line::default(), None);
+}
+
+fn pretty_tool_label(tool: &str) -> String {
+    match tool {
+        "execute_bash" => "run command".into(),
+        "delete_path" => "delete path".into(),
+        other => other.replace('_', " "),
+    }
+}
+
+fn pretty_approval_input(tool: &str, raw: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return raw.trim().to_string();
+    };
+    if tool == "execute_bash"
+        && let Some(cmd) = value.get("command").and_then(|v| v.as_str())
+    {
+        return format!("$ {cmd}");
+    }
+    if let Some(path) = value
+        .get("path")
+        .or_else(|| value.get("file_path"))
+        .and_then(|v| v.as_str())
+    {
+        return path.to_string();
+    }
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| raw.to_string())
 }
 
 /// Parse user approval input (flexible: punctuation, synonyms, `/approve` style).
