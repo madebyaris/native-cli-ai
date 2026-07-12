@@ -1021,6 +1021,9 @@ impl TuiSessionState {
         if self.current_busy_state != state {
             self.current_busy_state = state;
             self.busy_state_since = Instant::now();
+            // Keep the legacy `busy` flag in sync with the detailed state so
+            // sidebar/status consumers don't show "idle" while the model works.
+            self.busy = !matches!(state, BusyState::Idle | BusyState::Error);
             self.mark_dirty();
         }
     }
@@ -1370,14 +1373,30 @@ impl TuiSessionState {
                 self.cost_usd = *estimated_cost_usd;
             }
             AgentEvent::Error { message } => {
-                self.blocks.push(DisplayBlock::ErrorLine(message.clone()));
-                if message.to_ascii_lowercase().contains("run cancelled") {
+                let lower = message.to_ascii_lowercase();
+                let soft_retry =
+                    lower.contains("(retry ") || lower.contains("empty response (retry");
+                self.blocks.push(if soft_retry {
+                    DisplayBlock::System(format!("↻ {message}"))
+                } else {
+                    DisplayBlock::ErrorLine(message.clone())
+                });
+                if lower.contains("run cancelled") {
                     self.set_busy_state(BusyState::Idle);
+                } else if soft_retry {
+                    // Keep the spinner alive while the agent retries the provider.
+                    self.set_busy_state(BusyState::Thinking);
                 } else {
                     self.set_busy_state(BusyState::Error);
                 }
             }
-            AgentEvent::Checkpoint { .. } => {}
+            AgentEvent::Checkpoint { phase, detail, .. } => {
+                if phase == "provider_retry" {
+                    self.blocks
+                        .push(DisplayBlock::System(format!("↻ {detail}")));
+                    self.set_busy_state(BusyState::Thinking);
+                }
+            }
             AgentEvent::ChildSessionSpawned {
                 child_session_id,
                 task,
@@ -1552,9 +1571,51 @@ fn truncate(s: &str, max: usize) -> String {
 
 fn format_tool_input_for_display(tool: &str, value: &Value) -> String {
     if tool == "spawn_subagent" {
-        format_spawn_subagent_input(value)
+        return format_spawn_subagent_input(value);
+    }
+    if let Some(one) = tool_input_one_liner(tool, value) {
+        return one;
+    }
+    format_tool_input(value)
+}
+
+fn tool_input_one_liner(tool: &str, value: &Value) -> Option<String> {
+    let parsed;
+    let obj = if let Some(raw) = value.as_str() {
+        parsed = serde_json::from_str::<Value>(raw).ok()?;
+        &parsed
     } else {
-        format_tool_input(value)
+        value
+    };
+
+    match tool {
+        "write_file" | "edit_file" | "read_file" | "create_directory" | "delete_path"
+        | "list_directory" | "apply_patch" => obj
+            .get("path")
+            .and_then(|p| p.as_str())
+            .map(|p| truncate(p, 96)),
+        "execute_bash" => obj
+            .get("command")
+            .and_then(|c| c.as_str())
+            .map(|c| truncate(c, 96)),
+        "update_todos" => {
+            let n = obj
+                .get("todos")
+                .and_then(|t| t.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            Some(format!("{n} todos"))
+        }
+        "ask_question" => obj
+            .get("prompt")
+            .and_then(|p| p.as_str())
+            .map(|p| truncate(p, 72)),
+        "web_search" | "search" => obj
+            .get("query")
+            .and_then(|q| q.as_str())
+            .or_else(|| obj.get("q").and_then(|q| q.as_str()))
+            .map(|q| truncate(q, 72)),
+        _ => None,
     }
 }
 
@@ -1679,11 +1740,79 @@ mod tests {
         match st.blocks.last() {
             Some(DisplayBlock::ApprovalPending(req)) => {
                 assert_eq!(req.tool, "execute_bash");
-                assert!(req.input.contains("command"));
                 assert!(req.input.contains("ls -la"));
             }
             other => panic!("expected approval block, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn write_file_tool_shows_path_one_liner() {
+        let mut st = TuiSessionState::new(
+            "session-x".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+        );
+        st.apply_event(&AgentEvent::ToolCallStarted {
+            call_id: "call-w".into(),
+            tool: "write_file".into(),
+            input: serde_json::json!({
+                "path": "site/index.html",
+                "content": "<html></html>"
+            }),
+        });
+        assert_eq!(st.current_busy_state, BusyState::ToolRunning);
+        assert!(st.busy);
+        match st.blocks.last() {
+            Some(DisplayBlock::ToolRunning { name, input, .. }) => {
+                assert_eq!(name, "write_file");
+                assert_eq!(input, "site/index.html");
+            }
+            other => panic!("expected tool running, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provider_retry_checkpoint_keeps_thinking() {
+        let mut st = TuiSessionState::new(
+            "session-x".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+        );
+        st.set_busy_state(BusyState::Thinking);
+        st.apply_event(&AgentEvent::Checkpoint {
+            phase: "provider_retry".into(),
+            detail: "Empty response — retry 1/2".into(),
+            turn: 1,
+        });
+        assert_eq!(st.current_busy_state, BusyState::Thinking);
+        assert!(st.busy);
+        match st.blocks.last() {
+            Some(DisplayBlock::System(msg)) => {
+                assert!(msg.contains("Empty response"));
+            }
+            other => panic!("expected system retry line, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn soft_empty_retry_error_stays_thinking() {
+        let mut st = TuiSessionState::new(
+            "session-x".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+        );
+        st.apply_event(&AgentEvent::Error {
+            message: "Provider returned empty response (retry 1/2)".into(),
+        });
+        assert_eq!(st.current_busy_state, BusyState::Thinking);
+        assert!(matches!(st.blocks.last(), Some(DisplayBlock::System(_))));
     }
 
     #[test]

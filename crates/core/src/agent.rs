@@ -274,10 +274,12 @@ impl AgentLoop {
                 if assistant_text.trim().is_empty() {
                     empty_retries += 1;
                     if empty_retries <= MAX_EMPTY_RETRIES && got_usage {
-                        self.emit(AgentEvent::Error {
-                            message: format!(
-                                "Provider returned empty response (retry {empty_retries}/{MAX_EMPTY_RETRIES})"
+                        self.emit(AgentEvent::Checkpoint {
+                            phase: "provider_retry".into(),
+                            detail: format!(
+                                "Empty response — retry {empty_retries}/{MAX_EMPTY_RETRIES}"
                             ),
+                            turn,
                         })
                         .await;
                         continue;

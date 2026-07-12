@@ -24,7 +24,9 @@ use crate::tui::state::{
 };
 use crate::tui::terminal::{restore_terminal, setup_terminal};
 use crate::tui::theme;
-use crate::tui::transcript::{ensure_transcript_cache, parse_approval_verdict, transcript_lines};
+use crate::tui::transcript::{
+    ensure_transcript_cache, live_activity_lines, parse_approval_verdict, transcript_lines,
+};
 use crossterm::{
     cursor::MoveToColumn,
     event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind, poll, read},
@@ -308,7 +310,11 @@ pub fn run_blocking(
                 let inner_w = tr.width.saturating_sub(2);
                 let transcript_lines = {
                     let cache = ensure_transcript_cache(&mut g, inner_w);
-                    cache.lines.clone()
+                    let mut lines = cache.lines.clone();
+                    // Overlay keeps the "still working" footer ticking on busy
+                    // animation frames without invalidating the full cache.
+                    lines.extend(live_activity_lines(&g));
+                    lines
                 };
                 let total = transcript_lines.len();
                 let max_scroll = total.saturating_sub(transcript_h);
@@ -368,10 +374,7 @@ pub fn run_blocking(
                         Line::from(format!("model   {}", g.model)),
                         Line::from(format!("agent   {}", g.agent_profile)),
                         Line::from(format!("mode    {}", g.permission_mode)),
-                        Line::from(format!(
-                            "status  {}",
-                            if g.busy { "busy" } else { "idle" }
-                        )),
+                        Line::from(format!("status  {}", g.current_busy_state.label())),
                         Line::from(format!("blocks  {}", g.blocks.len())),
                         Line::from(format!("lines   {total}")),
                     ];
@@ -557,6 +560,23 @@ pub fn run_blocking(
                 let indicator_color =
                     crate::tui::busy_indicator::color_for_state(g.current_busy_state);
                 let busy = Span::styled(indicator_text, Style::default().fg(indicator_color));
+                let activity_detail = match g.current_busy_state {
+                    BusyState::ToolRunning => g.blocks.iter().rev().find_map(|b| match b {
+                        crate::tui::state::DisplayBlock::ToolRunning { name, input, .. } => {
+                            Some(format!(
+                                "{} ",
+                                crate::tui::transcript::tool_running_summary(name, input)
+                            ))
+                        }
+                        _ => None,
+                    }),
+                    BusyState::Thinking => Some("model… ".into()),
+                    BusyState::Streaming => Some("out… ".into()),
+                    _ => None,
+                };
+                let activity_span = activity_detail
+                    .map(|d| Span::styled(d, Style::default().fg(theme::MUTED)))
+                    .unwrap_or_else(|| Span::raw(""));
                 let approval_hint = if g.active_approval.is_some() {
                     Span::styled(
                         " approve ",
@@ -634,6 +654,7 @@ pub fn run_blocking(
 
                 let mut status_spans = vec![
                     busy,
+                    activity_span,
                     approval_hint,
                     q_hint,
                     Span::raw(" │ "),

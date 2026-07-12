@@ -1,12 +1,13 @@
 ---
 source: crates/tui/tests/transcript_rendering.rs
+assertion_line: 105
 expression: lines_to_plain(&lines)
 ---
  YOU 
 
 Please read src/main.rs and summarize.
 
- ⚡ read_file …
+ ⚡ read_file {"path":"src/main.rs"} …
  ✓ read_file — 42 lines
  nca 
 

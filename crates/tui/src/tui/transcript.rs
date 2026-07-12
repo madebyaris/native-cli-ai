@@ -4,9 +4,10 @@
 //! every TUI frame hits on dirty redraws; see `docs/research/baselines.md`
 //! for `wrap_text` / `parse_md_line` numbers.
 
+use crate::tui::busy_indicator;
 use crate::tui::state::{ApprovalRequest, DisplayBlock, TranscriptCache, TuiSessionState};
 use crate::tui::theme;
-use nca_common::event::QuestionSelection;
+use nca_common::event::{BusyState, QuestionSelection};
 use pulldown_cmark::{Event as MdEvent, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -88,7 +89,8 @@ pub fn transcript_lines_and_hits(
                 }
                 push_transcript_line(&mut lines, &mut hits, Line::default(), None);
             }
-            DisplayBlock::ToolRunning { name, .. } => {
+            DisplayBlock::ToolRunning { name, input, .. } => {
+                let summary = tool_running_summary(name, input);
                 push_transcript_line(
                     &mut lines,
                     &mut hits,
@@ -100,6 +102,7 @@ pub fn transcript_lines_and_hits(
                                 .fg(theme::TOOL)
                                 .add_modifier(Modifier::BOLD),
                         ),
+                        Span::styled(format!("{summary} "), Style::default().fg(theme::TEXT)),
                         Span::styled("…", Style::default().fg(theme::MUTED)),
                     ]),
                     None,
@@ -358,6 +361,65 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
             s.chars().take(max.saturating_sub(1)).collect::<String>()
         )
     }
+}
+
+/// One-line path/command summary for an in-flight tool call.
+pub fn tool_running_summary(name: &str, input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || trimmed == "{}" {
+        return "…".into();
+    }
+    // Prefer the first non-empty line (one-liners from format_tool_input_for_display).
+    let first = trimmed.lines().next().unwrap_or(trimmed).trim();
+    if (name == "write_file" || name == "edit_file" || name == "read_file")
+        && !first.starts_with('{')
+    {
+        return truncate_chars(first, 72);
+    }
+    truncate_chars(first, 72)
+}
+
+/// Live footer lines appended outside the transcript cache so the elapsed
+/// timer keeps ticking on busy animation frames without rebuilding the cache.
+pub fn live_activity_lines(state: &TuiSessionState) -> Vec<Line<'static>> {
+    let secs = state.busy_state_since.elapsed().as_secs();
+    let elapsed_ms = state.busy_state_since.elapsed().as_millis();
+    let frame = busy_indicator::frame_for_state(state.current_busy_state, elapsed_ms);
+    let color = busy_indicator::color_for_state(state.current_busy_state);
+
+    let detail = match state.current_busy_state {
+        BusyState::Thinking => format!("{frame} waiting for model · {secs}s"),
+        BusyState::Streaming => {
+            let n = state
+                .streaming_assistant
+                .as_ref()
+                .map(|s| s.chars().count())
+                .unwrap_or(0);
+            format!("{frame} streaming · {n} chars · {secs}s")
+        }
+        BusyState::ToolRunning => {
+            let summary = state.blocks.iter().rev().find_map(|b| match b {
+                DisplayBlock::ToolRunning { name, input, .. } => {
+                    Some(format!("{name} · {}", tool_running_summary(name, input)))
+                }
+                _ => None,
+            });
+            match summary {
+                Some(s) => format!("{frame} {s} · {secs}s"),
+                None => format!("{frame} running tool · {secs}s"),
+            }
+        }
+        BusyState::ApprovalPending => format!("{frame} waiting for approval · {secs}s"),
+        BusyState::Error | BusyState::Idle => return Vec::new(),
+    };
+
+    vec![
+        Line::default(),
+        Line::from(Span::styled(
+            format!("  {detail}"),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )),
+    ]
 }
 
 pub fn wrap_text(s: &str, width: usize) -> Vec<String> {
