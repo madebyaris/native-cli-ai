@@ -28,6 +28,7 @@ The product surface is the CLI. No desktop wrapper, no Electron, no browser in t
 ## What It Does
 
 - Runs coding tasks in an interactive TUI or a line-oriented REPL.
+- Keeps slash commands, the command palette, and `/help` in sync via one registry (palette Enter runs the command).
 - Supports one-shot runs and detached background sessions.
 - Persists session state and event logs under the current workspace.
 - Exposes machine-readable JSON and NDJSON for automation.
@@ -161,19 +162,48 @@ There is also a hidden `serve` subcommand used for IPC-oriented service sessions
 
 The interactive surface has two modes:
 
-- Full-screen TUI with transcript, composer, approvals, structured questions, slash-command palette, session sidebar, and branch picker.
-- Line-oriented REPL built on `reedline` for scripts, terminals where TUI is not desired, or cases where `--no-tui` is easier.
+- **Full-screen TUI** — transcript (markdown + syntax highlighting), composer, overlays (palette, pickers, connect wizard), approvals, structured questions, session sidebar, and branch chip.
+- **Line-oriented REPL** (`reedline`) — for scripts, non-TTY environments, or `--no-tui`.
 
-Useful interactive behaviors:
+Slash commands, the Ctrl+P command palette, autocomplete, and `/help` all come from one registry, so labels stay in sync. Palette **Enter executes** the command (it does not only pre-fill the composer).
 
-- `! <cmd>` runs a shell command.
-- `@ <query>` searches files (fuzzy file mention completions).
-- `/...` runs slash commands.
-- `Tab` cycles agent profiles such as `build`, `plan`, `review`, `fix`, and `test`.
-- `Ctrl+C` or `/stop` cancels the current running turn.
-- `/auto-answer` accepts the suggested answer for a pending `ask_question`.
+### Slash commands
 
-Small touches in the TUI matter too: branch switching, structured options, session sidebars, model picker, provider configuration, and direct control over long-running turns.
+| Command | Purpose |
+|---|---|
+| `/help` | Show help (generated from the registry). |
+| `/agent` | Choose agent profile (`build`, `plan`, `review`, `fix`, `test`). |
+| `/plan` `/review` `/fix` `/test` | Run a preset turn for that profile. |
+| `/skills` | Browse discovered skills; `/{skill}` runs one. |
+| `/memory` | Show or append memory notes. |
+| `/compact` | Compact session context. |
+| `/model` | Open the model picker (`/models` is an alias). |
+| `/connect` | Connect / switch provider, API key, or custom endpoint (`/provider`, `/apikey`, `/custom` are aliases). |
+| `/status` | Session status and health (`/stats`, `/cost`, `/doctor` are aliases). |
+| `/config` | Config and editor settings (`/settings`, `/set-editor` are aliases). |
+| `/permissions` | Permission mode picker (`/permission-bypass` is an alias). |
+| `/sessions` `/new` `/export` `/attach` `/logs` | Session lifecycle and inspection. |
+| `/image` | Stage clipboard or file images (TUI). |
+| `/editor` | Open the external editor. |
+| `/mcp` `/agents` `/diff` `/thinking` `/stop` `/clear` `/exit` | System and turn controls. |
+| `/auto-answer` | Accept the suggested answer for a pending `ask_question`. |
+
+### Keyboard shortcuts (TUI)
+
+| Binding | Action |
+|---|---|
+| `Ctrl+P` | Open the command palette (fuzzy; Enter runs). |
+| `Ctrl+X` then `m` / `e` / `l` / `n` / `c` / `s` / `a` / `h` / `q` | Leader shortcuts: model, editor, sessions, new, compact, status, agent, help, exit. |
+| `Ctrl+Y` / `Ctrl+N` / `Ctrl+U` | Approve / deny / always-allow a pending tool (wins over an open question modal). |
+| `Tab` | Complete `@` path or `/` command; otherwise cycle agent profile. |
+| `F2` / `Shift+F2` | Cycle recent models. |
+| `Ctrl+V` | Paste clipboard image (off the UI thread). |
+| `Ctrl+L` | Clear the transcript (same idea as `/clear`). |
+| `Esc` / `Ctrl+C` | Cancel the current turn when busy. |
+| `! <cmd>` | Run a shell command. |
+| `@ <path>` | File mention with fuzzy completion (indexes in the background on open). |
+
+Click the branch chip in the status line to open the branch picker (list/switch/create via background git).
 
 ![branch picker](docs/images/git-branch.png)
 
@@ -256,10 +286,10 @@ Typical environment variables:
 
 ### Custom Endpoints
 
-Use `/provider` in the TUI and select **"Add custom provider…"** to configure any OpenAI-compatible or Anthropic-compatible endpoint. Or use the `/custom` slash command:
+Use `/connect` in the TUI (or the command palette) to pick a provider, enter an API key, and optionally add a custom OpenAI-compatible or Anthropic-compatible endpoint. Legacy aliases `/provider`, `/apikey`, and `/custom` still resolve to the same flow.
 
 ```
-/custom openai https://my-endpoint.example sk-key my-model
+/connect
 ```
 
 See [Providers](docs/documentation/providers.md) for full details.
@@ -300,8 +330,11 @@ Recent search/edit improvements are aimed at making agent file work less brittle
 | `crates/common` | Shared config, events, sessions, messages, tool schemas, and orchestration metadata. |
 | `crates/core` | Agent loop, provider abstraction, harness builder, skills, approvals, and tool registry. |
 | `crates/runtime` | Session supervision, IPC, persistence, worktrees, memory store, context management, and subagent execution. |
-| `crates/cli` | `nca` entrypoint, command parsing, stream rendering, REPL, and TUI. |
+| `crates/tui` | Full-screen TUI, line REPL, slash-command registry, overlays, transcript rendering, and session UI state. |
+| `crates/cli` | `nca` binary entrypoint, clap commands, stream rendering, and glue onto `nca-tui` / runtime. |
 | `crates/autoresearch` | Metric-driven autonomous research helpers and experiment runner. |
+
+The shipped app is still a **single binary** (`nca`). The TUI crate owns interactive presentation; the CLI crate owns argument parsing and lifecycle commands.
 
 ## Session Model
 
