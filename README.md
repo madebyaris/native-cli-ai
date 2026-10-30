@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Rust-native coding agent. Single binary. Terminal-first.</strong><br />
-  <sub>v0.5.0 — read-before-edit, resilient provider calls, paged reads</sub>
+  <sub>v0.5.5 — desktop clients over ACP, context that fits, fewer prompts</sub>
 </p>
 
 <p align="center">
@@ -26,6 +26,16 @@
 It is meant for people who like their AI tooling close to the terminal: fast to start, easy to script, and capable of running real session workflows without dragging in a browser shell.
 
 The product surface is the CLI. No desktop wrapper, no Electron, no browser in the default path.
+
+## What's New in 0.5.5
+
+- **Desktop clients over ACP** — `nca acp` serves the [Agent Client Protocol](https://agentclientprotocol.com) on stdin/stdout, so T3 Code, Termul, Zed, and other ACP clients can run nca as a local agent. Streamed replies, tool cards, approvals, plans, modes, a model picker, slash commands, and session list/load/delete with history replay. See [Desktop Clients](docs/documentation/acp.md).
+- **Context that always fits** — every provider request is fitted to the model window. Old groups are evicted oldest first (plain ones before ones that hold constraints, failures, or edits), tool groups stay whole, and the system prompt, the first task, and the whole current turn are kept. Tool-call arguments now count toward the estimate, so sessions that write large files no longer undercount.
+- **Prompts only for dangerous actions** — in the default and accept-edits modes, ordinary shell commands run without asking. nca still asks before deleting, `sudo`, `git push`/`reset --hard`/`clean`, `curl | sh`, killing processes, publishing or global installs, writes to system or dotfile paths, and SQL `DROP`. The prompt names the reason. See [Permissions](docs/documentation/permissions.md).
+- **`show_image`** — the agent can show a picture in the chat. ACP clients get an image block; T3 Code gets a Markdown image.
+- **Provider model picker** — ACP clients list the active provider's own chat models (from its `/v1/models` catalog, cached for a day) instead of every alias.
+- **Clearer output-limit errors** — a tool call cut off by `max_tokens` now says so and tells the model to write in smaller pieces.
+- **Fixes** — a context-shrink loop that could hang, a `0` context window clamping every request to 1,024 tokens, image parts lost when shrinking, "Reject for this session" in ACP asking again, and screenshot `stop` reporting the wrong length.
 
 ## What's New in 0.5.0
 
@@ -175,6 +185,7 @@ The main interface is designed to feel like a serious terminal tool, not a toy o
 | `nca skills` | List discovered skills with their source (`AGENTS.md`, filesystem, or user directory). |
 | `nca mcp` | List configured MCP servers. |
 | `nca completion <shell>` | Generate shell completions. |
+| `nca acp` | Serve the Agent Client Protocol on stdin/stdout for T3 Code, Termul, Zed, and other desktop clients. |
 | `nca index build\|show` | Build or inspect a cached CLI index under `~/.local/share/ncacli/workspaces/<workspace-id>/`. |
 | `nca autoresearch once <program.md>` | Run a metric-driven research program and print parsed output. |
 
@@ -236,6 +247,17 @@ While the agent is working, the status bar shows an animated busy state with ela
 ![branch picker](docs/images/git-branch.png)
 
 ![interactive options](docs/images/option.png)
+
+## Desktop Clients (ACP)
+
+`nca acp` turns the same binary into an [Agent Client Protocol](https://agentclientprotocol.com) server, so desktop agents can drive nca as a local subprocess. No Node.js, no bridge, no second binary:
+
+```
+Command: nca
+Args:    acp
+```
+
+Works with T3 Code, Termul, Zed, and any other ACP v1 client. The client gets streamed replies, tool cards with file locations, approval prompts, a plan from `update_todos`, a model picker, permission modes, session list/load/delete with history replay, slash commands (`/compact`, `/rename`, `/model`, `/mode`), compaction updates, and a context-usage meter. Sessions keep nca's large context window (MiniMax M2.5 resolves to 204,800 tokens), shrink themselves when they approach the limit, and idle sessions are evicted so the process stays small (about 5 MB footprint while streaming). See [Desktop Clients](docs/documentation/acp.md).
 
 ## Output and Automation
 
@@ -303,10 +325,10 @@ context_window_target = 0          # 0 = auto-detect
 max_retained_messages = 50
 auto_summarize_threshold = 75
 enable_auto_summarize = true
-smart_compaction_mode = "off"      # off | dry_run | on
+smart_compaction_mode = "on"       # off | dry_run | on
 ```
 
-Use `dry_run` first to inspect savings under `/status` and in the human stream before enabling `on`.
+The default is `on`: every provider request is fitted to the model window, so a long session shrinks instead of overflowing. Use `dry_run` to inspect savings under `/status`, or `off` to always send the full history.
 
 ## Providers
 
@@ -366,7 +388,7 @@ Two tools let the agent work with Mac apps in the background. Both are macOS-onl
 - **`app_input`** — `list` shows an app's controls through Accessibility, `press` presses a control by its title, `type_text` sends keystrokes to a background app, and `open_url` opens an `http(s)` link in an app without taking focus.
 - **`screen_record`** — `start` records one window for up to `seconds` (1–600, default 60), `stop` ends a recording early, and `screenshot` saves a PNG of one window after an optional delay (0–30 s, default 3).
 
-Both ask for approval by default and are denied in Plan and DontAsk modes. `app_input` needs Accessibility permission and `screen_record` needs Screen Recording permission, both granted to the terminal app. Calculator and Dia are the apps tested so far; other apps are unverified. Parameters are in [Tools](docs/documentation/tools.md).
+Both ask for approval by default (except `app_input` `list`, which only reads an app's UI) and are denied in Plan and DontAsk modes. `app_input` needs Accessibility permission and `screen_record` needs Screen Recording permission, both granted to the terminal app. Calculator and Dia are the apps tested so far; other apps are unverified. Parameters are in [Tools](docs/documentation/tools.md).
 
 ## Crate Layout
 
@@ -376,6 +398,7 @@ Both ask for approval by default and are denied in Plan and DontAsk modes. `app_
 | `crates/core` | Agent loop, provider abstraction, harness builder, skills, approvals, and tool registry. |
 | `crates/runtime` | Session supervision, IPC, persistence, worktrees, memory store, context management, and subagent execution. |
 | `crates/tui` | Full-screen TUI, line REPL, slash-command registry, overlays, transcript rendering, and session UI state. |
+| `crates/acp` | Agent Client Protocol server: JSON-RPC transport, session registry, event translation, and approvals for desktop clients. |
 | `crates/cli` | `nca` binary entrypoint, clap commands, stream rendering, and glue onto `nca-tui` / runtime. |
 | `crates/autoresearch` | Metric-driven autonomous research helpers and experiment runner. |
 
@@ -430,6 +453,7 @@ Full user-facing documentation lives in [`docs/documentation/`](docs/documentati
 | [Permissions](docs/documentation/permissions.md) | Approval system, permission modes, and safe mode |
 | [Skills](docs/documentation/skills.md) | Skill discovery, installation, and authoring |
 | [Advanced](docs/documentation/advanced.md) | Sub-agents, MCP servers, hooks, orchestration, and IPC |
+| [Desktop Clients (ACP)](docs/documentation/acp.md) | Run nca from T3 Code, Termul, Zed, and other ACP clients |
 
 Internal design docs:
 

@@ -90,23 +90,35 @@ pub const MODEL_CONTEXT_LIMITS: &[ModelContextLimits] = &[
         context_window: 204_800,
         max_output_tokens: 131_072,
     },
-    // MiniMax M2.5 (reasoning model)
+    // MiniMax M2.5 (reasoning model) — OpenRouter: context_length 204_800
     ModelContextLimits {
         pattern: "minimax-m2.5",
-        context_window: 100_000,
-        max_output_tokens: 8192,
+        context_window: 204_800,
+        max_output_tokens: 131_072,
+    },
+    // MiniMax M2.1
+    ModelContextLimits {
+        pattern: "minimax-m2.1",
+        context_window: 204_800,
+        max_output_tokens: 131_072,
+    },
+    // MiniMax M2 Her (smaller window; before the generic M2 pattern)
+    ModelContextLimits {
+        pattern: "minimax-m2-her",
+        context_window: 65_536,
+        max_output_tokens: 2_048,
     },
     // MiniMax M2 (not M2.5 / M2.7)
     ModelContextLimits {
         pattern: "minimax-m2",
-        context_window: 32_000,
-        max_output_tokens: 8192,
+        context_window: 204_800,
+        max_output_tokens: 131_072,
     },
     // MiniMax M1
     ModelContextLimits {
         pattern: "minimax-m1",
-        context_window: 32_000,
-        max_output_tokens: 8192,
+        context_window: 1_000_000,
+        max_output_tokens: 40_000,
     },
     // Gemini 1.5 Pro
     ModelContextLimits {
@@ -248,8 +260,12 @@ mod tests {
     fn test_detect_minimax() {
         assert_eq!(detect_context_window("MiniMax-M2.7"), 204_800);
         assert_eq!(detect_context_window("minimax/minimax-m2.7"), 204_800);
-        assert_eq!(detect_context_window("MiniMax-M2.5"), 100_000);
-        assert_eq!(detect_context_window("minimax-m2"), 32_000);
+        assert_eq!(detect_context_window("MiniMax-M2.5"), 204_800);
+        assert_eq!(detect_context_window("minimax/minimax-m2.5"), 204_800);
+        assert_eq!(detect_context_window("minimax-m2.1"), 204_800);
+        assert_eq!(detect_context_window("minimax-m2-her"), 65_536);
+        assert_eq!(detect_context_window("minimax-m2"), 204_800);
+        assert_eq!(detect_context_window("minimax-m1"), 1_000_000);
     }
 
     #[test]

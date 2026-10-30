@@ -1627,7 +1627,7 @@ impl Default for ContextConfig {
             max_retained_messages: default_max_retained_messages(),
             auto_summarize_threshold: default_summarize_threshold(),
             enable_auto_summarize: default_true(),
-            smart_compaction_mode: SmartCompactionMode::Off,
+            smart_compaction_mode: SmartCompactionMode::On,
         }
     }
 }

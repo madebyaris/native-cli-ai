@@ -157,16 +157,16 @@ query_provider_models_api = true       # Fetch model limits from provider API
 max_retained_messages = 50
 auto_summarize_threshold = 75          # Percentage of context window used before summarizing
 enable_auto_summarize = true
-smart_compaction_mode = "off"          # off | dry_run | on (provider-request view only)
+smart_compaction_mode = "on"           # off | dry_run | on (provider-request view only)
 ```
 
-`smart_compaction_mode` is opt-in and defaults to `off`:
+`smart_compaction_mode` defaults to `on`; the canonical history is never modified:
 
 | Mode | Behavior |
 |------|----------|
-| `off` | Send the full canonical history (default). |
+| `off` | Send the full canonical history, except when it exceeds the model window (a hard budget still evicts). |
 | `dry_run` | Compute savings diagnostics and emit `ContextCompaction` with phase `dry_run`, but still send the full history. |
-| `on` | Send a compact cloned provider view; session JSON / `AgentLoop.messages` stay complete. |
+| `on` | Send a compact cloned provider view fitted to `context_window - max_tokens`; session JSON / `AgentLoop.messages` stay complete. |
 
 ### `[hooks]` — Lifecycle Hooks
 

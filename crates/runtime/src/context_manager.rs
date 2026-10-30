@@ -100,8 +100,10 @@ impl ContextManager {
             .as_ref()
             .map(|calls| calls.len() * 50) // ~50 tokens per tool call structure
             .unwrap_or(0);
+        // Arguments (e.g. a whole file passed to `write_file`) are resent on every request.
+        let argument_tokens = message.tool_call_argument_chars() / 4;
 
-        (content_tokens as usize) + tool_call_overhead + 10 // ~10 tokens base overhead
+        (content_tokens as usize) + tool_call_overhead + argument_tokens + 10 // ~10 tokens base overhead
     }
 
     /// Calculate estimated token count for a slice of messages.

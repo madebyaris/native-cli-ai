@@ -8,9 +8,9 @@ Set the permission mode via CLI flag, config file, or interactive command.
 
 | Mode | Description |
 |------|-------------|
-| `default` | Read-only tools auto-allowed; everything else prompts for approval |
+| `default` | Same as `accept-edits`: reads, file edits, and safe shell commands run; dangerous actions prompt |
 | `plan` | Read-only tools only; all writes and execution denied |
-| `accept-edits` | Read-only + file edit tools auto-allowed; shell and destructive ops prompt |
+| `accept-edits` | Reads, file edits, and safe shell commands run without asking; dangerous actions prompt |
 | `dont-ask` | Read-only tools only; no prompts (deny anything that would need asking) |
 | `bypass-permissions` | All tools auto-allowed without prompts |
 
@@ -44,6 +44,7 @@ Tools are classified into categories that determine how each permission mode han
 - `web_search`
 - `fetch_url`
 - `ask_question`
+- `show_image`
 
 ### File-Edit Tools (allowed in `accept-edits` and above)
 
@@ -61,19 +62,36 @@ Tools are classified into categories that determine how each permission mode han
 
 - `delete_path` — always requires explicit approval unless in `bypass-permissions`
 
-### Execution Tools (prompt in `default` and `accept-edits`)
+### Execution Tools (prompt only when dangerous in `default` and `accept-edits`)
 
-- `execute_bash`
-- `run_validation`
+- `execute_bash` — runs without asking unless the command looks dangerous. nca asks when a command:
+  - deletes (`rm`, `rmdir`, `unlink`, `shred`, `find -delete`, `find -exec`)
+  - escalates privileges (`sudo`, `su`, `doas`)
+  - rewrites or publishes git history (`git push`, `reset --hard`, `clean`, `rebase`, `branch -D`, `stash drop`, `checkout --`, `restore --`)
+  - pipes a download into an interpreter (`curl … | sh`)
+  - kills processes or changes the system (`kill`, `pkill`, `shutdown`, `launchctl`, `dd`, `mkfs`, `diskutil`, `chmod -R`, `chown`, `defaults write`)
+  - publishes or installs globally (`npm publish`, `npm -g`, `cargo publish`/`install`, `pip install`, `brew install`, `docker push`, `gh pr merge`, …)
+  - writes into system or home dotfile paths (`> /etc/…`, `>> ~/.zshrc`, `tee /usr/…`)
+  - runs SQL `DROP`/`TRUNCATE`/`DELETE FROM`
+
+  The prompt names the reason, e.g. `Dangerous command (runs `rm`): rm old.txt`.
+- `run_validation` — always allowed; it only runs allowlisted check commands.
+
+### GUI and Capture Tools (macOS)
+
+- `app_input` — `list` (reads an app's UI) is allowed; `press`, `type_text`, and `open_url` prompt.
+- `screen_record` — prompts (recordings and screenshots can show private content).
 
 ## Permission Mode Behavior Matrix
 
 | Tool Category | `default` | `plan` | `accept-edits` | `dont-ask` | `bypass-permissions` |
 |---------------|-----------|--------|-----------------|------------|----------------------|
 | Read-only | Allowed | Allowed | Allowed | Allowed | Allowed |
-| File-edit | **Ask** | Denied | Allowed | Denied | Allowed |
-| Destructive | **Ask** | Denied | **Ask** | Denied | Allowed |
-| Execution | **Ask** | Denied | **Ask** | Denied | Allowed |
+| File-edit | Allowed | Denied | Allowed | Denied | Allowed |
+| Destructive (`delete_path`) | **Ask** | Denied | **Ask** | Denied | Allowed |
+| Safe shell command | Allowed | Denied | Allowed | Denied | Allowed |
+| Dangerous shell command | **Ask** | Denied | **Ask** | Denied | Allowed |
+| GUI control / capture | **Ask** | Denied | **Ask** | Denied | Allowed |
 | MCP tools | **Ask** | Denied | **Ask** | Denied | Allowed |
 
 ## Allow/Deny Lists

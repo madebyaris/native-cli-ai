@@ -85,6 +85,10 @@ pub struct SupervisorConfig {
     pub session_id: Option<String>,
     pub approval_handler: Option<Arc<dyn ApprovalHandler>>,
     pub orchestration_context: Option<OrchestrationContext>,
+    /// Open the per-session Unix socket. Disable for in-process front ends
+    /// (ACP) that already own the transport; it saves a socket file and a
+    /// listener task per session.
+    pub enable_ipc: bool,
 }
 
 /// A handle returned to callers for interacting with a running supervisor.
@@ -129,6 +133,15 @@ impl Supervisor {
     /// Create a new supervised session. This sets up the agent loop, IPC server,
     /// event channels, and persists initial session metadata.
     pub async fn create(cfg: SupervisorConfig) -> Result<Self, ProviderError> {
+        Self::create_inner(cfg, true).await
+    }
+
+    /// Shared constructor. `persist_initial` is false when resuming: the loaded
+    /// state must not be overwritten by the empty startup state.
+    async fn create_inner(
+        cfg: SupervisorConfig,
+        persist_initial: bool,
+    ) -> Result<Self, ProviderError> {
         let workspace_root = cfg
             .workspace_root
             .canonicalize()
@@ -217,12 +230,17 @@ impl Supervisor {
         let session_id = cfg.session_id.unwrap_or_else(generate_session_id);
         let session_store = SessionStore::new(resolve_sessions_dir(&config, &workspace_root));
 
-        let ipc_server = IpcServer::new(&session_id);
-        let socket_path = ipc_server.socket_path();
-        let ipc_handle = ipc_server
-            .start()
-            .await
-            .map_err(|e| ProviderError::Other(e.to_string()))?;
+        let (ipc_handle, socket_path) = if cfg.enable_ipc {
+            let ipc_server = IpcServer::new(&session_id);
+            let socket_path = ipc_server.socket_path();
+            let handle = ipc_server
+                .start()
+                .await
+                .map_err(|e| ProviderError::Other(e.to_string()))?;
+            (Some(handle), Some(socket_path))
+        } else {
+            (None, None)
+        };
 
         let _ = event_tx.try_send(AgentEvent::SessionStarted {
             session_id: session_id.clone(),
@@ -247,9 +265,12 @@ impl Supervisor {
             hook_runner.clone(),
         );
         agent.set_smart_compaction_mode(config.memory.context.smart_compaction_mode);
+        agent.set_reserved_output_tokens(config.model.max_tokens as usize);
 
         let context_manager =
             Self::make_context_manager(&config, &config.model.default_model).await;
+        // Hard-cap the provider request view at the resolved model window.
+        agent.set_request_token_budget(Some(context_manager.config().context_window_target));
 
         let mut sup = Self {
             session_id,
@@ -258,10 +279,10 @@ impl Supervisor {
             created_at,
             status: SessionStatus::Running,
             pid: Some(std::process::id()),
-            socket_path: Some(socket_path),
+            socket_path,
             agent,
             session_store,
-            ipc_handle: Some(ipc_handle),
+            ipc_handle,
             event_rx: Some(event_rx),
             approval_pending,
             question_pending: Some(question_pending),
@@ -283,7 +304,9 @@ impl Supervisor {
             last_summary_at_tokens: 0,
         };
         sup.refresh_system_prompt();
-        sup.save().await.map_err(ProviderError::Other)?;
+        if persist_initial {
+            sup.save().await.map_err(ProviderError::Other)?;
+        }
         sup.update_last_session()
             .await
             .map_err(ProviderError::Other)?;
@@ -302,22 +325,55 @@ impl Supervisor {
         session_id: &str,
         approval_handler: Option<Arc<dyn ApprovalHandler>>,
     ) -> Result<Self, ProviderError> {
-        let mut sup = Self::create(SupervisorConfig {
-            config: config.clone(),
-            workspace_root: workspace_root.to_path_buf(),
+        Self::resume_with_ipc(
+            config,
+            workspace_root,
             safe_mode,
             interactive_approvals,
-            session_id: Some(session_id.into()),
+            session_id,
             approval_handler,
-            orchestration_context: None,
-        })
-        .await?;
+            true,
+        )
+        .await
+    }
 
+    /// [`resume`](Self::resume) with an explicit IPC switch for in-process front ends.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn resume_with_ipc(
+        config: NcaConfig,
+        workspace_root: &Path,
+        safe_mode: bool,
+        interactive_approvals: bool,
+        session_id: &str,
+        approval_handler: Option<Arc<dyn ApprovalHandler>>,
+        enable_ipc: bool,
+    ) -> Result<Self, ProviderError> {
         let store = SessionStore::new(resolve_sessions_dir(&config, workspace_root));
+        // Load first: creating the supervisor with the same id would otherwise
+        // persist an empty session over the history we are about to resume.
         let loaded = store
             .load(session_id)
             .await
             .map_err(|e| ProviderError::Other(e.to_string()))?;
+
+        // Build the provider for the model the session was last using.
+        let mut config = config;
+        config.apply_model_override(&loaded.meta.model);
+
+        let mut sup = Self::create_inner(
+            SupervisorConfig {
+                config: config.clone(),
+                workspace_root: workspace_root.to_path_buf(),
+                safe_mode,
+                interactive_approvals,
+                session_id: Some(session_id.into()),
+                approval_handler,
+                orchestration_context: None,
+                enable_ipc,
+            },
+            false,
+        )
+        .await?;
 
         sup.session_id = loaded.meta.id.clone();
         sup.workspace_root = loaded.meta.workspace.clone();
@@ -342,6 +398,8 @@ impl Supervisor {
             *guard = loaded.todos;
         }
         sup.context_manager = Self::make_context_manager(&sup.config, &sup.model).await;
+        let window = sup.context_manager.config().context_window_target;
+        sup.agent.set_request_token_budget(Some(window));
         sup.refresh_system_prompt();
         Ok(sup)
     }
@@ -417,6 +475,13 @@ impl Supervisor {
     /// Get current context statistics with model info.
     pub fn context_stats(&self) -> ContextStats {
         self.context_manager.stats(&self.agent.messages)
+    }
+
+    /// Force the same summarization the automatic threshold would trigger.
+    /// Used by the ACP `/compact` command and by hosts that expose a manual
+    /// compaction button.
+    pub async fn compact_context(&mut self) -> Result<(), String> {
+        self.perform_auto_summarize().await
     }
 
     async fn make_context_manager(config: &NcaConfig, model: &str) -> ContextManager {
@@ -594,7 +659,13 @@ impl Supervisor {
             }
         }
 
-        Ok(summary.trim().to_string())
+        let summary = summary.trim().to_string();
+        if summary.is_empty() {
+            // Never replace real history with nothing. The caller falls back to
+            // the sliding window, which keeps the most recent messages.
+            return Err("provider returned an empty summary".to_string());
+        }
+        Ok(summary)
     }
 
     pub async fn finish(&mut self, reason: EndReason) {
@@ -819,12 +890,16 @@ impl Supervisor {
         self.config = config;
         self.model = self.config.provider.active_model().to_string();
         let mode = self.config.memory.context.smart_compaction_mode;
+        let reserved_output = self.config.model.max_tokens as usize;
         let m = self.model.clone();
         let agent = self.agent_mut();
         agent.model = m;
         agent.set_smart_compaction_mode(mode);
+        agent.set_reserved_output_tokens(reserved_output);
         agent.replace_provider(provider);
         self.rebuild_context_manager_sync();
+        let window = self.context_manager.config().context_window_target;
+        self.agent_mut().set_request_token_budget(Some(window));
         self.refresh_system_prompt();
         Ok(())
     }
@@ -835,7 +910,10 @@ impl Supervisor {
         let window = if ctx.context_window_target > 0 {
             ctx.context_window_target
         } else {
-            128_000
+            // Match `make_context_manager`: the model table, not a fixed 128k,
+            // so a 1M-token model is not silently capped and a 32k model is
+            // not silently overflowed.
+            crate::model_limits::detect_context_window(&self.model)
         };
         let context_config = ContextManagerConfig {
             context_window_target: window,
@@ -845,6 +923,16 @@ impl Supervisor {
             max_message_chars_for_summary: 10000,
         };
         self.context_manager = ContextManager::new(context_config, self.model.clone());
+    }
+
+    /// Switch the session permission mode (ACP mode picker, `/mode`).
+    pub fn set_permission_mode(&mut self, mode: PermissionMode) {
+        self.config.permissions.mode = mode;
+        self.agent.approval.set_mode(mode);
+    }
+
+    pub fn permission_mode(&self) -> PermissionMode {
+        self.agent.approval.mode()
     }
 
     pub fn request_cancel(&self) {
@@ -1557,6 +1645,7 @@ pub async fn spawn_child_session(
         session_id: None,
         approval_handler: Some(Arc::new(AutoDenyHandler) as Arc<dyn ApprovalHandler>),
         orchestration_context: None,
+        enable_ipc: true,
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -1725,7 +1814,7 @@ mod tests {
     use super::*;
     use chrono::{Duration, Utc};
     use nca_common::event::AgentCommand;
-    use nca_common::message::Message;
+    use nca_common::message::{Message, Role};
     use nca_common::session::{SessionMeta, SessionState, SessionStatus};
     use std::fs;
 
@@ -1770,6 +1859,43 @@ mod tests {
 
         let json = serde_json::to_string_pretty(&session).expect("serialize session");
         fs::write(sessions_dir.join(format!("{id}.json")), json).expect("write session");
+    }
+
+    #[tokio::test]
+    async fn resume_keeps_one_system_prompt_at_the_front() {
+        let home = tempfile::tempdir().expect("home");
+        unsafe { std::env::set_var("NCA_HOME", home.path()) };
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path();
+        let id = "resume-system-prompt";
+        write_session_for_test(
+            workspace,
+            id,
+            Utc::now(),
+            "test-model",
+            SessionStatus::Completed,
+        );
+
+        let mut config = NcaConfig::default();
+        config.provider.minimax.api_key = Some("test-key".into());
+
+        let supervisor = Supervisor::resume(config, workspace, false, false, id, None)
+            .await
+            .expect("resume");
+        let messages = &supervisor.agent().messages;
+
+        assert_eq!(messages[0].role, Role::System);
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.role == Role::System)
+                .count(),
+            1,
+            "resume must replace the harness prompt, not append it"
+        );
+        assert!(messages.iter().any(|message| {
+            message.role == Role::User && message.content.to_summary_text().contains("hello")
+        }));
     }
 
     #[tokio::test]
