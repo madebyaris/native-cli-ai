@@ -505,9 +505,86 @@ async fn fetch_openai_context(
     openai_context_from_catalog(value.as_ref(), model)
 }
 
+/// One provider's model ids, stored so a new process can list them at once.
+#[derive(Debug, Serialize, Deserialize)]
+struct CatalogDiskEntry {
+    ids: Vec<String>,
+    fetched_at: u64,
+}
+
+/// The model-list cache file: `<product home>/cache/model-catalog.json`.
+fn catalog_disk_path() -> Option<PathBuf> {
+    nca_common::config::nca_product_home().map(|home| home.join("cache").join("model-catalog.json"))
+}
+
+fn catalog_disk_key(config: &NcaConfig) -> String {
+    limits_cache_key(config, "")
+}
+
+fn read_catalog_disk(path: &Path, key: &str) -> Vec<String> {
+    let Some(map) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<BTreeMap<String, CatalogDiskEntry>>(&text).ok())
+    else {
+        return Vec::new();
+    };
+    match map.get(key) {
+        Some(entry) if unix_now().saturating_sub(entry.fetched_at) < DISK_CACHE_TTL.as_secs() => {
+            entry.ids.clone()
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn write_catalog_disk(path: &Path, key: &str, ids: &[String]) {
+    let now = unix_now();
+    let mut map: BTreeMap<String, CatalogDiskEntry> = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    map.retain(|_, entry| now.saturating_sub(entry.fetched_at) < DISK_CACHE_TTL.as_secs());
+    map.insert(
+        key.to_string(),
+        CatalogDiskEntry {
+            ids: ids.to_vec(),
+            fetched_at: now,
+        },
+    );
+    let Some(dir) = path.parent() else { return };
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    if let Ok(text) = serde_json::to_string(&map)
+        && std::fs::write(&tmp, text).is_ok()
+    {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+/// The active provider's model ids saved by an earlier fetch (up to a day
+/// old), without touching the network. Empty when nothing is saved.
+pub fn cached_provider_model_ids(config: &NcaConfig) -> Vec<String> {
+    catalog_disk_path()
+        .map(|path| read_catalog_disk(&path, &catalog_disk_key(config)))
+        .unwrap_or_default()
+}
+
 /// Fetch available model IDs from the active provider's API.
-/// Returns a sorted list of model ID strings. Uses the same cache as context-window lookups.
+/// Returns a sorted list of model ID strings. Uses the same in-memory cache as
+/// context-window lookups, and saves the list on disk for the next process.
 pub async fn fetch_provider_model_ids(config: &NcaConfig) -> Vec<String> {
+    let ids = fetch_provider_model_ids_live(config).await;
+    if !ids.is_empty()
+        && config.provider.default != ProviderKind::MiniMax
+        && let Some(path) = catalog_disk_path()
+    {
+        write_catalog_disk(&path, &catalog_disk_key(config), &ids);
+    }
+    ids
+}
+
+async fn fetch_provider_model_ids_live(config: &NcaConfig) -> Vec<String> {
     if !config.memory.context.query_provider_models_api {
         return Vec::new();
     }
@@ -675,6 +752,32 @@ async fn fetch_anthropic_model_ids(client: &reqwest::Client, config: &NcaConfig)
     ids
 }
 
+/// Sorted ids of the catalog's models that can run an agent turn.
+///
+/// Gateways such as kenari.id describe each model: `endpoints` lists what it
+/// serves (`chat`, `images`, `music`, ...) and `tool_call` says whether it can
+/// call tools. Models that declare no chat endpoint, or no tool support, are
+/// skipped. Plain OpenAI catalogs carry neither field, so nothing is dropped.
+fn chat_model_ids(catalog: &serde_json::Value) -> Vec<String> {
+    let Some(models) = catalog.get("data").and_then(|d| d.as_array()) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = models
+        .iter()
+        .filter(|m| {
+            let serves_chat = m
+                .get("endpoints")
+                .and_then(|e| e.as_array())
+                .is_none_or(|endpoints| endpoints.iter().any(|e| e.as_str() == Some("chat")));
+            let no_tools = m.get("tool_call").and_then(|t| t.as_bool()) == Some(false);
+            serves_chat && !no_tools
+        })
+        .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(String::from))
+        .collect();
+    ids.sort();
+    ids
+}
+
 async fn fetch_openai_model_ids(client: &reqwest::Client, config: &NcaConfig) -> Vec<String> {
     let key = match config.provider.openai.resolve_api_key() {
         Some(k) => k,
@@ -689,14 +792,8 @@ async fn fetch_openai_model_ids(client: &reqwest::Client, config: &NcaConfig) ->
         if let Some(Some(entry)) = guard.as_ref().map(|g| g.as_ref())
             && entry.cache_key == cache_key
             && !cache_stale(entry.fetched_at, ttl)
-            && let Some(arr) = entry.value.get("data").and_then(|d| d.as_array())
         {
-            let mut ids: Vec<String> = arr
-                .iter()
-                .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(String::from))
-                .collect();
-            ids.sort();
-            return ids;
+            return chat_model_ids(entry.value.as_ref());
         }
     }
 
@@ -710,14 +807,7 @@ async fn fetch_openai_model_ids(client: &reqwest::Client, config: &NcaConfig) ->
         Err(_) => return Vec::new(),
     };
     let value = Arc::new(v);
-    let mut ids = Vec::new();
-    if let Some(arr) = value.get("data").and_then(|d| d.as_array()) {
-        ids = arr
-            .iter()
-            .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(String::from))
-            .collect();
-        ids.sort();
-    }
+    let ids = chat_model_ids(value.as_ref());
     {
         if let Ok(mut guard) = openai_catalog_cache().lock() {
             *guard = Some(OpenAiCatalogEntry {
@@ -836,5 +926,28 @@ mod disk_cache_tests {
         // Nothing listens on port 9, so a network call would fall back to the static table.
         let limits = resolve_model_limits_in(&config, "test-model", Some(&path)).await;
         assert_eq!(limits.context_window, 777_000);
+    }
+
+    #[test]
+    fn catalog_lists_only_models_that_can_chat_with_tools() {
+        let catalog = serde_json::json!({"data": [
+            {"id": "deepseek-v4-1-flash", "endpoints": ["chat"], "tool_call": true},
+            {"id": "lyria-3-5", "endpoints": ["music"]},
+            {"id": "nano-banana-2", "endpoints": ["images"], "tool_call": false},
+            {"id": "chat-without-tools", "endpoints": ["chat"], "tool_call": false},
+            {"id": "gpt-4o"}
+        ]});
+        assert_eq!(chat_model_ids(&catalog), ["deepseek-v4-1-flash", "gpt-4o"]);
+    }
+
+    #[test]
+    fn model_catalog_round_trips_through_the_disk_cache() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cache").join("model-catalog.json");
+        let ids = vec!["deepseek-v4-1-flash".to_string(), "minimax-m3".to_string()];
+        assert!(read_catalog_disk(&path, "k").is_empty());
+        write_catalog_disk(&path, "k", &ids);
+        assert_eq!(read_catalog_disk(&path, "k"), ids);
+        assert!(read_catalog_disk(&path, "other").is_empty());
     }
 }

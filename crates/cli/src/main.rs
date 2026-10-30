@@ -97,6 +97,15 @@ struct Cli {
 
 #[derive(clap::Subcommand, Debug)]
 enum Command {
+    /// Serve the Agent Client Protocol on stdin/stdout (T3 Code, Zed, Termul, ...)
+    Acp {
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        safe: bool,
+        #[arg(long, value_enum)]
+        permission_mode: Option<CliPermissionMode>,
+    },
     Run {
         #[arg(long)]
         prompt: String,
@@ -402,6 +411,27 @@ async fn try_main() -> anyhow::Result<()> {
 
     let workspace_root = PathBuf::from(".");
     match cli.command {
+        Some(Command::Acp {
+            model,
+            safe,
+            permission_mode,
+        }) => {
+            // stdout belongs to the JSON-RPC stream: nothing else may write to it.
+            let safe = safe || cli.safe;
+            let permission_mode = permission_mode.or(cli.permission_mode);
+            // The global `--model` is applied to the startup config, but the
+            // server reloads config per workspace, so pass it through explicitly.
+            let model = model.or_else(|| cli.model.clone());
+            nca_acp::run(
+                config,
+                nca_acp::AcpOptions {
+                    model,
+                    safe,
+                    permission_mode: permission_mode.map(Into::into),
+                },
+            )
+            .await?;
+        }
         Some(Command::Run {
             prompt,
             stream,

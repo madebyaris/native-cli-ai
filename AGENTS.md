@@ -13,7 +13,11 @@
 
 ## Learned Workspace Facts
 
-- Rust workspace with **4 crates**: `nca-common`, `nca-core`, `nca-runtime`, `nca-cli`
+- Rust workspace with **7 crates**: `nca-common`, `nca-core`, `nca-runtime`, `nca-tui`, `nca-acp`, `nca-cli`, `nca-autoresearch`
+- ACP entry point is `nca acp` (crate `nca-acp`, `agent-client-protocol` 3.6, ACP v1); stdout is JSON-RPC only, logs go to stderr
+- ACP supports session new/load/list/delete, modes, model picker, approvals, `/compact`, `/rename`, `/model`, `/mode`, `available_commands_update`, `session_info_update`, and `compaction_update` when the client advertises `session.compaction`
+- Context fitting lives in `crates/core/src/context_view.rs` (`plan_context_view_fitted`): evicts oldest non-system groups, keeps tool groups atomic, protects the system prompt, first user task, and newest turn, shrinks only older oversized messages, and never truncates the current request
+- MiniMax context windows in `crates/runtime/src/model_limits.rs`: M2.5/M2.1/M2.7/M2 = 204,800, M1 = 1,000,000
 - IPC between CLI and runtime uses Unix domain sockets with newline-delimited JSON
 - Product home at `$NCA_HOME`, `$XDG_DATA_HOME/ncacli`, or `~/.local/share/ncacli/`; sessions/memory/last_session/cli-index under `workspaces/<workspace-id>/`
 - Sessions persisted as `<id>.json` (state) + `<id>.events.jsonl` (event log) in `~/.local/share/ncacli/workspaces/<id>/sessions/`

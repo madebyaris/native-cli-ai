@@ -74,6 +74,25 @@ impl SessionStore {
 
         Ok(ids)
     }
+
+    /// Remove the persisted state and event log for one session. Missing files
+    /// are fine: deleting a session that was never saved is a no-op.
+    pub async fn delete(&self, session_id: &str) -> Result<(), SessionStoreError> {
+        for suffix in [".json", ".events.jsonl"] {
+            let path = self.sessions_dir.join(format!("{session_id}{suffix}"));
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(SessionStoreError::Io(format!(
+                        "cannot delete {}: {error}",
+                        path.display()
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

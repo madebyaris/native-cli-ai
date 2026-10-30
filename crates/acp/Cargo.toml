@@ -1,0 +1,22 @@
+[package]
+name = "nca-acp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Agent Client Protocol (ACP) server for nca"
+
+[dependencies]
+nca-common = { workspace = true }
+nca-core = { workspace = true }
+nca-runtime = { workspace = true }
+anyhow = { workspace = true }
+agent-client-protocol = { version = "3.6", features = ["stdio"] }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["clock"] }
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"

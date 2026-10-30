@@ -1,7 +1,9 @@
 use futures_util::future::join_all;
 use nca_common::config::SmartCompactionMode;
 use nca_common::event::{AgentEvent, BusyState};
-use nca_common::message::{ContentPart, ImageAttachment, Message, MessageToolCall};
+use nca_common::message::{
+    ContentPart, ImageAttachment, Message, MessageContent, MessageToolCall, Role,
+};
 use nca_common::tool::{PermissionTier, ToolCall, ToolDefinition, ToolResult};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -11,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::approval::{ApprovalPolicy, ApprovalVerdict};
-use crate::context_view::plan_context_view;
+use crate::context_view::{is_context_summary, plan_context_view_fitted};
 use crate::cost::CostTracker;
 use crate::hooks::{HookEventKind, HookRunner};
 use crate::provider::{Provider, ProviderError, StreamChunk};
@@ -84,6 +86,37 @@ fn harness_note(text: impl AsRef<str>) -> Message {
     Message::user(format!("[nca harness] {}", text.as_ref()))
 }
 
+/// What an approval prompt says. A dangerous shell command names the danger
+/// and shows the command, so the user can decide without opening details.
+fn approval_description(call: &ToolCall) -> String {
+    let command = call.input.get("command").and_then(|c| c.as_str());
+    if call.name == "execute_bash"
+        && let Some(command) = command
+        && let Some(reason) = crate::approval::dangerous_command_reason(command)
+    {
+        let shown: String = command.chars().take(200).collect();
+        let more = if command.chars().count() > 200 {
+            "…"
+        } else {
+            ""
+        };
+        return format!("Dangerous command ({reason}): {shown}{more}");
+    }
+    format!("Tool `{}` requires approval", call.name)
+}
+
+/// Error for a tool call cut off by the output token limit.
+fn truncated_call_error(max_tokens: usize) -> String {
+    let limit = if max_tokens > 0 {
+        format!(" (`model.max_tokens` = {max_tokens})")
+    } else {
+        String::new()
+    };
+    format!(
+        "the response reached the output token limit{limit}, so the arguments were cut off mid-stream. Do not repeat the same call: split the content into smaller pieces, e.g. write the first part with `write_file`, then add the rest with further edits"
+    )
+}
+
 fn invalid_tool_result(call: &InvalidToolCall) -> ToolResult {
     let raw: String = call
         .raw_arguments
@@ -137,8 +170,13 @@ pub struct AgentLoop {
     checkpoint_interval: u32,
     cancel_flag: Arc<AtomicBool>,
     hooks: Option<HookRunner>,
-    /// Opt-in provider-request smart compaction (canonical history always kept).
+    /// Provider-request smart compaction (canonical history always kept).
     smart_compaction_mode: SmartCompactionMode,
+    /// Hard ceiling on the provider request view, derived from the model window.
+    /// `None` disables the cap; the canonical history is never modified.
+    request_token_budget: Option<usize>,
+    /// Leave this many tokens for the response when deriving the budget.
+    reserved_output_tokens: usize,
     retry_base_delay: Duration,
 }
 
@@ -169,6 +207,8 @@ impl AgentLoop {
             cancel_flag: Arc::new(AtomicBool::new(false)),
             hooks,
             smart_compaction_mode: SmartCompactionMode::Off,
+            request_token_budget: None,
+            reserved_output_tokens: 0,
             retry_base_delay: DEFAULT_RETRY_BASE_DELAY,
         }
     }
@@ -181,9 +221,39 @@ impl AgentLoop {
         self.smart_compaction_mode
     }
 
-    /// Add a system prompt once at startup.
+    /// Set the hard input ceiling for provider requests.
+    ///
+    /// `None` disables the cap. The budget applies on every request even when
+    /// smart compaction is off: overflowing the window is a hard provider error,
+    /// so some eviction always beats failing the turn.
+    pub fn set_request_token_budget(&mut self, budget: Option<usize>) {
+        self.request_token_budget = budget;
+    }
+
+    pub fn request_token_budget(&self) -> Option<usize> {
+        self.request_token_budget
+    }
+
+    /// Tokens held back from the budget for the model's reply.
+    pub fn set_reserved_output_tokens(&mut self, tokens: usize) {
+        self.reserved_output_tokens = tokens;
+    }
+
+    /// Set the system prompt. The leading system message is replaced, so
+    /// refreshing the harness each turn (or resuming a session) cannot append a
+    /// second prompt at the end of the history. System messages later in the
+    /// history are preserved: auto-summarization stores its summary as one.
     pub fn set_system_prompt(&mut self, prompt: impl Into<String>) {
-        self.messages.push(Message::system(prompt));
+        let prompt = prompt.into();
+        let replace_first = self
+            .messages
+            .first()
+            .is_some_and(|message| message.role == Role::System && !is_context_summary(message));
+        if replace_first {
+            self.messages[0].content = MessageContent::Text(prompt);
+        } else {
+            self.messages.insert(0, Message::system(prompt));
+        }
     }
 
     /// Replace the LLM provider (e.g. after user switches provider in-session).
@@ -277,7 +347,7 @@ impl AgentLoop {
                 request_messages.push(note);
             }
             let tools = self.tool_definitions();
-            let model_turn = self
+            let mut model_turn = self
                 .request_model_turn(&request_messages, &tools, workspace_root, turn)
                 .await?;
 
@@ -347,6 +417,15 @@ impl AgentLoop {
                     "tool-call budget exceeded in turn {turn} ({total_calls} > {})",
                     self.max_tool_calls_per_turn
                 )));
+            }
+
+            if model_turn.finish_reason.as_deref() == Some("length") {
+                // The arguments did not fail to parse because the model wrote
+                // bad JSON: the stream was cut at the output limit. Say so, or
+                // the model retries the same oversized call.
+                for call in &mut model_turn.invalid_calls {
+                    call.error = truncated_call_error(self.reserved_output_tokens);
+                }
             }
 
             let mut replay_tool_calls: Vec<MessageToolCall> = model_turn
@@ -518,12 +597,24 @@ impl AgentLoop {
         Ok(final_text)
     }
 
-    /// The request view: canonical history, or the smart-compaction view when enabled.
+    /// The request view: canonical history, or a compacted view that always fits
+    /// the model window.
     async fn request_messages(&self) -> Vec<Message> {
-        if !self.smart_compaction_mode.is_enabled() {
+        if !self.smart_compaction_mode.is_enabled() && self.request_token_budget.is_none() {
             return self.messages.clone();
         }
-        let plan = plan_context_view(&self.messages, self.smart_compaction_mode);
+        // A zero window means "unknown" (auto-detect off, no target set), not
+        // "send nothing". The reply reservation is capped at half the window
+        // so a `max_tokens` at or above the window cannot starve the request.
+        let budget = self
+            .request_token_budget
+            .filter(|budget| *budget > 0)
+            .map(|budget| budget - self.reserved_output_tokens.min(budget / 2));
+        let plan = plan_context_view_fitted(
+            &self.messages,
+            self.smart_compaction_mode,
+            budget.and_then(std::num::NonZeroUsize::new),
+        );
         let report = &plan.report;
         if report.tokens_after < report.tokens_before
             || matches!(self.smart_compaction_mode, SmartCompactionMode::DryRun)
@@ -543,9 +634,12 @@ impl AgentLoop {
             })
             .await;
         }
-        match self.smart_compaction_mode {
-            SmartCompactionMode::On => plan.messages,
-            SmartCompactionMode::DryRun | SmartCompactionMode::Off => self.messages.clone(),
+        // A hard budget is a correctness requirement, not a preference: send the
+        // fitted view even when smart compaction is off or only in dry-run mode.
+        if budget.is_some() || matches!(self.smart_compaction_mode, SmartCompactionMode::On) {
+            plan.messages
+        } else {
+            self.messages.clone()
         }
     }
 
@@ -815,7 +909,7 @@ impl AgentLoop {
                 }
 
                 PermissionTier::Ask => {
-                    let description = format!("Tool `{}` requires approval", call.name);
+                    let description = approval_description(call);
                     self.emit(AgentEvent::ApprovalRequested {
                         call_id: call.id.clone(),
                         tool: call.name.clone(),
@@ -1335,6 +1429,44 @@ mod loop_tests {
     }
 
     #[tokio::test]
+    async fn a_tool_call_cut_by_the_output_limit_says_so() {
+        let (mut agent, requests) = agent_with(
+            vec![
+                Ok(vec![
+                    StreamChunk::InvalidToolUse {
+                        call_id: "c1".into(),
+                        name: "write_file".into(),
+                        raw_arguments: "{\"path\":\"index.html\",\"content\":\"<html>".into(),
+                        error: "EOF while parsing a string".into(),
+                    },
+                    StreamChunk::Finish {
+                        reason: "length".into(),
+                    },
+                    StreamChunk::Done,
+                ]),
+                finished("split it up"),
+            ],
+            8,
+            vec![],
+        );
+        agent.set_reserved_output_tokens(8_192);
+        agent
+            .run_turn("write a long page", Path::new("."), &[])
+            .await
+            .expect("turn");
+        let recorded = requests.lock().expect("requests");
+        let text = recorded[1]
+            .messages
+            .last()
+            .expect("tool message")
+            .content
+            .to_summary_text();
+        assert!(text.contains("output token limit"), "{text}");
+        assert!(text.contains("`model.max_tokens` = 8192"), "{text}");
+        assert!(!text.contains("EOF while parsing"), "{text}");
+    }
+
+    #[tokio::test]
     async fn reasoning_is_replayed_on_tool_call_turns() {
         let (mut agent, requests) = agent_with(
             vec![
@@ -1516,5 +1648,85 @@ mod loop_tests {
             retry_after_ms: 3000,
         };
         assert_eq!(retry_delay(base, &short, 1), Duration::from_secs(3));
+    }
+
+    #[test]
+    fn system_prompt_is_replaced_not_appended() {
+        let (mut agent, _requests) = agent_with(vec![finished("hi")], 4, vec![]);
+        agent.set_system_prompt("first");
+        agent.set_system_prompt("second");
+
+        let systems: Vec<&Message> = agent
+            .messages
+            .iter()
+            .filter(|message| message.role == Role::System)
+            .collect();
+        assert_eq!(systems.len(), 1, "only one system message may exist");
+        assert_eq!(systems[0].content.to_summary_text(), "second");
+        assert_eq!(agent.messages[0].role, Role::System);
+    }
+
+    #[test]
+    fn system_prompt_refresh_keeps_an_auto_summary() {
+        let (mut agent, _requests) = agent_with(vec![finished("hi")], 4, vec![]);
+        agent.set_system_prompt("harness");
+        agent.messages.push(Message::system(
+            "## Conversation Summary (Earlier Context)\n\nwe fixed the parser",
+        ));
+        agent.messages.push(Message::user("continue"));
+
+        agent.set_system_prompt("harness v2");
+
+        assert_eq!(agent.messages[0].content.to_summary_text(), "harness v2");
+        assert!(
+            agent
+                .messages
+                .iter()
+                .any(|message| message.role == Role::System
+                    && message
+                        .content
+                        .to_summary_text()
+                        .contains("we fixed the parser")),
+            "the summary must survive a prompt refresh"
+        );
+    }
+
+    #[test]
+    fn system_prompt_refresh_keeps_a_summary_at_index_zero() {
+        let (mut agent, _requests) = agent_with(vec![finished("hi")], 4, vec![]);
+        agent.messages.clear();
+        agent.messages.push(Message::system(
+            "## Conversation Summary (Earlier Context)\n\nwe fixed the parser",
+        ));
+
+        agent.set_system_prompt("harness");
+
+        assert_eq!(agent.messages[0].content.to_summary_text(), "harness");
+        assert!(
+            agent.messages[1]
+                .content
+                .to_summary_text()
+                .contains("we fixed the parser")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_window_does_not_clamp_the_request() {
+        let (mut agent, _) = agent_with(Vec::new(), 1, Vec::new());
+        agent.set_system_prompt("sys");
+        for i in 0..40 {
+            agent
+                .messages
+                .push(Message::user(format!("q{i} {}", "x".repeat(200))));
+            agent.messages.push(Message::assistant(format!("a{i}")));
+        }
+        // Zero means "window unknown": send the history untouched.
+        agent.set_request_token_budget(Some(0));
+        agent.set_reserved_output_tokens(8_192);
+        assert_eq!(agent.request_messages().await.len(), agent.messages.len());
+
+        // `max_tokens` at or above the window must not starve the request.
+        agent.set_request_token_budget(Some(8_000));
+        assert_eq!(agent.request_messages().await.len(), agent.messages.len());
     }
 }

@@ -69,6 +69,28 @@ nca --permission-mode bypass-permissions
 
 ## Subcommands
 
+### `nca acp`
+
+Serve the Agent Client Protocol (ACP v1) on stdin/stdout so desktop clients
+(T3 Code, Termul, Zed, ...) can drive nca as a local agent. stdout carries only
+JSON-RPC; logs go to stderr. It never prompts for input, so an API key must
+already be configured.
+
+```bash
+nca acp [OPTIONS]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--model` | string | — | Override model for every session |
+| `--safe` | flag | false | Read-only tools only |
+| `--permission-mode` | enum | config | Starting permission mode |
+
+See [Desktop Clients (ACP)](./acp.md) for client setup and the full protocol
+surface.
+
+---
+
 ### `nca run`
 
 Run a one-shot task with explicit stream control.
