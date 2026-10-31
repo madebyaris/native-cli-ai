@@ -1818,6 +1818,10 @@ mod tests {
     use nca_common::session::{SessionMeta, SessionState, SessionStatus};
     use std::fs;
 
+    /// Tests that point `NCA_HOME` at a temp dir hold this lock, because the
+    /// variable is process-wide and tests run in parallel.
+    static NCA_HOME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     fn write_session_for_test(
         workspace: &std::path::Path,
         id: &str,
@@ -1863,6 +1867,7 @@ mod tests {
 
     #[tokio::test]
     async fn resume_keeps_one_system_prompt_at_the_front() {
+        let _env = NCA_HOME_LOCK.lock().await;
         let home = tempfile::tempdir().expect("home");
         unsafe { std::env::set_var("NCA_HOME", home.path()) };
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1900,6 +1905,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_last_session_id_falls_back_to_most_recent() {
+        let _env = NCA_HOME_LOCK.lock().await;
         let home = tempfile::tempdir().expect("home");
         unsafe { std::env::set_var("NCA_HOME", home.path()) };
         let temp = tempfile::tempdir().expect("tempdir");
