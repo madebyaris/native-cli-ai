@@ -3,6 +3,7 @@
 //! Only providers that `nca` can actually use are listed; layout mirrors common
 //! "Popular / Other" grouping from tools like OpenCode.
 
+use crate::tui::matcher::OptionMatcher;
 use nca_common::config::ProviderKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +41,12 @@ pub const CONNECT_CATALOG: &[CatalogEntry] = &[
         subtitle: "Claude (API key)",
     },
     CatalogEntry {
+        section: ConnectSection::Popular,
+        kind: ProviderKind::Alibaba,
+        title: "Alibaba DashScope",
+        subtitle: "Qwen models (API key)",
+    },
+    CatalogEntry {
         section: ConnectSection::Other,
         kind: ProviderKind::OpenRouter,
         title: "OpenRouter",
@@ -64,13 +71,8 @@ pub enum ConnectRow {
 }
 
 fn matches_filter(entry: &CatalogEntry, q: &str) -> bool {
-    if q.is_empty() {
-        return true;
-    }
-    let q = q.to_ascii_lowercase();
-    entry.title.to_ascii_lowercase().contains(&q)
-        || entry.subtitle.to_ascii_lowercase().contains(&q)
-        || entry.kind.display_name().to_ascii_lowercase().contains(&q)
+    let matcher = OptionMatcher::new(q);
+    matcher.matches_any(&[entry.title, entry.subtitle, entry.kind.display_name()])
 }
 
 /// Build flat rows: section headers (only when section has matches) + provider lines.

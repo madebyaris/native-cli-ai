@@ -8,6 +8,7 @@
 use crate::file_mentions;
 use crate::slash_commands::{CommandCategory, visible_commands};
 use crate::tui::app::TuiCmd;
+use crate::tui::matcher::OptionMatcher;
 use crate::tui::theme;
 use nca_core::skills::{SkillCatalog, SkillSource};
 use ratatui::style::{Color, Modifier, Style};
@@ -368,14 +369,15 @@ pub fn branch_filter_text(query: &str) -> &str {
 }
 
 pub fn filtered_branch_indices(branches: &[String], query: &str) -> Vec<usize> {
-    let filter = branch_filter_text(query).to_ascii_lowercase();
-    if filter.is_empty() {
+    let raw = branch_filter_text(query);
+    let matcher = OptionMatcher::new(raw);
+    if matcher.is_empty() {
         return (0..branches.len()).collect();
     }
     branches
         .iter()
         .enumerate()
-        .filter(|(_, branch)| branch.to_ascii_lowercase().contains(&filter))
+        .filter(|(_, branch)| matcher.is_match(branch))
         .map(|(idx, _)| idx)
         .collect()
 }
@@ -448,8 +450,8 @@ pub fn palette_command_for_label(label: &str) -> &'static str {
 }
 
 pub fn filter_palette_rows(query: &str) -> Vec<&'static PaletteRow> {
-    let needle = query.trim().to_ascii_lowercase();
-    if needle.is_empty() {
+    let matcher = OptionMatcher::new(query);
+    if matcher.is_empty() {
         return PALETTE_CATALOG.iter().collect();
     }
     let mut result: Vec<&'static PaletteRow> = Vec::new();
@@ -464,10 +466,7 @@ pub fn filter_palette_rows(query: &str) -> Vec<&'static PaletteRow> {
                 label,
                 shortcut,
             } => {
-                if label.to_ascii_lowercase().contains(&needle)
-                    || shortcut.to_ascii_lowercase().contains(&needle)
-                    || command.contains(&needle)
-                {
+                if matcher.matches_any(&[label, shortcut, command]) {
                     if let Some(s) = pending_section.take() {
                         result.push(s);
                     }
@@ -518,5 +517,28 @@ mod tests {
             })
             .count();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn filtered_branch_indices_supports_regex_and_substring() {
+        let branches = vec![
+            "main".to_string(),
+            "feat/login".to_string(),
+            "feat/oauth".to_string(),
+            "fix/bug-123".to_string(),
+        ];
+        assert_eq!(filtered_branch_indices(&branches, "login"), vec![1]);
+        assert_eq!(filtered_branch_indices(&branches, "feat/.*"), vec![1, 2]);
+        assert_eq!(filtered_branch_indices(&branches, "bug-\\d+"), vec![3]);
+        assert_eq!(
+            filtered_branch_indices(&branches, "[unclosed"),
+            Vec::<usize>::new()
+        );
+    }
+
+    #[test]
+    fn filter_palette_rows_supports_regex() {
+        let rows = filter_palette_rows("cle?ar");
+        assert!(!rows.is_empty());
     }
 }

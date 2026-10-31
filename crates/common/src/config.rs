@@ -164,100 +164,116 @@ impl NcaConfig {
     }
 
     fn apply_env(&mut self) {
-        if let Ok(provider) = env::var("NCA_DEFAULT_PROVIDER") {
+        let env_val =
+            |key: &str| -> Option<String> { env::var(key).ok().filter(|v| !v.trim().is_empty()) };
+
+        if let Some(provider) = env_val("NCA_DEFAULT_PROVIDER") {
             self.provider.default = ProviderKind::from_env(&provider);
             self.sync_default_model_from_provider();
         }
 
-        if let Ok(model) = env::var("NCA_MODEL") {
+        if let Some(model) = env_val("NCA_MODEL") {
             self.apply_model_override(&model);
         }
 
-        if let Ok(api_key) = env::var("MINIMAX_API_KEY") {
+        if let Some(api_key) = env_val("MINIMAX_API_KEY") {
             self.provider.minimax.api_key = Some(api_key);
         }
 
-        if let Ok(base_url) = env::var("MINIMAX_BASE_URL") {
+        if let Some(base_url) = env_val("MINIMAX_BASE_URL") {
             self.provider.minimax.base_url = base_url;
         }
 
-        if let Ok(model) = env::var("MINIMAX_MODEL") {
+        if let Some(model) = env_val("MINIMAX_MODEL") {
             self.provider.minimax.model = model;
         }
 
-        if let Ok(api_key) = env::var("OPENAI_API_KEY") {
+        if let Some(api_key) = env_val("OPENAI_API_KEY") {
             self.provider.openai.api_key = Some(api_key);
         }
 
-        if let Ok(base_url) = env::var("OPENAI_BASE_URL") {
+        if let Some(base_url) = env_val("OPENAI_BASE_URL") {
             self.provider.openai.base_url = base_url;
         }
 
-        if let Ok(model) = env::var("OPENAI_MODEL") {
+        if let Some(model) = env_val("OPENAI_MODEL") {
             self.provider.openai.model = model;
         }
 
-        if let Ok(api_key) = env::var("ANTHROPIC_API_KEY") {
+        if let Some(api_key) = env_val("ANTHROPIC_API_KEY") {
             self.provider.anthropic.api_key = Some(api_key);
         }
 
-        if let Ok(base_url) = env::var("ANTHROPIC_BASE_URL") {
+        if let Some(base_url) = env_val("ANTHROPIC_BASE_URL") {
             self.provider.anthropic.base_url = base_url;
         }
 
-        if let Ok(model) = env::var("ANTHROPIC_MODEL") {
+        if let Some(model) = env_val("ANTHROPIC_MODEL") {
             self.provider.anthropic.model = model;
         }
 
-        if let Ok(api_key) = env::var("OPENROUTER_API_KEY") {
+        if let Some(api_key) = env_val("OPENROUTER_API_KEY") {
             self.provider.openrouter.api_key = Some(api_key);
         }
 
-        if let Ok(base_url) = env::var("OPENROUTER_BASE_URL") {
+        if let Some(base_url) = env_val("OPENROUTER_BASE_URL") {
             self.provider.openrouter.base_url = base_url;
         }
 
-        if let Ok(model) = env::var("OPENROUTER_MODEL") {
+        if let Some(model) = env_val("OPENROUTER_MODEL") {
             self.provider.openrouter.model = model;
         }
 
-        if let Ok(site_url) = env::var("OPENROUTER_SITE_URL") {
+        if let Some(site_url) = env_val("OPENROUTER_SITE_URL") {
             self.provider.openrouter.site_url = Some(site_url);
         }
 
-        if let Ok(app_name) = env::var("OPENROUTER_APP_NAME") {
+        if let Some(app_name) = env_val("OPENROUTER_APP_NAME") {
             self.provider.openrouter.app_name = Some(app_name);
         }
 
-        if let Ok(api_key) = env::var("CUSTOM_PROVIDER_API_KEY") {
+        if let Some(api_key) = env_val("CUSTOM_PROVIDER_API_KEY") {
             self.provider.custom.api_key = Some(api_key);
         }
 
-        if let Ok(base_url) = env::var("CUSTOM_PROVIDER_BASE_URL") {
+        if let Some(base_url) = env_val("CUSTOM_PROVIDER_BASE_URL") {
             self.provider.custom.base_url = base_url;
         }
 
-        if let Ok(model) = env::var("CUSTOM_PROVIDER_MODEL") {
+        if let Some(model) = env_val("CUSTOM_PROVIDER_MODEL") {
             self.provider.custom.model = model;
         }
 
-        if let Ok(raw) = env::var("CUSTOM_PROVIDER_COMPATIBILITY")
+        if let Some(api_key) = env_val("DASHSCOPE_API_KEY").or_else(|| env_val("ALIBABA_API_KEY")) {
+            self.provider.alibaba.api_key = Some(api_key);
+        }
+
+        if let Some(base_url) =
+            env_val("DASHSCOPE_BASE_URL").or_else(|| env_val("ALIBABA_BASE_URL"))
+        {
+            self.provider.alibaba.base_url = base_url;
+        }
+
+        if let Some(model) = env_val("DASHSCOPE_MODEL").or_else(|| env_val("ALIBABA_MODEL")) {
+            self.provider.alibaba.model = model;
+        }
+        if let Some(raw) = env_val("CUSTOM_PROVIDER_COMPATIBILITY")
             && let Some(compatibility) = ProviderCompatibility::from_cli_name(&raw)
         {
             self.provider.custom.compatibility = compatibility;
         }
 
-        if let Ok(memory_path) = env::var("NCA_MEMORY_PATH") {
+        if let Some(memory_path) = env_val("NCA_MEMORY_PATH") {
             self.memory.file_path = PathBuf::from(memory_path);
         }
 
-        if let Ok(timeout_secs) = env::var("NCA_WEB_TIMEOUT_SECS")
+        if let Some(timeout_secs) = env_val("NCA_WEB_TIMEOUT_SECS")
             && let Ok(timeout_secs) = timeout_secs.parse()
         {
             self.web.timeout_secs = timeout_secs;
         }
 
-        if let Ok(max_fetch_chars) = env::var("NCA_WEB_MAX_FETCH_CHARS")
+        if let Some(max_fetch_chars) = env_val("NCA_WEB_MAX_FETCH_CHARS")
             && let Ok(max_fetch_chars) = max_fetch_chars.parse()
         {
             self.web.max_fetch_chars = max_fetch_chars;
@@ -287,6 +303,7 @@ impl NcaConfig {
             ProviderKind::Anthropic => self.provider.anthropic.api_key = Some(key),
             ProviderKind::OpenRouter => self.provider.openrouter.api_key = Some(key),
             ProviderKind::Custom => self.provider.custom.api_key = Some(key),
+            ProviderKind::Alibaba => self.provider.alibaba.api_key = Some(key),
         }
     }
 
@@ -298,6 +315,7 @@ impl NcaConfig {
             ProviderKind::Anthropic => self.provider.anthropic.base_url = base_url,
             ProviderKind::OpenRouter => self.provider.openrouter.base_url = base_url,
             ProviderKind::Custom => self.provider.custom.base_url = base_url,
+            ProviderKind::Alibaba => self.provider.alibaba.base_url = base_url,
         }
     }
 
@@ -934,6 +952,8 @@ pub struct ProviderConfig {
     pub anthropic: AnthropicConfig,
     pub openrouter: OpenRouterConfig,
     pub custom: CustomProviderConfig,
+    #[serde(default)]
+    pub alibaba: AlibabaConfig,
 }
 
 impl Default for ProviderConfig {
@@ -945,6 +965,7 @@ impl Default for ProviderConfig {
             anthropic: AnthropicConfig::default(),
             openrouter: OpenRouterConfig::default(),
             custom: CustomProviderConfig::default(),
+            alibaba: AlibabaConfig::default(),
         }
     }
 }
@@ -970,6 +991,9 @@ impl ProviderConfig {
         if let Some(custom) = partial.custom {
             self.custom.merge(custom);
         }
+        if let Some(alibaba) = partial.alibaba {
+            self.alibaba.merge(alibaba);
+        }
     }
 
     pub fn active_model(&self) -> &str {
@@ -979,6 +1003,7 @@ impl ProviderConfig {
             ProviderKind::Anthropic => &self.anthropic.model,
             ProviderKind::OpenAi => &self.openai.model,
             ProviderKind::Custom => &self.custom.model,
+            ProviderKind::Alibaba => &self.alibaba.model,
         }
     }
 
@@ -994,6 +1019,7 @@ impl ProviderConfig {
             ProviderKind::Anthropic => self.anthropic.model = model,
             ProviderKind::OpenAi => self.openai.model = model,
             ProviderKind::Custom => self.custom.model = model,
+            ProviderKind::Alibaba => self.alibaba.model = model,
         }
     }
 
@@ -1004,6 +1030,7 @@ impl ProviderConfig {
             ProviderKind::Anthropic => &self.anthropic.model,
             ProviderKind::OpenAi => &self.openai.model,
             ProviderKind::Custom => &self.custom.model,
+            ProviderKind::Alibaba => &self.alibaba.model,
         }
     }
 
@@ -1014,6 +1041,7 @@ impl ProviderConfig {
             ProviderKind::Anthropic => &self.anthropic.base_url,
             ProviderKind::OpenAi => &self.openai.base_url,
             ProviderKind::Custom => &self.custom.base_url,
+            ProviderKind::Alibaba => &self.alibaba.base_url,
         }
     }
 
@@ -1024,6 +1052,7 @@ impl ProviderConfig {
             ProviderKind::Anthropic => &self.anthropic.api_key_env,
             ProviderKind::OpenAi => &self.openai.api_key_env,
             ProviderKind::Custom => &self.custom.api_key_env,
+            ProviderKind::Alibaba => &self.alibaba.api_key_env,
         }
     }
 
@@ -1034,6 +1063,7 @@ impl ProviderConfig {
             ProviderKind::Anthropic => self.anthropic.resolve_api_key().is_some(),
             ProviderKind::OpenAi => self.openai.resolve_api_key().is_some(),
             ProviderKind::Custom => self.custom.resolve_api_key().is_some(),
+            ProviderKind::Alibaba => self.alibaba.resolve_api_key().is_some(),
         }
     }
 
@@ -1053,15 +1083,17 @@ pub enum ProviderKind {
     OpenRouter,
     Anthropic,
     OpenAi,
+    Alibaba,
     Custom,
 }
 
 impl ProviderKind {
-    pub const ALL: [ProviderKind; 5] = [
+    pub const ALL: [ProviderKind; 6] = [
         ProviderKind::MiniMax,
         ProviderKind::OpenAi,
         ProviderKind::Anthropic,
         ProviderKind::OpenRouter,
+        ProviderKind::Alibaba,
         ProviderKind::Custom,
     ];
 
@@ -1072,6 +1104,7 @@ impl ProviderKind {
             "openai" | "open-ai" | "gpt" => Some(Self::OpenAi),
             "anthropic" | "claude" => Some(Self::Anthropic),
             "openrouter" | "open-router" => Some(Self::OpenRouter),
+            "alibaba" | "dashscope" | "qwen" => Some(Self::Alibaba),
             "custom" => Some(Self::Custom),
             _ => None,
         }
@@ -1082,6 +1115,7 @@ impl ProviderKind {
             "openrouter" => Self::OpenRouter,
             "anthropic" => Self::Anthropic,
             "openai" => Self::OpenAi,
+            "alibaba" | "dashscope" | "qwen" => Self::Alibaba,
             "custom" => Self::Custom,
             _ => Self::MiniMax,
         }
@@ -1093,6 +1127,7 @@ impl ProviderKind {
             ProviderKind::OpenRouter => "OpenRouter",
             ProviderKind::Anthropic => "Anthropic",
             ProviderKind::OpenAi => "OpenAI",
+            ProviderKind::Alibaba => "Alibaba",
             ProviderKind::Custom => "Custom",
         }
     }
@@ -1205,6 +1240,53 @@ impl OpenAiConfig {
     }
 
     fn merge(&mut self, partial: PartialOpenAiConfig) {
+        if let Some(api_key_env) = partial.api_key_env {
+            self.api_key_env = api_key_env;
+        }
+        if let Some(api_key) = partial.api_key {
+            self.api_key = Some(api_key);
+        }
+        if let Some(base_url) = partial.base_url {
+            self.base_url = base_url;
+        }
+        if let Some(model) = partial.model {
+            self.model = model;
+        }
+        if let Some(temperature) = partial.temperature {
+            self.temperature = temperature;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlibabaConfig {
+    pub api_key_env: String,
+    pub api_key: Option<String>,
+    pub base_url: String,
+    pub model: String,
+    pub temperature: f32,
+}
+
+impl Default for AlibabaConfig {
+    fn default() -> Self {
+        Self {
+            api_key_env: "DASHSCOPE_API_KEY".into(),
+            api_key: None,
+            base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".into(),
+            model: "qwen2.5-coder-32b-instruct".into(),
+            temperature: 0.7,
+        }
+    }
+}
+
+impl AlibabaConfig {
+    pub fn resolve_api_key(&self) -> Option<String> {
+        resolve_api_key_value(&self.api_key, &self.api_key_env)
+            .or_else(|| env::var("ALIBABA_API_KEY").ok())
+            .filter(|v| !v.trim().is_empty())
+    }
+
+    fn merge(&mut self, partial: PartialAlibabaConfig) {
         if let Some(api_key_env) = partial.api_key_env {
             self.api_key_env = api_key_env;
         }
@@ -1888,6 +1970,7 @@ struct PartialProviderConfig {
     anthropic: Option<PartialAnthropicConfig>,
     openrouter: Option<PartialOpenRouterConfig>,
     custom: Option<PartialCustomProviderConfig>,
+    alibaba: Option<PartialAlibabaConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -1901,6 +1984,15 @@ struct PartialMiniMaxConfig {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct PartialOpenAiConfig {
+    api_key_env: Option<String>,
+    api_key: Option<String>,
+    base_url: Option<String>,
+    model: Option<String>,
+    temperature: Option<f32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialAlibabaConfig {
     api_key_env: Option<String>,
     api_key: Option<String>,
     base_url: Option<String>,
@@ -2041,6 +2133,9 @@ fn default_model_aliases() -> BTreeMap<String, String> {
         ("claude".into(), "claude-3-7-sonnet-latest".into()),
         ("claude-sonnet".into(), "claude-3-7-sonnet-latest".into()),
         ("openrouter".into(), "openai/gpt-4o-mini".into()),
+        ("alibaba".into(), "qwen2.5-coder-32b-instruct".into()),
+        ("qwen".into(), "qwen2.5-coder-32b-instruct".into()),
+        ("dashscope".into(), "qwen2.5-coder-32b-instruct".into()),
     ])
 }
 
@@ -2362,6 +2457,18 @@ mod tests {
             ProviderKind::from_cli_name("custom"),
             Some(ProviderKind::Custom)
         );
+        assert_eq!(
+            ProviderKind::from_cli_name("alibaba"),
+            Some(ProviderKind::Alibaba)
+        );
+        assert_eq!(
+            ProviderKind::from_cli_name("dashscope"),
+            Some(ProviderKind::Alibaba)
+        );
+        assert_eq!(
+            ProviderKind::from_cli_name("qwen"),
+            Some(ProviderKind::Alibaba)
+        );
         assert_eq!(ProviderKind::from_cli_name("nope"), None);
     }
 
@@ -2369,6 +2476,47 @@ mod tests {
     fn onboarding_completed_defaults_to_false() {
         let config = NcaConfig::default();
         assert!(!config.ui.onboarding_completed);
+    }
+
+    #[test]
+    fn provider_config_deserializes_without_alibaba() {
+        let toml_str = r#"
+default = "openai"
+
+[minimax]
+api_key_env = "MINIMAX_API_KEY"
+base_url = "https://api.minimax.io/anthropic"
+model = "MiniMax-M2.7"
+temperature = 0.7
+
+[openai]
+api_key_env = "OPENAI_API_KEY"
+base_url = "https://api.openai.com"
+model = "gpt-4o-mini"
+temperature = 0.7
+
+[anthropic]
+api_key_env = "ANTHROPIC_API_KEY"
+base_url = "https://api.anthropic.com"
+model = "claude-3-7-sonnet-latest"
+temperature = 1.0
+
+[openrouter]
+api_key_env = "OPENROUTER_API_KEY"
+base_url = "https://openrouter.ai/api"
+model = "openai/gpt-4o-mini"
+temperature = 0.7
+
+[custom]
+compatibility = "openai"
+api_key_env = "CUSTOM_PROVIDER_API_KEY"
+base_url = ""
+model = "custom-model"
+temperature = 0.7
+"#;
+        let cfg: ProviderConfig = toml::from_str(toml_str).expect("deserialize legacy config");
+        assert_eq!(cfg.default, ProviderKind::OpenAi);
+        assert_eq!(cfg.alibaba.model, "qwen2.5-coder-32b-instruct");
     }
 
     #[test]

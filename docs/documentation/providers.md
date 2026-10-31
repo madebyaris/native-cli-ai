@@ -1,6 +1,6 @@
 # Providers
 
-nca supports five LLM provider backends. You can switch between them at any time via config, environment variables, or the interactive `/connect` and `/provider` commands.
+nca supports six LLM provider backends. You can switch between them at any time via config, environment variables, or the interactive `/connect` and `/provider` commands.
 
 ## Supported Providers
 
@@ -10,8 +10,8 @@ nca supports five LLM provider backends. You can switch between them at any time
 | **Anthropic** | `claude-3-7-sonnet-latest` | Native Anthropic | Direct Anthropic API for Claude models. |
 | **OpenAI** | `gpt-4o-mini` | OpenAI Chat | Standard OpenAI chat completions API. |
 | **OpenRouter** | `openai/gpt-4o-mini` | OpenAI-compatible | Aggregator providing access to 100+ models from multiple providers. |
+| **Alibaba** | `qwen2.5-coder-32b-instruct` | OpenAI-compatible | Alibaba Cloud DashScope API for Qwen series models. |
 | **Custom** | `custom-model` | OpenAI-compatible or Anthropic-compatible | Bring your own endpoint and choose the wire protocol. |
-
 ## MiniMax (Default)
 
 MiniMax is nca's primary provider, using an Anthropic-compatible API endpoint.
@@ -128,6 +128,36 @@ anthropic/claude-3-7-sonnet
 google/gemini-2.0-flash
 meta-llama/llama-3.1-70b-instruct
 ```
+
+## Alibaba Cloud (DashScope)
+
+Direct access to Alibaba Cloud DashScope Qwen models via OpenAI-compatible mode.
+
+### Setup
+
+```bash
+export DASHSCOPE_API_KEY="your-dashscope-api-key"
+# Or: export ALIBABA_API_KEY="your-dashscope-api-key"
+```
+
+```toml
+[provider]
+default = "alibaba"
+
+[provider.alibaba]
+api_key_env = "DASHSCOPE_API_KEY"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+model = "qwen2.5-coder-32b-instruct"
+temperature = 0.7
+```
+
+Common models:
+- `qwen2.5-coder-32b-instruct` (default)
+- `qwen2.5-coder-14b-instruct`
+- `qwen2.5-coder-7b-instruct`
+- `qwen-plus`
+- `qwen-max`
+- `qwen-turbo`
 
 ## Custom Provider
 
@@ -258,8 +288,8 @@ The default environment variable names are:
 | Anthropic | `ANTHROPIC_API_KEY` |
 | OpenAI | `OPENAI_API_KEY` |
 | OpenRouter | `OPENROUTER_API_KEY` |
+| Alibaba | `DASHSCOPE_API_KEY` (or `ALIBABA_API_KEY`) |
 | Custom | `CUSTOM_PROVIDER_API_KEY` |
-
 You can change the environment variable name via `api_key_env` in config.
 
 ## Extended Thinking

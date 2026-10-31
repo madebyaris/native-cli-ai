@@ -61,7 +61,7 @@ The product surface is the CLI. No desktop wrapper, no Electron, no browser in t
 - Persists session state and event logs in the product home, one folder per workspace.
 - Exposes machine-readable JSON and NDJSON for automation.
 - Spawns child agents with explicit parent/child lineage and optional git worktrees.
-- Uses MiniMax by default, with OpenAI, Anthropic, OpenRouter, and custom endpoint support.
+- Uses MiniMax by default, with OpenAI, Anthropic, OpenRouter, Alibaba DashScope, and custom endpoint support.
 - Loads built-in tools plus optional MCP tools from config, over stdio or HTTP.
 - Sends **native multimodal** (text + image) messages to MiniMax and other vision-capable models.
 - Auto-summarizes long conversations to prevent token overflow.
@@ -332,7 +332,7 @@ The default is `on`: every provider request is fitted to the model window, so a 
 
 ## Providers
 
-MiniMax is the default provider path. The codebase also supports OpenAI, Anthropic, and OpenRouter, so the project can stay MiniMax-first without boxing itself into one provider forever.
+MiniMax is the default provider path. The codebase also supports OpenAI, Anthropic, OpenRouter, and Alibaba DashScope, so the project can stay MiniMax-first without boxing itself into one provider forever.
 
 Typical environment variables:
 
@@ -340,8 +340,8 @@ Typical environment variables:
 - `OPENAI_API_KEY`
 - `ANTHROPIC_API_KEY`
 - `OPENROUTER_API_KEY`
+- `DASHSCOPE_API_KEY` (or `ALIBABA_API_KEY`)
 - `CUSTOM_PROVIDER_API_KEY` (for custom endpoints)
-
 ### Custom Endpoints
 
 Use `/connect` in the TUI (or the command palette) to pick a provider, enter an API key, and optionally add a custom OpenAI-compatible or Anthropic-compatible endpoint. Legacy aliases `/provider`, `/apikey`, and `/custom` still resolve to the same flow.

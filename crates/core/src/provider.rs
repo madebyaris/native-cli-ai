@@ -1,3 +1,4 @@
+pub mod alibaba;
 pub mod anthropic;
 pub mod anthropic_compat;
 pub mod custom;

@@ -41,6 +41,19 @@ pub async fn validate_api_key(
                 .send()
                 .await
         }
+        ProviderKind::Alibaba => {
+            let base = base_url.trim_end_matches('/');
+            let url = if base.ends_with("/v1") {
+                format!("{base}/models")
+            } else {
+                format!("{base}/v1/models")
+            };
+            client
+                .get(&url)
+                .header("Authorization", format!("Bearer {api_key}"))
+                .send()
+                .await
+        }
         ProviderKind::Anthropic | ProviderKind::MiniMax => {
             // Send a minimal POST with an intentionally empty body.
             // A valid key returns 400 (bad request); an invalid key returns 401/403.

@@ -19,6 +19,7 @@ use crate::tui::input::{
 use crate::tui::layout::{
     centered_rect, layout_chunks, layout_with_sidebar, rect_contains, sidebar_fit,
 };
+use crate::tui::matcher::OptionMatcher;
 use crate::tui::state::{
     CustomProviderSetupStep, DisplayBlock, ModelPickerAction, ModelPickerEntry, TuiSessionState,
 };
@@ -1264,9 +1265,9 @@ pub fn run_blocking(
                 }
 
                 if g.session_picker_open() {
-                    let filter = g.session_picker_search().to_ascii_lowercase();
+                    let matcher = OptionMatcher::new(g.session_picker_search());
                     let filtered_indices: Vec<usize> = g.session_picker_entries().iter().enumerate()
-                        .filter(|(_, s)| filter.is_empty() || s.to_ascii_lowercase().contains(&filter))
+                        .filter(|(_, s)| matcher.is_match(s))
                         .map(|(i, _)| i)
                         .collect();
                     const SESSION_PICKER_MAX_ROWS: usize = 16;
@@ -1471,7 +1472,7 @@ pub fn run_blocking(
 
                 // Model picker popup.
                 if g.model_picker_open() {
-                    let filter = g.model_picker_search().to_ascii_lowercase();
+                    let matcher = OptionMatcher::new(g.model_picker_search());
 
                     // Pre-compute indices for visible/selectable items and scroll
                     // without holding an immutable borrow on `g` that conflicts
@@ -1481,10 +1482,7 @@ pub fn run_blocking(
                         .iter()
                         .enumerate()
                         .filter(|(_, e)| {
-                            e.is_header
-                                || filter.is_empty()
-                                || e.label.to_ascii_lowercase().contains(&filter)
-                                || e.detail.to_ascii_lowercase().contains(&filter)
+                            e.is_header || matcher.matches_any(&[&e.label, &e.detail])
                         })
                         .map(|(i, _)| i)
                         .collect();
@@ -1967,16 +1965,11 @@ pub fn run_blocking(
 
                     // Model picker popup.
                     if g.model_picker_open() {
-                        let filter = g.model_picker_search().to_ascii_lowercase();
+                        let matcher = OptionMatcher::new(g.model_picker_search());
                         let selectable_count = g
                             .model_picker_entries()
                             .iter()
-                            .filter(|e| {
-                                !e.is_header
-                                    && (filter.is_empty()
-                                        || e.label.to_ascii_lowercase().contains(&filter)
-                                        || e.detail.to_ascii_lowercase().contains(&filter))
-                            })
+                            .filter(|e| !e.is_header && matcher.matches_any(&[&e.label, &e.detail]))
                             .count();
                         match (key.code, key.modifiers) {
                             (KeyCode::Esc, _) => {
@@ -2001,10 +1994,7 @@ pub fn run_blocking(
                                     .model_picker_entries()
                                     .iter()
                                     .filter(|e| {
-                                        !e.is_header
-                                            && (filter.is_empty()
-                                                || e.label.to_ascii_lowercase().contains(&filter)
-                                                || e.detail.to_ascii_lowercase().contains(&filter))
+                                        !e.is_header && matcher.matches_any(&[&e.label, &e.detail])
                                     })
                                     .collect();
                                 let pick = g
@@ -2514,13 +2504,11 @@ pub fn run_blocking(
 
                     // Session picker keyboard handling.
                     if g.session_picker_open() {
-                        let filter = g.session_picker_search().to_ascii_lowercase();
+                        let matcher = OptionMatcher::new(g.session_picker_search());
                         let count = g
                             .session_picker_entries()
                             .iter()
-                            .filter(|s| {
-                                filter.is_empty() || s.to_ascii_lowercase().contains(&filter)
-                            })
+                            .filter(|s| matcher.is_match(s))
                             .count();
                         match (key.code, key.modifiers) {
                             (KeyCode::Esc, _) => {
@@ -2540,10 +2528,7 @@ pub fn run_blocking(
                                 let filtered: Vec<&String> = g
                                     .session_picker_entries()
                                     .iter()
-                                    .filter(|s| {
-                                        filter.is_empty()
-                                            || s.to_ascii_lowercase().contains(&filter)
-                                    })
+                                    .filter(|s| matcher.is_match(s))
                                     .collect();
                                 let pick = g
                                     .session_picker_index()

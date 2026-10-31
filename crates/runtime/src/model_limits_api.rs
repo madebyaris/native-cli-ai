@@ -161,6 +161,15 @@ async fn query_provider_limits(config: &NcaConfig, model: &str) -> Option<usize>
             let base = config.provider.openai.base_url.trim_end_matches('/');
             fetch_openai_context(&client, base, &key, model).await
         }
+        ProviderKind::Alibaba => {
+            let Some(key) = config.provider.alibaba.resolve_api_key() else {
+                tracing::debug!("context API: alibaba selected but no API key");
+                return None;
+            };
+            let base = config.provider.alibaba.base_url.trim_end_matches('/');
+            let normalized_base = base.strip_suffix("/v1").unwrap_or(base);
+            fetch_openai_context(&client, normalized_base, &key, model).await
+        }
         ProviderKind::Custom => {
             let Some(key) = config.provider.custom.resolve_api_key() else {
                 tracing::debug!("context API: custom selected but no API key");
@@ -187,6 +196,7 @@ fn limits_cache_key(config: &NcaConfig, model: &str) -> String {
         ProviderKind::OpenRouter => config.provider.openrouter.base_url.clone(),
         ProviderKind::Anthropic => config.provider.anthropic.base_url.clone(),
         ProviderKind::OpenAi => config.provider.openai.base_url.clone(),
+        ProviderKind::Alibaba => config.provider.alibaba.base_url.clone(),
         ProviderKind::Custom => format!(
             "{}|{:?}",
             config.provider.custom.base_url, config.provider.custom.compatibility
@@ -601,6 +611,7 @@ async fn fetch_provider_model_ids_live(config: &NcaConfig) -> Vec<String> {
         ProviderKind::OpenAi => fetch_openai_model_ids(&client, config).await,
         ProviderKind::Custom => fetch_custom_model_ids(&client, config).await,
         ProviderKind::MiniMax => vec!["MiniMax-M2.5".into(), "MiniMax-M2.7".into()],
+        ProviderKind::Alibaba => fetch_alibaba_model_ids(&client, config).await,
     }
 }
 
@@ -626,6 +637,27 @@ async fn fetch_custom_model_ids(client: &reqwest::Client, config: &NcaConfig) ->
             fetch_anthropic_model_ids(client, &shadow).await
         }
     }
+}
+
+async fn fetch_alibaba_model_ids(client: &reqwest::Client, config: &NcaConfig) -> Vec<String> {
+    let fallback = vec![
+        "qwen2.5-coder-32b-instruct".into(),
+        "qwen2.5-coder-14b-instruct".into(),
+        "qwen2.5-coder-7b-instruct".into(),
+        "qwen-plus".into(),
+        "qwen-max".into(),
+        "qwen-turbo".into(),
+    ];
+    let key = match config.provider.alibaba.resolve_api_key() {
+        Some(k) => k,
+        None => return fallback,
+    };
+    let mut shadow = config.clone();
+    shadow.provider.openai.api_key = Some(key);
+    let base = config.provider.alibaba.base_url.trim_end_matches('/');
+    shadow.provider.openai.base_url = base.strip_suffix("/v1").unwrap_or(base).to_string();
+    let models = fetch_openai_model_ids(client, &shadow).await;
+    if models.is_empty() { fallback } else { models }
 }
 
 async fn fetch_openrouter_model_ids(client: &reqwest::Client, config: &NcaConfig) -> Vec<String> {
