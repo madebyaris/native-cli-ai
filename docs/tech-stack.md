@@ -66,7 +66,7 @@ This document records every dependency choice, the rationale behind it, and the 
 
 **Strategy**: MiniMax is the first-class provider and is implemented directly over `reqwest` so we control auth, base URL, model naming, and tool-call normalization without waiting on a generic wrapper. `genai` remains useful later for broad multi-provider support, while `anthropic-async` and `async-openai` stay as direct adapters for providers that need special handling.
 
-**Current default**: `MiniMax-M2.5` via `provider.minimax` config and `MINIMAX_API_KEY`.
+**Current default**: `MiniMax-M3.1-Flash` via `provider.minimax` config and `MINIMAX_API_KEY`.
 
 **Rejected**: `llm` crate (focused on local models, not API providers), rolling our own HTTP client (unnecessary duplication).
 

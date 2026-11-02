@@ -6,10 +6,10 @@ nca supports five LLM provider backends. You can switch between them at any time
 
 | Provider | Default Model | API Style | Description |
 |----------|---------------|-----------|-------------|
-| **MiniMax** | `MiniMax-M2.7` | Anthropic-compatible | Primary provider. Uses the MiniMax Anthropic-compatible endpoint. |
-| **Anthropic** | `claude-3-7-sonnet-latest` | Native Anthropic | Direct Anthropic API for Claude models. |
-| **OpenAI** | `gpt-4o-mini` | OpenAI Chat | Standard OpenAI chat completions API. |
-| **OpenRouter** | `openai/gpt-4o-mini` | OpenAI-compatible | Aggregator providing access to 100+ models from multiple providers. |
+| **MiniMax** | `MiniMax-M3.1-Flash` | Anthropic-compatible | Primary provider. Uses the MiniMax Anthropic-compatible endpoint. |
+| **Anthropic** | `claude-sonnet-5-5` | Native Anthropic | Direct Anthropic API for Claude models. |
+| **OpenAI** | `gpt-6-luna` | OpenAI Chat | Standard OpenAI chat completions API. |
+| **OpenRouter** | `openai/gpt-6-luna` | OpenAI-compatible | Aggregator providing access to 100+ models from multiple providers. |
 | **Custom** | `custom-model` | OpenAI-compatible or Anthropic-compatible | Bring your own endpoint and choose the wire protocol. |
 
 ## MiniMax (Default)
@@ -32,7 +32,7 @@ default = "minimax"
 [provider.minimax]
 api_key = "your-key"
 base_url = "https://api.minimax.io/anthropic"
-model = "MiniMax-M2.7"
+model = "MiniMax-M3.1-Flash"
 temperature = 0.7
 ```
 
@@ -60,7 +60,7 @@ default = "anthropic"
 [provider.anthropic]
 api_key_env = "ANTHROPIC_API_KEY"
 base_url = "https://api.anthropic.com"
-model = "claude-3-7-sonnet-latest"
+model = "claude-sonnet-5-5"
 temperature = 1.0
 ```
 
@@ -81,7 +81,7 @@ default = "openai"
 [provider.openai]
 api_key_env = "OPENAI_API_KEY"
 base_url = "https://api.openai.com"
-model = "gpt-4o-mini"
+model = "gpt-6-luna"
 temperature = 0.7
 ```
 
@@ -112,7 +112,7 @@ default = "openrouter"
 [provider.openrouter]
 api_key_env = "OPENROUTER_API_KEY"
 base_url = "https://openrouter.ai/api"
-model = "openai/gpt-4o-mini"
+model = "openai/gpt-6-luna"
 temperature = 0.7
 site_url = "https://my-app.com"    # Optional
 app_name = "my-app"                # Optional
@@ -179,7 +179,7 @@ Notes:
 ### Via CLI Flag
 
 ```bash
-nca --model "claude-3-7-sonnet-latest"
+nca --model "claude-sonnet-5-5"
 ```
 
 ### Via Environment Variable
@@ -214,22 +214,23 @@ nca ships with built-in model aliases for quick switching:
 
 | Alias | Resolves To |
 |-------|-------------|
-| `default` | `MiniMax-M2.7` |
-| `minimax` | `MiniMax-M2.7` |
-| `m2.7` | `MiniMax-M2.7` |
-| `coding` | `MiniMax-M2.7` |
-| `reasoning` | `MiniMax-M2.7` |
-| `openai` | `gpt-4o-mini` |
+| `default` | `MiniMax-M3.1-Flash` |
+| `minimax` | `MiniMax-M3.1-Flash` |
+| `m3.1-flash` | `MiniMax-M3.1-Flash` |
+| `m2.5` | `MiniMax-M2.5` |
+| `coding` | `MiniMax-M3.1-Flash` |
+| `reasoning` | `MiniMax-M3.1-Flash` |
+| `openai` | `gpt-6-luna` |
 | `gpt4o` | `gpt-4o` |
-| `claude` | `claude-3-7-sonnet-latest` |
-| `openrouter` | `openai/gpt-4o-mini` |
+| `claude` | `claude-sonnet-5-5` |
+| `openrouter` | `openai/gpt-6-luna` |
 
 Add custom aliases in config:
 
 ```toml
 [model.aliases]
-fast = "gpt-4o-mini"
-smart = "claude-3-7-sonnet-latest"
+fast = "gpt-6-luna"
+smart = "claude-sonnet-5-5"
 local = "ollama/llama3"
 ```
 

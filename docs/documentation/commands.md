@@ -47,7 +47,7 @@ nca -r
 nca --no-resume
 
 # Use a specific model
-nca --model "claude-3-7-sonnet-latest"
+nca --model "claude-sonnet-5-5"
 
 # Enable thinking with custom budget
 nca -t --thinking-budget 10000
@@ -133,7 +133,7 @@ nca spawn --prompt "..." [OPTIONS]
 
 ```bash
 nca spawn --prompt "write comprehensive tests for the auth module"
-nca spawn --prompt "document all public APIs" --model "MiniMax-M2.7"
+nca spawn --prompt "document all public APIs" --model "MiniMax-M3.1-Flash"
 ```
 
 ---
@@ -183,7 +183,7 @@ nca resume <SESSION_ID> [OPTIONS]
 ```bash
 nca resume abc123
 nca resume abc123 --prompt "continue where you left off"
-nca resume abc123 --model "claude-3-7-sonnet-latest"
+nca resume abc123 --model "claude-sonnet-5-5"
 ```
 
 ---
