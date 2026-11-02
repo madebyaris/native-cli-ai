@@ -8,11 +8,11 @@ use agent_client_protocol::schema::v1::{
     AgentCapabilities, AvailableCommandsUpdate, CancelNotification, CurrentModeUpdate,
     DeleteSessionRequest, DeleteSessionResponse, Implementation, InitializeRequest,
     InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
-    LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptCapabilities, PromptRequest,
-    PromptResponse, SessionCapabilities, SessionConfigOption, SessionDeleteCapabilities, SessionId,
-    SessionInfo, SessionListCapabilities, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
-    SetSessionModeResponse,
+    LoadSessionResponse, McpServer, NewSessionRequest, NewSessionResponse, PromptCapabilities,
+    PromptRequest, PromptResponse, SessionCapabilities, SessionConfigOption,
+    SessionDeleteCapabilities, SessionId, SessionInfo, SessionListCapabilities,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
 };
 use agent_client_protocol::{Client, ConnectionTo, Error, Responder};
 use nca_common::config::{NcaConfig, PermissionMode};
@@ -78,6 +78,15 @@ impl AcpServer {
     /// Config for one workspace: the workspace's own `.nca/config.toml` layered
     /// over the global file, with the command-line overrides re-applied.
     fn config_for(&self, cwd: &Path) -> NcaConfig {
+        self.config_for_with_servers(cwd, &[])
+    }
+
+    /// Config for one workspace, plus the MCP servers the ACP client supplied for this
+    /// session. A desktop client often ships its own tools (search, browsers, issue
+    /// trackers) as MCP servers; ignoring them would leave the agent without capabilities
+    /// the user already has open. Servers named in the workspace config win on a clash,
+    /// so a local override stays authoritative.
+    fn config_for_with_servers(&self, cwd: &Path, servers: &[McpServer]) -> NcaConfig {
         let mut config = match NcaConfig::load_for_workspace(cwd) {
             Ok(config) => config,
             Err(error) => {
@@ -90,6 +99,24 @@ impl AcpServer {
         }
         if let Some(mode) = self.permission_override {
             config.permissions.mode = mode;
+        }
+        for server in servers {
+            let Some(converted) = crate::mcp::to_server_config(server) else {
+                continue;
+            };
+            if config
+                .mcp
+                .servers
+                .iter()
+                .any(|existing| existing.name == converted.name)
+            {
+                tracing::info!(
+                    server = %converted.name,
+                    "client MCP server shadowed by the workspace config"
+                );
+                continue;
+            }
+            config.mcp.servers.push(converted);
         }
         config
     }
@@ -148,13 +175,10 @@ impl AcpServer {
         responder: Responder<NewSessionResponse>,
         cx: ConnectionTo<Client>,
     ) -> Result<(), Error> {
-        if !request.mcp_servers.is_empty() {
-            tracing::warn!(
-                count = request.mcp_servers.len(),
-                "client mcpServers are not connected; nca uses its own MCP config"
-            );
-        }
-        match self.create_session(request.cwd, cx.clone()).await {
+        match self
+            .create_session(request.cwd, cx.clone(), &request.mcp_servers)
+            .await
+        {
             Ok(slot) => {
                 let (_, _, mode) = slot.config_snapshot().await;
                 slot.load_model_catalog(CATALOG_WAIT).await;
@@ -418,10 +442,11 @@ impl AcpServer {
         &self,
         cwd: PathBuf,
         cx: ConnectionTo<Client>,
+        client_servers: &[agent_client_protocol::schema::v1::McpServer],
     ) -> Result<Arc<SessionSlot>, String> {
         let cwd = canonicalize(&cwd)?;
         let id = new_session_id();
-        let config = self.config_for(&cwd);
+        let config = self.config_for_with_servers(&cwd, client_servers);
         let slot = SessionSlot::new(
             id,
             cwd.clone(),

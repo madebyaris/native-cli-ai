@@ -98,7 +98,7 @@ nca resume <session-id>
 nca resume <session-id> --prompt "continue with the tests"
 
 # Resume with a different model
-nca resume <session-id> --model "claude-3-7-sonnet-latest"
+nca resume <session-id> --model "claude-sonnet-5-5"
 
 # Resume the most recent session (shorthand)
 nca -r

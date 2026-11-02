@@ -4,9 +4,10 @@ use nca_common::event::{AgentEvent, BusyState};
 use nca_common::message::{
     ContentPart, ImageAttachment, Message, MessageContent, MessageToolCall, Role,
 };
+use nca_common::pricing::ModelPricing;
 use nca_common::tool::{PermissionTier, ToolCall, ToolDefinition, ToolResult};
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,7 +15,7 @@ use std::time::Duration;
 
 use crate::approval::{ApprovalPolicy, ApprovalVerdict};
 use crate::context_view::{is_context_summary, plan_context_view_fitted};
-use crate::cost::CostTracker;
+use crate::cost::{CostTracker, TokenUsage, price_for};
 use crate::hooks::{HookEventKind, HookRunner};
 use crate::provider::{Provider, ProviderError, StreamChunk};
 use crate::tools::ToolRegistry;
@@ -178,6 +179,8 @@ pub struct AgentLoop {
     /// Leave this many tokens for the response when deriving the budget.
     reserved_output_tokens: usize,
     retry_base_delay: Duration,
+    /// Configured `[pricing]` entries, checked before the built-in price table.
+    price_overrides: BTreeMap<String, ModelPricing>,
 }
 
 impl AgentLoop {
@@ -210,6 +213,7 @@ impl AgentLoop {
             request_token_budget: None,
             reserved_output_tokens: 0,
             retry_base_delay: DEFAULT_RETRY_BASE_DELAY,
+            price_overrides: BTreeMap::new(),
         }
     }
 
@@ -237,6 +241,11 @@ impl AgentLoop {
     /// Tokens held back from the budget for the model's reply.
     pub fn set_reserved_output_tokens(&mut self, tokens: usize) {
         self.reserved_output_tokens = tokens;
+    }
+
+    /// Replace the `[pricing]` entries used for cost estimates.
+    pub fn set_price_overrides(&mut self, overrides: BTreeMap<String, ModelPricing>) {
+        self.price_overrides = overrides;
     }
 
     /// Set the system prompt. The leading system message is replaced, so
@@ -581,9 +590,18 @@ impl AgentLoop {
                 .sum::<usize>()
                 / 4) as u64;
             let estimated_output = (final_text.len() / 4) as u64;
-            self.cost_tracker.add(estimated_input, estimated_output);
+            let price = price_for(&self.model, &self.price_overrides);
+            self.cost_tracker.add(
+                TokenUsage {
+                    input: estimated_input,
+                    output: estimated_output,
+                    ..TokenUsage::default()
+                },
+                price,
+            );
             self.emit(AgentEvent::CostUpdated {
                 input_tokens: self.cost_tracker.input_tokens,
+                cached_input_tokens: self.cost_tracker.cached_input_tokens,
                 output_tokens: self.cost_tracker.output_tokens,
                 estimated_cost_usd: self.cost_tracker.estimated_cost_usd(),
             })
@@ -792,11 +810,24 @@ impl AgentLoop {
                 }
                 StreamChunk::Usage {
                     input_tokens,
+                    cached_input_tokens,
+                    cache_write_input_tokens,
                     output_tokens,
                 } => {
-                    self.cost_tracker.add(input_tokens, output_tokens);
+                    // Priced at the model active for this call, so a mid-session switch is exact.
+                    let price = price_for(&self.model, &self.price_overrides);
+                    self.cost_tracker.add(
+                        TokenUsage {
+                            input: input_tokens,
+                            cached_input: cached_input_tokens,
+                            cache_write_input: cache_write_input_tokens,
+                            output: output_tokens,
+                        },
+                        price,
+                    );
                     self.emit(AgentEvent::CostUpdated {
                         input_tokens: self.cost_tracker.input_tokens,
+                        cached_input_tokens: self.cost_tracker.cached_input_tokens,
                         output_tokens: self.cost_tracker.output_tokens,
                         estimated_cost_usd: self.cost_tracker.estimated_cost_usd(),
                     })
@@ -1314,6 +1345,76 @@ mod loop_tests {
         messages
             .iter()
             .any(|m| m.role == Role::User && m.content.to_summary_text().contains(needle))
+    }
+
+    #[tokio::test]
+    async fn cost_updates_price_each_call_at_the_model_active_for_it() {
+        let usage = || StreamChunk::Usage {
+            input_tokens: 1_000_000,
+            cached_input_tokens: 800_000,
+            cache_write_input_tokens: 0,
+            output_tokens: 0,
+        };
+        let turn = || {
+            Ok(vec![
+                usage(),
+                StreamChunk::TextDelta("ok".into()),
+                StreamChunk::Finish {
+                    reason: "stop".into(),
+                },
+                StreamChunk::Done,
+            ])
+        };
+        let provider = ScriptedProvider {
+            script: Mutex::new(vec![turn(), turn()].into()),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4096);
+        let approval = ApprovalPolicy::new(PermissionConfig {
+            mode: PermissionMode::BypassPermissions,
+            ..Default::default()
+        });
+        let mut agent = AgentLoop::new(
+            Box::new(provider),
+            ToolRegistry::new(),
+            approval,
+            "claude-sonnet-5-5".into(),
+            tx,
+            8,
+            200,
+            0,
+            None,
+        );
+
+        agent
+            .run_turn("first", Path::new("."), &[])
+            .await
+            .expect("first turn");
+        // A model with no known price: its tokens count, its cost does not.
+        agent.model = "gpt-6-luna".into();
+        agent
+            .run_turn("second", Path::new("."), &[])
+            .await
+            .expect("second turn");
+
+        let mut last = None;
+        while let Ok(event) = rx.try_recv() {
+            if let AgentEvent::CostUpdated {
+                input_tokens,
+                cached_input_tokens,
+                estimated_cost_usd,
+                ..
+            } = event
+            {
+                last = Some((input_tokens, cached_input_tokens, estimated_cost_usd));
+            }
+        }
+        let (input_tokens, cached_input_tokens, cost) = last.expect("cost update");
+        assert_eq!(input_tokens, 2_000_000);
+        assert_eq!(cached_input_tokens, 1_600_000);
+        // First call: 200k uncached at $2 plus 800k cached at $0.10 per million. Second call adds
+        // no cost because gpt-6-luna has no flat price.
+        assert!((cost - 0.48).abs() < 1e-9, "unexpected cost {cost}");
     }
 
     #[tokio::test]

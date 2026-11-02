@@ -266,6 +266,7 @@ impl Supervisor {
         );
         agent.set_smart_compaction_mode(config.memory.context.smart_compaction_mode);
         agent.set_reserved_output_tokens(config.model.max_tokens as usize);
+        agent.set_price_overrides(config.pricing.clone());
 
         let context_manager =
             Self::make_context_manager(&config, &config.model.default_model).await;
@@ -584,12 +585,12 @@ impl Supervisor {
             return Ok(());
         }
 
-        // Generate summary prompt
-        let summary_prompt = self.context_manager.summary_prompt(&messages_to_summarize);
+        // Build the summarisation request: instruction plus the conversation itself.
+        let summary_request = self.context_manager.summary_request(&messages_to_summarize);
 
         // Try to use the AI to summarize. If the provider supports a quick call,
         // we can use it. Otherwise, fall back to extractive summarization.
-        match self.summarize_with_ai(&summary_prompt).await {
+        match self.summarize_with_ai(&summary_request).await {
             Ok(summary) => {
                 // Apply the summary
                 self.agent.messages = self
@@ -634,16 +635,15 @@ impl Supervisor {
         Ok(())
     }
 
-    /// Use AI to generate a summary of the conversation.
-    async fn summarize_with_ai(&self, prompt: &str) -> Result<String, String> {
-        use nca_common::message::Message;
-
-        let messages = vec![Message::user(prompt)];
-
+    /// Use AI to generate a summary from a role-typed request.
+    async fn summarize_with_ai(
+        &self,
+        messages: &[nca_common::message::Message],
+    ) -> Result<String, String> {
         let mut stream = self
             .agent
             .provider
-            .chat(&messages, &[], &self.model, self.workspace_root.as_path())
+            .chat(messages, &[], &self.model, self.workspace_root.as_path())
             .await
             .map_err(|e| e.to_string())?;
 
@@ -891,11 +891,13 @@ impl Supervisor {
         self.model = self.config.provider.active_model().to_string();
         let mode = self.config.memory.context.smart_compaction_mode;
         let reserved_output = self.config.model.max_tokens as usize;
+        let pricing = self.config.pricing.clone();
         let m = self.model.clone();
         let agent = self.agent_mut();
         agent.model = m;
         agent.set_smart_compaction_mode(mode);
         agent.set_reserved_output_tokens(reserved_output);
+        agent.set_price_overrides(pricing);
         agent.replace_provider(provider);
         self.rebuild_context_manager_sync();
         let window = self.context_manager.config().context_window_target;

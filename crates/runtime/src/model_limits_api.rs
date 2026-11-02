@@ -600,7 +600,11 @@ async fn fetch_provider_model_ids_live(config: &NcaConfig) -> Vec<String> {
         ProviderKind::Anthropic => fetch_anthropic_model_ids(&client, config).await,
         ProviderKind::OpenAi => fetch_openai_model_ids(&client, config).await,
         ProviderKind::Custom => fetch_custom_model_ids(&client, config).await,
-        ProviderKind::MiniMax => vec!["MiniMax-M2.5".into(), "MiniMax-M2.7".into()],
+        ProviderKind::MiniMax => vec![
+            "MiniMax-M3.1-Flash".into(),
+            "MiniMax-M2.5".into(),
+            "MiniMax-M2.7".into(),
+        ],
     }
 }
 

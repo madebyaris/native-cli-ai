@@ -1,7 +1,7 @@
 ## Learned User Preferences
 
 - Always use Rust-native solutions; no JavaScript, Node.js, or Electron involvement
-- MiniMax M2.5 is the primary LLM provider; prioritize MiniMax integration over other providers
+- MiniMax is the primary LLM provider (default M3.1-Flash); prioritize MiniMax integration over other providers
 - **CLI (`nca`) is the product surface**—terminal UX, JSON/NDJSON streams, and Unix-socket IPC
 - Empty provider completions must fail loudly, never silently succeed
 - Use plan-first workflow: create a plan document, then implement from it
@@ -17,7 +17,9 @@
 - ACP entry point is `nca acp` (crate `nca-acp`, `agent-client-protocol` 3.6, ACP v1); stdout is JSON-RPC only, logs go to stderr
 - ACP supports session new/load/list/delete, modes, model picker, approvals, `/compact`, `/rename`, `/model`, `/mode`, `available_commands_update`, `session_info_update`, and `compaction_update` when the client advertises `session.compaction`
 - Context fitting lives in `crates/core/src/context_view.rs` (`plan_context_view_fitted`): evicts oldest non-system groups, keeps tool groups atomic, protects the system prompt, first user task, and newest turn, shrinks only older oversized messages, and never truncates the current request
-- MiniMax context windows in `crates/runtime/src/model_limits.rs`: M2.5/M2.1/M2.7/M2 = 204,800, M1 = 1,000,000
+- MiniMax context windows in `crates/runtime/src/model_limits.rs`: M2.5/M2.1/M2.7/M2 = 204,800, M1 = 1,000,000, M3.1-Flash = 1,000,000. Built-in defaults are MiniMax-M3.1-Flash, `gpt-6-luna`, and `claude-sonnet-5-5` (1M context)
+- Cost estimates: built-in flat list prices in `crates/core/src/cost.rs` (`price_for`), overridden per model by `[pricing."<model>"]` in config (`common::pricing::ModelPricing`). A model with no known price shows `n/a`; never fall back to another model's price
+- Prompt-cache counts are parsed in `crates/core/src/provider/openai_compat.rs` and `anthropic_compat.rs`; `StreamChunk::Usage` carries `input_tokens` as the whole prompt, and `CostUpdated` carries `cached_input_tokens`
 - IPC between CLI and runtime uses Unix domain sockets with newline-delimited JSON
 - Product home at `$NCA_HOME`, `$XDG_DATA_HOME/ncacli`, or `~/.local/share/ncacli/`; sessions/memory/last_session/cli-index under `workspaces/<workspace-id>/`
 - Sessions persisted as `<id>.json` (state) + `<id>.events.jsonl` (event log) in `~/.local/share/ncacli/workspaces/<id>/sessions/`

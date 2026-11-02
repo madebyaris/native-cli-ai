@@ -5,6 +5,7 @@
 
 mod approval;
 mod history;
+mod mcp;
 mod options;
 mod server;
 mod session;

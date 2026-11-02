@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.5"
+version = "0.6.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/madebyaris/native-cli-ai"
@@ -39,7 +39,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 anyhow = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
 
 # External crates
 cli-prompts = "0.1"

@@ -60,6 +60,8 @@ pub fn spawn_anthropic_stream(
         let mut tool_name = String::new();
         let mut tool_input = String::new();
         let mut input_tokens: u64 = 0;
+        let mut cached_input_tokens: u64 = 0;
+        let mut cache_write_input_tokens: u64 = 0;
         let mut finish_reason: Option<String> = None;
 
         while let Some(item) = byte_stream.next().await {
@@ -125,9 +127,15 @@ pub fn spawn_anthropic_stream(
                         return;
                     }
                     "message_start" => {
-                        input_tokens = event["message"]["usage"]["input_tokens"]
-                            .as_u64()
-                            .unwrap_or(0);
+                        let usage = &event["message"]["usage"];
+                        // Anthropic's `input_tokens` excludes cache reads and writes, which are
+                        // reported beside it. Add them back so `input_tokens` is the whole prompt.
+                        let uncached = usage["input_tokens"].as_u64().unwrap_or(0);
+                        cached_input_tokens =
+                            usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                        cache_write_input_tokens =
+                            usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                        input_tokens = uncached + cached_input_tokens + cache_write_input_tokens;
                     }
                     "content_block_start" => {
                         let block = &event["content_block"];
@@ -199,10 +207,14 @@ pub fn spawn_anthropic_stream(
                             let _ = tx
                                 .send(StreamChunk::Usage {
                                     input_tokens,
+                                    cached_input_tokens,
+                                    cache_write_input_tokens,
                                     output_tokens,
                                 })
                                 .await;
                             input_tokens = 0;
+                            cached_input_tokens = 0;
+                            cache_write_input_tokens = 0;
                         }
                     }
                     _ => {}
@@ -542,6 +554,37 @@ mod tests {
 
         assert_eq!(chunk_kinds(&chunks), ["text", "usage", "finish", "done"]);
         assert!(matches!(&chunks[2], StreamChunk::Finish { reason } if reason == "length"));
+    }
+
+    #[tokio::test]
+    async fn usage_counts_cache_reads_and_writes_as_part_of_the_prompt() {
+        let chunks = stream_chunks(sse(&[
+            (
+                "message_start",
+                r#"{"message":{"usage":{"input_tokens":9,"cache_read_input_tokens":4000,"cache_creation_input_tokens":300}}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"delta":{"type":"text_delta","text":"ok"}}"#,
+            ),
+            (
+                "message_delta",
+                r#"{"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":12}}"#,
+            ),
+            ("message_stop", "{}"),
+        ]))
+        .await;
+
+        assert_eq!(chunk_kinds(&chunks), ["text", "usage", "finish", "done"]);
+        assert!(matches!(
+            &chunks[1],
+            StreamChunk::Usage {
+                input_tokens: 4309,
+                cached_input_tokens: 4000,
+                cache_write_input_tokens: 300,
+                output_tokens: 12,
+            }
+        ));
     }
 
     #[tokio::test]
