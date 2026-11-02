@@ -584,12 +584,12 @@ impl Supervisor {
             return Ok(());
         }
 
-        // Generate summary prompt
-        let summary_prompt = self.context_manager.summary_prompt(&messages_to_summarize);
+        // Build the summarisation request: instruction plus the conversation itself.
+        let summary_request = self.context_manager.summary_request(&messages_to_summarize);
 
         // Try to use the AI to summarize. If the provider supports a quick call,
         // we can use it. Otherwise, fall back to extractive summarization.
-        match self.summarize_with_ai(&summary_prompt).await {
+        match self.summarize_with_ai(&summary_request).await {
             Ok(summary) => {
                 // Apply the summary
                 self.agent.messages = self
@@ -634,16 +634,15 @@ impl Supervisor {
         Ok(())
     }
 
-    /// Use AI to generate a summary of the conversation.
-    async fn summarize_with_ai(&self, prompt: &str) -> Result<String, String> {
-        use nca_common::message::Message;
-
-        let messages = vec![Message::user(prompt)];
-
+    /// Use AI to generate a summary from a role-typed request.
+    async fn summarize_with_ai(
+        &self,
+        messages: &[nca_common::message::Message],
+    ) -> Result<String, String> {
         let mut stream = self
             .agent
             .provider
-            .chat(&messages, &[], &self.model, self.workspace_root.as_path())
+            .chat(messages, &[], &self.model, self.workspace_root.as_path())
             .await
             .map_err(|e| e.to_string())?;
 

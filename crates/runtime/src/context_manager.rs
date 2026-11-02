@@ -366,32 +366,47 @@ impl ContextManager {
     }
 
     /// Generate a prompt for the AI to summarize conversation.
-    pub fn summary_prompt(&self, messages: &[Message]) -> String {
+    /// Instruction that precedes a summarisation request. Kept separate from the
+    /// transcript because the transcript is passed as real messages, not as text.
+    const SUMMARY_INSTRUCTION: &'static str = r#"You are compacting a coding session so it can continue past the
+context window. Write the summary the agent will continue from.
+
+Preserve, and prefer to quote verbatim over paraphrasing:
+1. Every instruction, constraint, prohibition, or preference the user stated,
+   including rules about how to work, not only what to build.
+2. The current goal and what remains unfinished.
+3. Decisions already made, and the reasons for them.
+4. Concrete facts: file paths, symbol names, commands, error text, versions.
+
+Do not invent progress that did not happen. If something was attempted and failed,
+say so. Write in the voice of the ongoing session. Keep it under 500 words.
+"#;
+
+    /// Build the summarisation request: the instruction plus the conversation itself.
+    ///
+    /// Messages keep their real roles, so a tool result can never be read as an
+    /// instruction. A conversation collapsed into one string with `[User]:`-style labels
+    /// lets text inside a tool result impersonate a user turn, and that impersonation
+    /// survives compaction into the summary.
+    pub fn summary_request(&self, messages: &[Message]) -> Vec<Message> {
         let prepared = self.prepare_for_summary(messages);
-        let stats = self.stats(&prepared);
 
-        format!(
-            r#"Please summarize the following conversation concisely.
+        // A tool result with no assistant message before it is rejected by providers, so
+        // the slice starts at the first non-tool message.
+        let start = prepared
+            .iter()
+            .position(|message| message.role != Role::Tool)
+            .unwrap_or(prepared.len());
 
-The summary should:
-1. Capture the key topics and goals discussed
-2. Note any important decisions or findings
-3. Preserve critical context (file paths, variable names, errors, etc.)
-4. Be written as if you're continuing the conversation
+        let mut request = Vec::with_capacity(prepared.len() - start + 1);
+        request.push(Message::user(Self::SUMMARY_INSTRUCTION));
+        request.extend(prepared[start..].iter().cloned());
+        request
+    }
 
-Keep the summary under 500 words.
-
-Current context stats:
-- Messages: {}
-- Estimated tokens: {} (target: {})
-
----
-
-Conversation to summarize:
-
-"#,
-            stats.message_count, stats.estimated_tokens, self.config.context_window_target
-        )
+    /// Stats describing what a request would summarise, for the compaction event.
+    pub fn summary_stats(&self, messages: &[Message]) -> ContextStats {
+        self.stats(&self.prepare_for_summary(messages))
     }
 
     /// Get the config.
@@ -669,5 +684,74 @@ mod tests {
         let window = manager.get_sliding_window(&messages, None);
 
         assert_no_orphaned_tool_results(&window);
+    }
+
+    /// The regressions this guards: the request used to carry the instruction and an
+    /// empty transcript, so the model summarised nothing and `apply_summary` then deleted
+    /// the history it was meant to condense.
+    #[test]
+    fn summary_request_carries_the_conversation_with_its_roles() {
+        let manager = ContextManager::new(ContextManagerConfig::default(), "test".to_string());
+        let messages = vec![
+            make_message(Role::User, "fix the parser"),
+            make_message(Role::Assistant, "looking now"),
+            Message::assistant_with_tool_calls(
+                "reading",
+                vec![make_tool_call("call-1", "read_file")],
+            ),
+            Message::tool("call-1", "fn parse() {}"),
+            make_message(Role::User, "never touch generated/"),
+        ];
+
+        let request = manager.summary_request(&messages);
+
+        let first = request.first().expect("instruction message");
+        assert_eq!(first.role, Role::User);
+        assert!(
+            first
+                .content
+                .to_summary_text()
+                .contains("compacting a coding session"),
+            "first message should be the summarisation instruction"
+        );
+
+        let transcript = &request[1..];
+        assert_eq!(transcript.len(), messages.len(), "every message is kept");
+        assert_eq!(transcript[0].role, Role::User);
+        assert_eq!(transcript[0].content.to_summary_text(), "fix the parser");
+        assert_eq!(transcript[1].role, Role::Assistant);
+        // Tool call/result pairing survives, so providers accept the request.
+        assert!(transcript[2].tool_calls.is_some());
+        assert_eq!(transcript[3].role, Role::Tool);
+        assert_eq!(transcript[3].tool_call_id.as_deref(), Some("call-1"));
+        assert_no_orphaned_tool_results(transcript);
+    }
+
+    #[test]
+    fn summary_instruction_asks_for_constraints_verbatim() {
+        let instruction = ContextManager::SUMMARY_INSTRUCTION;
+
+        // Compaction silently drops rules about how to work far more often than specs of
+        // what to build, so the instruction names them explicitly.
+        assert!(instruction.contains("constraint"));
+        assert!(instruction.contains("prohibition"));
+        assert!(instruction.contains("verbatim"));
+        assert!(instruction.contains("Do not invent progress"));
+    }
+
+    #[test]
+    fn summary_request_drops_a_leading_orphan_tool_result() {
+        let manager = ContextManager::new(ContextManagerConfig::default(), "test".to_string());
+        // A range that starts on a tool result would be rejected by the provider.
+        let messages = vec![
+            Message::tool("call-orphan", "dangling result"),
+            make_message(Role::User, "continue"),
+        ];
+
+        let request = manager.summary_request(&messages);
+
+        assert_eq!(request.len(), 2);
+        assert_eq!(request[1].role, Role::User);
+        assert_no_orphaned_tool_results(&request[1..]);
     }
 }
