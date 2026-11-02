@@ -255,6 +255,22 @@ mouse_capture = true      # false lets the terminal select and copy text (wheel 
 onboarding_completed = false
 ```
 
+### `[pricing]` — Cost Estimates
+
+Costs in the TUI sidebar, the status bar, and `CostUpdated` events use per-model prices in USD per million tokens. Each model id can have an entry:
+
+```toml
+[pricing."my-model"]                # replace with the model id and your provider's rates
+input_per_mtok = 1.00               # uncached prompt tokens
+output_per_mtok = 4.00              # generated tokens
+cached_input_per_mtok = 0.25        # optional: prompt tokens served from cache (default: input price)
+cache_write_per_mtok = 1.25         # optional: prompt tokens written to cache (default: input price)
+```
+
+Built-in prices cover Anthropic models, OpenAI Standard-tier models with flat prices, and `MiniMax-M3.1-Flash`. An entry here overrides the built-in price. A model with no price shows `cost n/a` and its tokens still count. Models whose price depends on prompt length (such as `gpt-6-luna`, `claude-haiku-5-5`, and `MiniMax-M3`) need an entry for the rate your prompts fall under.
+
+The cache hit percent (`cached N%`) shows how much of the prompt the provider served from its cache. It needs a provider that reports cache usage.
+
 ---
 
 ## Environment Variables
