@@ -6,12 +6,12 @@
 
 <p align="center">
   <strong>Rust-native coding agent. Single binary. Terminal-first.</strong><br />
-  <sub>v0.5.5 — desktop clients over ACP, context that fits, fewer prompts</sub>
+  <sub>v0.6.0 — cost that matches your provider, compaction that keeps the conversation, search with fallback</sub>
 </p>
 
 <p align="center">
   <a href="#installation">Install</a> &middot;
-  <a href="#whats-new-in-050">What's New</a> &middot;
+  <a href="#whats-new-in-060">What's New</a> &middot;
   <a href="#quick-start">Quick Start</a> &middot;
   <a href="#core-commands">Commands</a> &middot;
   <a href="#interactive-ux">Interactive UX</a> &middot;
@@ -26,6 +26,19 @@
 It is meant for people who like their AI tooling close to the terminal: fast to start, easy to script, and capable of running real session workflows without dragging in a browser shell.
 
 The product surface is the CLI. No desktop wrapper, no Electron, no browser in the default path.
+
+## What's New in 0.6.0
+
+- **Cost that matches your provider** — each model is priced with its own list price, so the cost line reflects the provider you configured. A model with no built-in price shows `cost n/a`. Add a `[pricing]` entry to price it. See [Configuration](docs/documentation/configuration.md).
+- **Cache hit share in the TUI** — the sidebar and status bar show how much of the prompt the provider served from its cache (`cached N%`). Anthropic cache writes are billed at their own rate.
+- **Compaction keeps the conversation** — the first compaction used to summarise an empty prompt and then delete the history it was meant to condense. The summary now receives the real messages, with their roles, and keeps constraints and preferences verbatim.
+- **Stable prompt prefix** — instructions, `AGENTS.md`, and tool guidance come first in the system prompt, and environment, todos, and memory come last. The static part stays cached when those change. Changing todos still re-prefills the conversation history.
+- **Search with fallback** — `web_search` tries a configurable chain of backends and reports every failure. Keyed backends (Exa, Tavily, Serper, Brave API) are skipped with the config line to add when no key is set. Keyless ones (DuckDuckGo, Brave, Bing, Mojeek) need no key.
+- **ACP editors can supply MCP servers** — MCP servers passed in `session/new` become nca tools for that session. Stdio and streamable HTTP are supported. Workspace config wins on a name clash.
+- **New default models** — MiniMax-M3.1-Flash for MiniMax, `gpt-6-luna` for OpenAI and OpenRouter, and `claude-sonnet-5-5` for Anthropic. GPT-6 Luna and Terra send `reasoning_effort: none` with tool calls.
+- **Fixed** — sub-cent session costs printed as `$0.0000`.
+
+**Upgrade note:** the default models changed. Set `[model]` and `[provider]` in config to keep the previous ones.
 
 ## What's New in 0.5.5
 
