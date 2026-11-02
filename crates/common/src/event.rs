@@ -92,8 +92,13 @@ pub enum AgentEvent {
         approved: bool,
     },
     CostUpdated {
+        /// Whole prompt tokens so far, cached parts included.
         input_tokens: u64,
+        /// Prompt tokens served from the provider's cache so far. Absent in older logs.
+        #[serde(default)]
+        cached_input_tokens: u64,
         output_tokens: u64,
+        /// USD at each model's price. Zero when no price is known (shown as `n/a`).
         estimated_cost_usd: f64,
     },
     Checkpoint {

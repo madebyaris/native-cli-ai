@@ -35,6 +35,7 @@ use crossterm::{
 use nca_common::config::{ProviderCompatibility, ProviderKind};
 use nca_common::event::{BusyState, QuestionSelection};
 use nca_core::approval::suggest_allow_pattern;
+use nca_core::cost::{cache_hit_percent, format_cost_usd};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -405,15 +406,22 @@ pub fn run_blocking(
                         let out_w = bar_width - in_w;
                         format!("{}{}", "▒".repeat(in_w), "█".repeat(out_w))
                     };
+                    let cache_note = match cache_hit_percent(g.input_tokens, g.cached_input_tokens) {
+                        Some(percent) => format!(" ({percent}% cached)"),
+                        None => String::new(),
+                    };
                     let usage_lines = vec![
-                        Line::from(format!("input   {}", g.input_tokens)),
+                        Line::from(format!("input   {}{cache_note}", g.input_tokens)),
                         Line::from(format!("output  {}", g.output_tokens)),
                         Line::from(format!("total   {total}")),
                         Line::from(vec![
                             Span::styled("i/o     ", Style::default().fg(theme::MUTED)),
                             Span::styled(bar, Style::default().fg(theme::TOOL)),
                         ]),
-                        Line::from(format!("cost    ${:.4}", g.cost_usd)),
+                        Line::from(format!(
+                            "cost    {}",
+                            format_cost_usd(g.cost_usd, total)
+                        )),
                         Line::default(),
                         Line::from(if g.active_approval.is_some() {
                             "pending approval"
@@ -675,20 +683,24 @@ pub fn run_blocking(
                         g.session_id[..8.min(g.session_id.len())].to_string(),
                         Style::default().fg(theme::MUTED),
                     ));
+                    let cache_note = cache_hit_percent(g.input_tokens, g.cached_input_tokens)
+                        .map(|percent| format!(" cached:{percent}%"))
+                        .unwrap_or_default();
                     status_spans.extend([
                         Span::raw(" │ in:"),
                         Span::styled(
                             format!("{}", g.input_tokens),
                             Style::default().fg(theme::TEXT),
                         ),
+                        Span::styled(cache_note, Style::default().fg(theme::MUTED)),
                         Span::raw(" out:"),
                         Span::styled(
                             format!("{}", g.output_tokens),
                             Style::default().fg(theme::TEXT),
                         ),
-                        Span::raw(" │ $"),
+                        Span::raw(" │ "),
                         Span::styled(
-                            format!("{:.4}", g.cost_usd),
+                            format_cost_usd(g.cost_usd, g.input_tokens + g.output_tokens),
                             Style::default().fg(theme::SUCCESS),
                         ),
                     ]);

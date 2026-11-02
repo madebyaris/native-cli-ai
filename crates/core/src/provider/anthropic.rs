@@ -175,6 +175,8 @@ mod tests {
             &chunks[2],
             StreamChunk::Usage {
                 input_tokens: 13,
+                cached_input_tokens: 0,
+                cache_write_input_tokens: 0,
                 output_tokens: 5
             }
         ));

@@ -127,6 +127,9 @@ pub fn spawn_openai_stream(
                         let _ = tx
                             .send(StreamChunk::Usage {
                                 input_tokens,
+                                cached_input_tokens: cached_prompt_tokens(usage),
+                                // OpenAI-style caches do not charge for writes.
+                                cache_write_input_tokens: 0,
                                 output_tokens,
                             })
                             .await;
@@ -183,6 +186,15 @@ pub fn spawn_openai_stream(
     });
 
     rx
+}
+
+/// Prompt tokens served from cache. OpenAI-style servers report `prompt_tokens_details.cached_tokens`;
+/// DeepSeek reports `prompt_cache_hit_tokens`. Either is a subset of `prompt_tokens`.
+fn cached_prompt_tokens(usage: &Value) -> u64 {
+    usage["prompt_tokens_details"]["cached_tokens"]
+        .as_u64()
+        .or_else(|| usage["prompt_cache_hit_tokens"].as_u64())
+        .unwrap_or(0)
 }
 
 /// DeepSeek sends the same text in `reasoning_content` and `reasoning`; take only one.
@@ -536,6 +548,53 @@ mod tests {
             ["tool_use", "usage", "finish", "done"]
         );
         assert_eq!(finish_reasons(&chunks), ["tool_calls"]);
+    }
+
+    #[tokio::test]
+    async fn usage_reports_cached_prompt_tokens_in_either_wire_format() {
+        let chunks = stream_chunks(sse(&[
+            r#"{"choices":[],"usage":{"prompt_tokens":2600,"completion_tokens":9,"prompt_tokens_details":{"cached_tokens":2555}}}"#,
+            "[DONE]",
+        ]))
+        .await;
+        assert!(matches!(
+            &chunks[0],
+            StreamChunk::Usage {
+                input_tokens: 2600,
+                cached_input_tokens: 2555,
+                cache_write_input_tokens: 0,
+                output_tokens: 9,
+            }
+        ));
+
+        // DeepSeek names the same count `prompt_cache_hit_tokens`.
+        let chunks = stream_chunks(sse(&[
+            r#"{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":1,"prompt_cache_hit_tokens":64,"prompt_cache_miss_tokens":36}}"#,
+            "[DONE]",
+        ]))
+        .await;
+        assert!(matches!(
+            &chunks[0],
+            StreamChunk::Usage {
+                input_tokens: 100,
+                cached_input_tokens: 64,
+                ..
+            }
+        ));
+
+        // A server that reports no cache fields reads as zero cached tokens.
+        let chunks = stream_chunks(sse(&[
+            r#"{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2}}"#,
+            "[DONE]",
+        ]))
+        .await;
+        assert!(matches!(
+            &chunks[0],
+            StreamChunk::Usage {
+                cached_input_tokens: 0,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

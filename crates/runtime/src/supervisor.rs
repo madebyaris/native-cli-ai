@@ -266,6 +266,7 @@ impl Supervisor {
         );
         agent.set_smart_compaction_mode(config.memory.context.smart_compaction_mode);
         agent.set_reserved_output_tokens(config.model.max_tokens as usize);
+        agent.set_price_overrides(config.pricing.clone());
 
         let context_manager =
             Self::make_context_manager(&config, &config.model.default_model).await;
@@ -890,11 +891,13 @@ impl Supervisor {
         self.model = self.config.provider.active_model().to_string();
         let mode = self.config.memory.context.smart_compaction_mode;
         let reserved_output = self.config.model.max_tokens as usize;
+        let pricing = self.config.pricing.clone();
         let m = self.model.clone();
         let agent = self.agent_mut();
         agent.model = m;
         agent.set_smart_compaction_mode(mode);
         agent.set_reserved_output_tokens(reserved_output);
+        agent.set_price_overrides(pricing);
         agent.replace_provider(provider);
         self.rebuild_context_manager_sync();
         let window = self.context_manager.config().context_window_target;

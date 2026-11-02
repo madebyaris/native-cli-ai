@@ -32,8 +32,14 @@ pub enum StreamChunk {
         raw_arguments: String,
         error: String,
     },
+    /// Token counts for the call. `input_tokens` is the whole prompt, so the cached and
+    /// cache-written parts are subsets of it.
     Usage {
         input_tokens: u64,
+        /// Prompt tokens served from the provider's cache.
+        cached_input_tokens: u64,
+        /// Prompt tokens written to the provider's cache (Anthropic bills these separately).
+        cache_write_input_tokens: u64,
         output_tokens: u64,
     },
     /// Why the model stopped, normalized to `stop`, `length`, or `tool_calls` where possible.

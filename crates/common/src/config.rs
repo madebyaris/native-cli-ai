@@ -1,3 +1,4 @@
+use crate::pricing::ModelPricing;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
@@ -21,6 +22,9 @@ pub struct NcaConfig {
     /// CLI/TUI preferences (e.g. external editor).
     #[serde(default)]
     pub ui: UiConfig,
+    /// Price per model id, used for cost estimates. Overrides the built-in table.
+    #[serde(default)]
+    pub pricing: BTreeMap<String, ModelPricing>,
 }
 
 impl NcaConfig {
@@ -151,6 +155,9 @@ impl NcaConfig {
         }
         if let Some(recording) = partial.recording {
             self.recording.merge(recording);
+        }
+        if let Some(pricing) = partial.pricing {
+            self.pricing.extend(pricing);
         }
 
         if explicit_model_override {
@@ -1911,6 +1918,7 @@ struct PartialNcaConfig {
     web: Option<PartialWebConfig>,
     recording: Option<PartialRecordingConfig>,
     ui: Option<PartialUiConfig>,
+    pricing: Option<BTreeMap<String, ModelPricing>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -2131,6 +2139,32 @@ mod tests {
         let partial: PartialNcaConfig = toml::from_str(raw).expect("parse");
         let session = partial.session.expect("session table");
         assert_eq!(session.max_turns_per_run, Some(99));
+    }
+
+    #[test]
+    fn pricing_entries_merge_by_model_id() {
+        let raw = r#"
+            [pricing."MiniMax-M3.1-Flash"]
+            input_per_mtok = 0.2
+            output_per_mtok = 0.8
+            cached_input_per_mtok = 0.02
+
+            [pricing."deepseek-v4-1-flash"]
+            input_per_mtok = 0.27
+            output_per_mtok = 1.1
+        "#;
+        let partial: PartialNcaConfig = toml::from_str(raw).expect("parse");
+        let mut config = NcaConfig::default();
+        config.merge(partial);
+
+        let minimax = config
+            .pricing
+            .get("MiniMax-M3.1-Flash")
+            .expect("minimax price");
+        assert_eq!(minimax.input_per_mtok, 0.2);
+        assert_eq!(minimax.cached_input_per_mtok, Some(0.02));
+        assert_eq!(minimax.cache_write_per_mtok, None);
+        assert_eq!(config.pricing.len(), 2);
     }
 
     #[test]
