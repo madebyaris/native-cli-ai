@@ -58,6 +58,15 @@ impl OpenAiProvider {
     }
 }
 
+/// GPT-6 Luna and Terra accept function calls on Chat Completions only with
+/// `reasoning_effort` set to `none`. Other models keep the request unchanged.
+fn apply_gpt6_tool_effort(body: &mut serde_json::Value, model: &str, has_tools: bool) {
+    let supports_none = model.starts_with("gpt-6-luna") || model.starts_with("gpt-6.1-terra");
+    if has_tools && supports_none {
+        body["reasoning_effort"] = serde_json::json!("none");
+    }
+}
+
 #[async_trait::async_trait]
 impl Provider for OpenAiProvider {
     async fn chat(
@@ -73,7 +82,7 @@ impl Provider for OpenAiProvider {
             model.to_string()
         };
 
-        let body = openai_request_body(
+        let mut body = openai_request_body(
             messages,
             tools,
             &model,
@@ -81,6 +90,7 @@ impl Provider for OpenAiProvider {
             self.config.temperature,
             workspace_root,
         )?;
+        apply_gpt6_tool_effort(&mut body, &model, !tools.is_empty());
 
         let response = self
             .client
@@ -156,6 +166,29 @@ mod tests {
             "unexpected error: {err:?}"
         );
         assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn gpt6_luna_and_terra_disable_reasoning_only_when_tools_are_sent() {
+        let mut luna = serde_json::json!({"model": "gpt-6-luna"});
+        apply_gpt6_tool_effort(&mut luna, "gpt-6-luna", true);
+        assert_eq!(luna["reasoning_effort"], "none");
+
+        let mut terra = serde_json::json!({"model": "gpt-6.1-terra"});
+        apply_gpt6_tool_effort(&mut terra, "gpt-6.1-terra", true);
+        assert_eq!(terra["reasoning_effort"], "none");
+
+        let mut no_tools = serde_json::json!({"model": "gpt-6-luna"});
+        apply_gpt6_tool_effort(&mut no_tools, "gpt-6-luna", false);
+        assert!(no_tools.get("reasoning_effort").is_none());
+
+        let mut sol = serde_json::json!({"model": "gpt-6.1-sol"});
+        apply_gpt6_tool_effort(&mut sol, "gpt-6.1-sol", true);
+        assert!(sol.get("reasoning_effort").is_none());
+
+        let mut older = serde_json::json!({"model": "gpt-4o-mini"});
+        apply_gpt6_tool_effort(&mut older, "gpt-4o-mini", true);
+        assert!(older.get("reasoning_effort").is_none());
     }
 
     #[tokio::test]

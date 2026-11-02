@@ -1155,7 +1155,7 @@ impl Default for MiniMaxConfig {
             // International: https://api.minimax.io/anthropic
             // China:         https://api.minimaxi.com/anthropic
             base_url: "https://api.minimax.io/anthropic".into(),
-            model: "MiniMax-M2.5".into(),
+            model: "MiniMax-M3.1-Flash".into(),
             temperature: 0.7,
         }
     }
@@ -1200,7 +1200,7 @@ impl Default for OpenAiConfig {
             api_key_env: "OPENAI_API_KEY".into(),
             api_key: None,
             base_url: "https://api.openai.com".into(),
-            model: "gpt-4o-mini".into(),
+            model: "gpt-6-luna".into(),
             temperature: 0.7,
         }
     }
@@ -1245,7 +1245,7 @@ impl Default for AnthropicConfig {
             api_key_env: "ANTHROPIC_API_KEY".into(),
             api_key: None,
             base_url: "https://api.anthropic.com".into(),
-            model: "claude-3-7-sonnet-latest".into(),
+            model: "claude-sonnet-5-5".into(),
             temperature: 1.0,
         }
     }
@@ -1294,7 +1294,7 @@ impl Default for OpenRouterConfig {
             api_key_env: "OPENROUTER_API_KEY".into(),
             api_key: None,
             base_url: "https://openrouter.ai/api".into(),
-            model: "openai/gpt-4o-mini".into(),
+            model: "openai/gpt-6-luna".into(),
             temperature: 0.7,
             site_url: None,
             app_name: None,
@@ -1398,7 +1398,7 @@ pub struct ModelConfig {
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
-            default_model: "MiniMax-M2.5".into(),
+            default_model: "MiniMax-M3.1-Flash".into(),
             max_tokens: 8192,
             enable_thinking: false,
             thinking_budget: 5120,
@@ -2089,17 +2089,18 @@ fn default_max_memory_notes() -> usize {
 
 fn default_model_aliases() -> BTreeMap<String, String> {
     BTreeMap::from([
-        ("default".into(), "MiniMax-M2.5".into()),
-        ("minimax".into(), "MiniMax-M2.5".into()),
+        ("default".into(), "MiniMax-M3.1-Flash".into()),
+        ("minimax".into(), "MiniMax-M3.1-Flash".into()),
+        ("m3.1-flash".into(), "MiniMax-M3.1-Flash".into()),
         ("m2.5".into(), "MiniMax-M2.5".into()),
-        ("coding".into(), "MiniMax-M2.5".into()),
-        ("reasoning".into(), "MiniMax-M2.5".into()),
-        ("openai".into(), "gpt-4o-mini".into()),
+        ("coding".into(), "MiniMax-M3.1-Flash".into()),
+        ("reasoning".into(), "MiniMax-M3.1-Flash".into()),
+        ("openai".into(), "gpt-6-luna".into()),
         ("gpt4o".into(), "gpt-4o".into()),
         ("gpt4omini".into(), "gpt-4o-mini".into()),
-        ("claude".into(), "claude-3-7-sonnet-latest".into()),
-        ("claude-sonnet".into(), "claude-3-7-sonnet-latest".into()),
-        ("openrouter".into(), "openai/gpt-4o-mini".into()),
+        ("claude".into(), "claude-sonnet-5-5".into()),
+        ("claude-sonnet".into(), "claude-sonnet-5-5".into()),
+        ("openrouter".into(), "openai/gpt-6-luna".into()),
     ])
 }
 
@@ -2177,7 +2178,7 @@ mod tests {
 
         assert_eq!(config.provider.openai.model, "gpt-4o");
         assert_eq!(config.model.default_model, "gpt-4o");
-        assert_eq!(config.provider.minimax.model, "MiniMax-M2.5");
+        assert_eq!(config.provider.minimax.model, "MiniMax-M3.1-Flash");
     }
 
     #[test]
