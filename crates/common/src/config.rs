@@ -1675,6 +1675,19 @@ pub struct WebConfig {
     pub max_fetch_chars: usize,
     pub default_search_limit: usize,
     pub user_agent: String,
+    /// Search backends, tried in order until one returns usable results. Keyed and
+    /// keyless entries share this list; `default_search_backends` documents the order.
+    #[serde(default = "default_search_backends")]
+    pub search_backends: Vec<String>,
+    /// User agent for search requests. Search engines block clients that announce
+    /// themselves as such, so this defaults to a browser agent rather than `user_agent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_user_agent: Option<String>,
+    /// API keys for keyed search backends, by backend name ("exa", "tavily",
+    /// "serper", "brave-api"). A backend is skipped when no key is set here or in
+    /// its environment variable.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub search_keys: BTreeMap<String, String>,
 }
 
 impl Default for WebConfig {
@@ -1684,8 +1697,34 @@ impl Default for WebConfig {
             max_fetch_chars: 25_000,
             default_search_limit: 5,
             user_agent: "nca/0.5 (+https://github.com/user/native-cli-ai)".into(),
+            search_backends: default_search_backends(),
+            search_user_agent: None,
+            search_keys: BTreeMap::new(),
         }
     }
+}
+
+/// Search backends in the order they are tried.
+///
+/// Keyed providers come first because a configured key is an explicit choice to use a
+/// real search API; they are skipped when no key exists. The keyless scrapers follow as
+/// best-effort fallbacks. Availability varies by network: DuckDuckGo is unreachable on
+/// some networks, Bing serves decoy results to some clients, and Mojeek serves a bot
+/// challenge, so the tool walks the list rather than trusting one endpoint.
+fn default_search_backends() -> Vec<String> {
+    [
+        "exa",
+        "tavily",
+        "serper",
+        "brave-api",
+        "brave",
+        "duckduckgo",
+        "bing",
+        "mojeek",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
 }
 
 impl WebConfig {
@@ -1701,6 +1740,15 @@ impl WebConfig {
         }
         if let Some(user_agent) = partial.user_agent {
             self.user_agent = user_agent;
+        }
+        if let Some(search_backends) = partial.search_backends {
+            self.search_backends = search_backends;
+        }
+        if let Some(search_user_agent) = partial.search_user_agent {
+            self.search_user_agent = Some(search_user_agent);
+        }
+        if let Some(search_keys) = partial.search_keys {
+            self.search_keys = search_keys;
         }
     }
 }
@@ -2018,6 +2066,9 @@ struct PartialWebConfig {
     max_fetch_chars: Option<usize>,
     default_search_limit: Option<usize>,
     user_agent: Option<String>,
+    search_backends: Option<Vec<String>>,
+    search_user_agent: Option<String>,
+    search_keys: Option<BTreeMap<String, String>>,
 }
 
 fn default_true() -> bool {
