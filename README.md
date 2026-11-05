@@ -6,12 +6,12 @@
 
 <p align="center">
   <strong>Rust-native coding agent. Single binary. Terminal-first.</strong><br />
-  <sub>v0.6.0 — cost that matches your provider, compaction that keeps the conversation, search with fallback</sub>
+  <sub>v0.66.0 — regex picker search, Alibaba DashScope, dynamic installer, prompt word shortcuts</sub>
 </p>
 
 <p align="center">
   <a href="#installation">Install</a> &middot;
-  <a href="#whats-new-in-060">What's New</a> &middot;
+  <a href="#whats-new-in-066">What's New</a> &middot;
   <a href="#quick-start">Quick Start</a> &middot;
   <a href="#core-commands">Commands</a> &middot;
   <a href="#interactive-ux">Interactive UX</a> &middot;
@@ -26,6 +26,15 @@
 It is meant for people who like their AI tooling close to the terminal: fast to start, easy to script, and capable of running real session workflows without dragging in a browser shell.
 
 The product surface is the CLI. No desktop wrapper, no Electron, no browser in the default path.
+
+## What's New in 0.66.0
+
+- **Regex search in pickers** — the model, session, branch, command palette, and `/connect` pickers filter with case-insensitive regex and fall back to plain substring search when the pattern is invalid.
+- **Alibaba DashScope (Qwen) provider** — set `DASHSCOPE_API_KEY` or `ALIBABA_API_KEY`; the default model is `qwen2.5-coder-32b-instruct`. Qwen VL models accept images. Available from `/connect`. See [Providers](docs/documentation/providers.md).
+- **Dynamic installer** — `curl -fsSL https://nca-cli.com/install | bash` installs the latest release. Set `NCA_VERSION` to pin one.
+- **Prompt word shortcuts** — `Ctrl+Left`/`Ctrl+Right` move by word, and `Ctrl+Backspace`/`Ctrl+Delete` delete by word.
+- **`nca --version`** — prints the installed version.
+- **Fixed** — empty or whitespace-only provider environment variables are ignored, and CLI integration tests no longer pick up your shell credentials.
 
 ## What's New in 0.6.0
 
