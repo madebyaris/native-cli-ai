@@ -109,8 +109,10 @@ mod tests {
 
     #[test]
     fn endpoint_resolves_v1_path_correctly() {
-        let mut config = AlibabaConfig::default();
-        config.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1".into();
+        let config = AlibabaConfig {
+            base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".into(),
+            ..Default::default()
+        };
         let provider = AlibabaProvider {
             client: reqwest::Client::new(),
             config,
@@ -121,8 +123,10 @@ mod tests {
             "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
         );
 
-        let mut config2 = AlibabaConfig::default();
-        config2.base_url = "https://dashscope.aliyuncs.com/compatible-mode".into();
+        let config2 = AlibabaConfig {
+            base_url: "https://dashscope.aliyuncs.com/compatible-mode".into(),
+            ..Default::default()
+        };
         let provider2 = AlibabaProvider {
             client: reqwest::Client::new(),
             config: config2,
