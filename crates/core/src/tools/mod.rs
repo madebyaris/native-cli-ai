@@ -23,6 +23,7 @@ pub mod run_validation;
 #[cfg(target_os = "macos")]
 pub mod screen_record;
 pub mod search;
+pub mod show_image;
 pub mod skill_hints;
 pub mod spawn_subagent;
 pub mod types;
@@ -145,6 +146,9 @@ impl ToolRegistry {
         registry.register(Box::new(screen_record::ScreenRecordTool::new(
             nca_common::config::resolve_recordings_dir(&recording.dir, &workspace_root)
                 .map_err(|error| error.to_string()),
+        )));
+        registry.register(Box::new(show_image::ShowImageTool::new(
+            workspace_root.clone(),
         )));
         registry.register(Box::new(run_validation::RunValidationTool::new(
             workspace_root,

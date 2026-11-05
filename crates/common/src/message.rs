@@ -297,6 +297,23 @@ pub struct Message {
 }
 
 impl Message {
+    /// Serialized size of the tool-call arguments this message carries.
+    ///
+    /// A `write_file` call can hold tens of kilobytes of content, all of which
+    /// is sent to the provider on every later request; token estimates must
+    /// count it, not just a fixed per-call overhead.
+    pub fn tool_call_argument_chars(&self) -> usize {
+        self.tool_calls
+            .as_ref()
+            .map(|calls| {
+                calls
+                    .iter()
+                    .map(|call| call.name.len() + call.arguments.to_string().len())
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: Role::User,

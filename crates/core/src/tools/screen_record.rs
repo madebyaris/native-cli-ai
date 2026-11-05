@@ -81,8 +81,9 @@ impl ToolExecutor for ScreenRecordTool {
                 (default 60, max 600) and returns an id. action=stop takes that id and finishes \
                 the file. Files are saved in the project's nca data folder unless the user set \
                 [recording] dir. action=screenshot takes app and an optional delay (0 to 30 s, \
-                default 3) and saves one still image of the app's window. Needs Screen Recording \
-                permission for the app that runs nca."
+                default 3) and saves one still image of the app's window. To let the user see \
+                any image, call show_image with its path. Needs Screen Recording permission for \
+                the app that runs nca."
                 .into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -300,15 +301,25 @@ fn screenshot(
 }
 
 fn stop(state: &Mutex<RecordingState>, id: &str) -> Result<String, String> {
-    let recording = lock(state)?
+    let mut recording = lock(state)?
         .active
         .remove(id)
         .ok_or_else(|| format!("No active recording \"{id}\"."))?;
     let (path, started) = (recording.path.clone(), recording.started);
+    // The time limit may have ended it already; then the elapsed time is not
+    // the recording's length, so do not report it as one.
+    let already_ended = matches!(recording.child.try_wait(), Ok(Some(_)));
     finish(recording)?;
     let bytes = fs::metadata(&path)
         .map(|meta| meta.len())
         .map_err(|error| format!("recording {id} produced no file: {error}"))?;
+    if already_ended {
+        return Ok(format!(
+            "{id} had already ended at its time limit. Saved {} ({} KB).",
+            path.display(),
+            bytes / 1024
+        ));
+    }
     Ok(format!(
         "Stopped {id} after {:.1} s. Saved {} ({} KB).",
         started.elapsed().as_secs_f64(),

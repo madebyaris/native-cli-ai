@@ -133,16 +133,9 @@ pub fn build_system_prompt(
         }
     }
 
-    if let Some(section) = environment_section(snapshot) {
-        sections.push(section);
-    }
-    if let Some(section) = todos_section(snapshot) {
-        sections.push(section);
-    }
-    if let Some(section) = memory_section(snapshot) {
-        sections.push(section);
-    }
-
+    // Stable sections first. Providers cache the prompt prefix, and a prefix only stays
+    // cached while every byte before it is unchanged, so anything that varies per turn
+    // must come after all of this.
     if let Some(text) = read_if_exists(&workspace_root.join("AGENTS.md"))
         && !text.trim().is_empty()
     {
@@ -167,12 +160,25 @@ pub fn build_system_prompt(
         sections.push(section);
     }
 
+    if config.harness.built_in_enabled {
+        sections.push(TOOL_PLAYBOOK.trim().to_string());
+    }
+
+    // Volatile sections last. The branch, todos and memory notes change between turns, so
+    // placing them here rewrites only the tail of the prompt and the cached prefix above
+    // still applies. When these came first, one `update_todos` invalidated the entire
+    // prompt and every turn re-prefilled the full conversation.
+    if let Some(section) = environment_section(snapshot) {
+        sections.push(section);
+    }
     if let Some(section) = orchestration_context_section(orchestration) {
         sections.push(section);
     }
-
-    if config.harness.built_in_enabled {
-        sections.push(TOOL_PLAYBOOK.trim().to_string());
+    if let Some(section) = todos_section(snapshot) {
+        sections.push(section);
+    }
+    if let Some(section) = memory_section(snapshot) {
+        sections.push(section);
     }
 
     sections.join("\n\n---\n\n")
@@ -439,15 +445,61 @@ mod tests {
         let playbook_idx = prompt.find("Tool playbook:").expect("playbook");
 
         assert!(identity_idx < permission_idx);
-        assert!(permission_idx < env_idx);
-        assert!(env_idx < todos_idx);
-        assert!(todos_idx < memory_idx);
-        assert!(memory_idx < agents_idx);
+        assert!(permission_idx < agents_idx);
         assert!(agents_idx < project_idx);
         assert!(project_idx < local_idx);
         assert!(local_idx < skills_idx);
-        assert!(skills_idx < orchestration_idx);
-        assert!(orchestration_idx < playbook_idx);
+        assert!(skills_idx < playbook_idx);
+        // Volatile sections trail every stable one, so a per-turn change rewrites only
+        // the tail of the prompt and the provider's cached prefix still applies.
+        assert!(playbook_idx < env_idx);
+        assert!(env_idx < orchestration_idx);
+        assert!(orchestration_idx < todos_idx);
+        assert!(todos_idx < memory_idx);
+    }
+
+    #[test]
+    fn changing_todos_or_memory_leaves_the_stable_prefix_identical() {
+        let config = NcaConfig::default();
+        let temp = tempdir().expect("tempdir");
+        fs::write(temp.path().join("AGENTS.md"), "agent rule").expect("write AGENTS.md");
+
+        let mut before = empty_snapshot(temp.path());
+        before.todos = vec![AgentTodo {
+            id: "1".into(),
+            content: "First task".into(),
+            status: TodoStatus::InProgress,
+            source: Some(TodoSource::Agent),
+        }];
+        before.memory_notes = vec![HarnessMemoryNote {
+            kind: "note".into(),
+            content: "Earlier note".into(),
+        }];
+
+        // Same session one turn later: a todo finished and a note added.
+        let mut after = before.clone();
+        after.todos[0].status = TodoStatus::Completed;
+        after.memory_notes.push(HarnessMemoryNote {
+            kind: "note".into(),
+            content: "Newer note".into(),
+        });
+
+        let first = build_system_prompt(&config, &before, None);
+        let second = build_system_prompt(&config, &after, None);
+
+        assert_ne!(first, second, "the prompt must still reflect the new state");
+
+        let shared = first
+            .bytes()
+            .zip(second.bytes())
+            .take_while(|(left, right)| left == right)
+            .count();
+        let stable_prefix = first.find("Environment:").expect("environment section");
+
+        assert!(
+            shared >= stable_prefix,
+            "a todo change cut the shared prefix to {shared} bytes, before the {stable_prefix}-byte stable block"
+        );
     }
 
     #[test]

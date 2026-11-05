@@ -7,7 +7,7 @@ This feature implements intelligent context management to prevent token overflow
 There are two complementary layers:
 
 1. **Persisted compaction** (`ContextManager` in `nca-runtime`) — may rewrite `agent.messages` via AI summary / sliding window when the session is over budget.
-2. **Provider-request smart compaction** (`context_view` in `nca-core`) — opt-in, non-destructive cloned view sent to the provider only. Canonical history and session JSON stay complete.
+2. **Provider-request smart compaction** (`context_view` in `nca-core`) — on by default, non-destructive cloned view sent to the provider only. Canonical history and session JSON stay complete.
 
 ## Key Components
 
@@ -40,8 +40,8 @@ auto_summarize_threshold = 75
 # Enable automatic context summarization
 enable_auto_summarize = true
 
-# Opt-in provider-request view: off | dry_run | on
-smart_compaction_mode = "off"
+# Provider-request view: off | dry_run | on
+smart_compaction_mode = "on"
 ```
 
 ### 2. Smart context view (`crates/core/src/context_view.rs`)
@@ -50,6 +50,7 @@ smart_compaction_mode = "off"
 
 **Always preserved:**
 - System messages
+- The first user task (the task anchor)
 - Image-bearing (multimodal) messages
 - User constraint-like prompts
 - `ask_question` / `update_todos` and other non-read tools
@@ -68,7 +69,7 @@ smart_compaction_mode = "off"
 | `dry_run` | Full history | Unchanged | `ContextCompaction` phase `dry_run` |
 | `on` | Compact clone | Unchanged | `ContextCompaction` phase `completed` |
 
-Leave the default `off` until `dry_run` data shows safe savings across MiniMax and other providers.
+The default is `on`. The view is fitted to the model window on every request: oldest groups are evicted first, and plain groups go before `must_keep` groups (constraints, failures, edits, images). Tool-call groups stay atomic. The system prompt, any summary, the first user task, and the current request are never evicted; older tool groups inside the current turn are trimmed only as a last resort, and the newest group is always kept. Stale harness prompts from sessions saved by older versions are evictable. Oversized older messages are shrunk instead of dropping their group, and image parts survive the shrink. A window of 0 means unknown and disables the cap, and the reply reservation (`max_tokens`) never takes more than half the window. The current request is never truncated; a prompt that cannot fit is better surfaced as a provider error than silently rewritten. `off` still applies the hard budget, because overflowing the window is a provider error.
 
 ### 3. Auto-Summarize Integration (`crates/runtime/src/supervisor.rs`)
 
@@ -80,6 +81,17 @@ Leave the default `off` until `dry_run` data shows safe savings across MiniMax a
 3. After each `run_turn`: Check if summarization should trigger
 4. If threshold exceeded and the compact request view still cannot fit: AI summary / sliding-window fallback
 5. Emit events: `ContextWarning`, `ContextCompaction`
+
+The summary is stored as a system message after the main system prompt. The
+per-turn harness refresh replaces only the leading prompt, so the summary
+survives later turns. If the provider returns an empty summary, nca treats it
+as a failure and falls back to the recent-message window instead of deleting
+history.
+
+MiniMax context windows come from the built-in model table (the MiniMax API does
+not expose `/v1/models`): M2.5, M2.1, M2.7, and M2 resolve to 204,800 tokens,
+and M1 to 1,000,000. OpenRouter's catalog can still override the table when
+`query_provider_models_api` is enabled.
 
 **Events Emitted:**
 - `ContextWarning`: When context reaches 80% of target
@@ -100,7 +112,7 @@ pub struct ContextConfig {
     pub max_retained_messages: usize,          // Default: 50
     pub auto_summarize_threshold: u8,          // Default: 75
     pub enable_auto_summarize: bool,           // Default: true
-    pub smart_compaction_mode: SmartCompactionMode, // Default: Off
+    pub smart_compaction_mode: SmartCompactionMode, // Default: On
 }
 ```
 

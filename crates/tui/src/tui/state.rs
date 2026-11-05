@@ -132,6 +132,8 @@ pub struct TuiSessionState {
     pub agent_profile: String,
     pub permission_mode: String,
     pub input_tokens: u64,
+    /// Prompt tokens served from the provider's cache, from the latest `CostUpdated`.
+    pub cached_input_tokens: u64,
     pub output_tokens: u64,
     pub cost_usd: f64,
     pub started: Instant,
@@ -222,6 +224,7 @@ impl TuiSessionState {
             agent_profile,
             permission_mode,
             input_tokens: 0,
+            cached_input_tokens: 0,
             output_tokens: 0,
             cost_usd: 0.0,
             started: Instant::now(),
@@ -1365,10 +1368,12 @@ impl TuiSessionState {
             }
             AgentEvent::CostUpdated {
                 input_tokens,
+                cached_input_tokens,
                 output_tokens,
                 estimated_cost_usd,
             } => {
                 self.input_tokens = *input_tokens;
+                self.cached_input_tokens = *cached_input_tokens;
                 self.output_tokens = *output_tokens;
                 self.cost_usd = *estimated_cost_usd;
             }

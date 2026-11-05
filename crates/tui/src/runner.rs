@@ -260,6 +260,7 @@ pub async fn build_session_runtime(
         session_id,
         approval_handler,
         orchestration_context,
+        enable_ipc: true,
     })
     .await?;
 

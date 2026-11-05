@@ -24,6 +24,18 @@ pub struct ModelContextLimits {
 /// Known model context windows.
 /// Order matters - more specific patterns should come first.
 pub const MODEL_CONTEXT_LIMITS: &[ModelContextLimits] = &[
+    // Claude Sonnet 5.5 — default Anthropic model: 1M context, 128K output
+    ModelContextLimits {
+        pattern: "claude-sonnet-5-5",
+        context_window: 1_000_000,
+        max_output_tokens: 131_072,
+    },
+    // GPT-6 Luna — default OpenAI and OpenRouter model: 1.05M context, 128K output
+    ModelContextLimits {
+        pattern: "gpt-6-luna",
+        context_window: 1_050_000,
+        max_output_tokens: 131_072,
+    },
     // Claude 3.7 family
     ModelContextLimits {
         pattern: "claude-3-7",
@@ -78,6 +90,12 @@ pub const MODEL_CONTEXT_LIMITS: &[ModelContextLimits] = &[
         context_window: 16_385,
         max_output_tokens: 4096,
     },
+    // MiniMax M3.1-Flash — 1M context per MiniMax docs; 128K is the recommended output cap (max 512K)
+    ModelContextLimits {
+        pattern: "minimax-m3.1-flash",
+        context_window: 1_000_000,
+        max_output_tokens: 131_072,
+    },
     // MiniMax M2.7 — OpenRouter `minimax/minimax-m2.7`: context_length 204_800 (must be before `minimax-m2`)
     ModelContextLimits {
         pattern: "minimax-m2.7",
@@ -90,23 +108,35 @@ pub const MODEL_CONTEXT_LIMITS: &[ModelContextLimits] = &[
         context_window: 204_800,
         max_output_tokens: 131_072,
     },
-    // MiniMax M2.5 (reasoning model)
+    // MiniMax M2.5 (reasoning model) — OpenRouter: context_length 204_800
     ModelContextLimits {
         pattern: "minimax-m2.5",
-        context_window: 100_000,
-        max_output_tokens: 8192,
+        context_window: 204_800,
+        max_output_tokens: 131_072,
+    },
+    // MiniMax M2.1
+    ModelContextLimits {
+        pattern: "minimax-m2.1",
+        context_window: 204_800,
+        max_output_tokens: 131_072,
+    },
+    // MiniMax M2 Her (smaller window; before the generic M2 pattern)
+    ModelContextLimits {
+        pattern: "minimax-m2-her",
+        context_window: 65_536,
+        max_output_tokens: 2_048,
     },
     // MiniMax M2 (not M2.5 / M2.7)
     ModelContextLimits {
         pattern: "minimax-m2",
-        context_window: 32_000,
-        max_output_tokens: 8192,
+        context_window: 204_800,
+        max_output_tokens: 131_072,
     },
     // MiniMax M1
     ModelContextLimits {
         pattern: "minimax-m1",
-        context_window: 32_000,
-        max_output_tokens: 8192,
+        context_window: 1_000_000,
+        max_output_tokens: 40_000,
     },
     // Gemini 1.5 Pro
     ModelContextLimits {
@@ -245,11 +275,23 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_new_default_models() {
+        assert_eq!(detect_context_window("claude-sonnet-5-5"), 1_000_000);
+        assert_eq!(detect_context_window("gpt-6-luna"), 1_050_000);
+        assert_eq!(detect_context_window("openai/gpt-6-luna"), 1_050_000);
+    }
+
+    #[test]
     fn test_detect_minimax() {
+        assert_eq!(detect_context_window("MiniMax-M3.1-Flash"), 1_000_000);
         assert_eq!(detect_context_window("MiniMax-M2.7"), 204_800);
         assert_eq!(detect_context_window("minimax/minimax-m2.7"), 204_800);
-        assert_eq!(detect_context_window("MiniMax-M2.5"), 100_000);
-        assert_eq!(detect_context_window("minimax-m2"), 32_000);
+        assert_eq!(detect_context_window("MiniMax-M2.5"), 204_800);
+        assert_eq!(detect_context_window("minimax/minimax-m2.5"), 204_800);
+        assert_eq!(detect_context_window("minimax-m2.1"), 204_800);
+        assert_eq!(detect_context_window("minimax-m2-her"), 65_536);
+        assert_eq!(detect_context_window("minimax-m2"), 204_800);
+        assert_eq!(detect_context_window("minimax-m1"), 1_000_000);
     }
 
     #[test]

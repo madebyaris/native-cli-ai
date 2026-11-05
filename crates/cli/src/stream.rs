@@ -4,6 +4,7 @@
 
 use colored::Colorize;
 use nca_common::event::{AgentEvent, EventEnvelope, InteractiveQuestionPayload, QuestionSelection};
+use nca_core::cost::{cache_hit_percent, format_cost_usd};
 use nca_runtime::ipc::IpcHandle;
 use nca_runtime::supervisor;
 use nca_tui::ipc_pending::{ApprovalPendingMap, QuestionPendingMap};
@@ -79,7 +80,9 @@ pub enum StreamMode {
 #[derive(Clone)]
 struct StreamStats {
     input_tokens: Arc<AtomicU64>,
+    cached_input_tokens: Arc<AtomicU64>,
     output_tokens: Arc<AtomicU64>,
+    /// `f64` bits, so sub-cent estimates keep their value.
     estimated_cost: Arc<AtomicU64>,
     #[allow(dead_code)]
     start_time: Instant,
@@ -89,16 +92,24 @@ impl StreamStats {
     fn new() -> Self {
         Self {
             input_tokens: Arc::new(AtomicU64::new(0)),
+            cached_input_tokens: Arc::new(AtomicU64::new(0)),
             output_tokens: Arc::new(AtomicU64::new(0)),
-            estimated_cost: Arc::new(AtomicU64::new(0)),
+            estimated_cost: Arc::new(AtomicU64::new(0f64.to_bits())),
             start_time: Instant::now(),
         }
     }
 
-    fn update_cost(&self, input: u64, output: u64, cost_cents: u64) {
+    fn update_cost(&self, input: u64, cached_input: u64, output: u64, cost_usd: f64) {
         self.input_tokens.store(input, Ordering::Relaxed);
+        self.cached_input_tokens
+            .store(cached_input, Ordering::Relaxed);
         self.output_tokens.store(output, Ordering::Relaxed);
-        self.estimated_cost.store(cost_cents, Ordering::Relaxed);
+        self.estimated_cost
+            .store(cost_usd.to_bits(), Ordering::Relaxed);
+    }
+
+    fn cached_input_tokens(&self) -> u64 {
+        self.cached_input_tokens.load(Ordering::Relaxed)
     }
 
     fn record_output_token(&self) {
@@ -114,7 +125,7 @@ impl StreamStats {
     }
 
     fn estimated_cost_usd(&self) -> f64 {
-        self.estimated_cost.load(Ordering::Relaxed) as f64 / 100.0
+        f64::from_bits(self.estimated_cost.load(Ordering::Relaxed))
     }
 
     #[allow(dead_code)]
@@ -455,13 +466,15 @@ fn render_event(event: &AgentEvent, stats: &StreamStats) {
         }
         AgentEvent::CostUpdated {
             input_tokens,
+            cached_input_tokens,
             output_tokens,
             estimated_cost_usd,
         } => {
             stats.update_cost(
                 *input_tokens,
+                *cached_input_tokens,
                 *output_tokens,
-                (*estimated_cost_usd * 100.0) as u64,
+                *estimated_cost_usd,
             );
         }
         AgentEvent::SessionEnded { reason } => {
@@ -469,11 +482,14 @@ fn render_event(event: &AgentEvent, stats: &StreamStats) {
             println!();
             println!();
             println!("  Session ended ({reason:?})");
+            let (input, output) = (stats.input_tokens(), stats.output_tokens());
+            let cache = match cache_hit_percent(input, stats.cached_input_tokens()) {
+                Some(percent) => format!(", {percent}% cached"),
+                None => String::new(),
+            };
             println!(
-                "  {}/{} tokens, ${:.4}",
-                stats.input_tokens(),
-                stats.output_tokens(),
-                stats.estimated_cost_usd()
+                "  {input}/{output} tokens{cache}, {}",
+                format_cost_usd(stats.estimated_cost_usd(), input + output)
             );
         }
         AgentEvent::Error { message } => {

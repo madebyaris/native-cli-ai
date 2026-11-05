@@ -6,11 +6,12 @@ members = [
     "crates/runtime",
     "crates/tui",
     "crates/cli",
+    "crates/acp",
     "crates/autoresearch",
 ]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/madebyaris/native-cli-ai"
@@ -38,7 +39,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 anyhow = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
 
 # External crates
 cli-prompts = "0.1"
@@ -47,5 +48,6 @@ cli-prompts = "0.1"
 nca-common = { path = "crates/common" }
 nca-core = { path = "crates/core" }
 nca-runtime = { path = "crates/runtime" }
+nca-acp = { path = "crates/acp" }
 nca-tui = { path = "crates/tui" }
 nca-autoresearch = { path = "crates/autoresearch" }

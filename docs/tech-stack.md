@@ -66,9 +66,23 @@ This document records every dependency choice, the rationale behind it, and the 
 
 **Strategy**: MiniMax is the first-class provider and is implemented directly over `reqwest` so we control auth, base URL, model naming, and tool-call normalization without waiting on a generic wrapper. `genai` remains useful later for broad multi-provider support, while `anthropic-async` and `async-openai` stay as direct adapters for providers that need special handling.
 
-**Current default**: `MiniMax-M2.5` via `provider.minimax` config and `MINIMAX_API_KEY`.
+**Current default**: `MiniMax-M3.1-Flash` via `provider.minimax` config and `MINIMAX_API_KEY`.
 
 **Rejected**: `llm` crate (focused on local models, not API providers), rolling our own HTTP client (unnecessary duplication).
+
+---
+
+## Agent Client Protocol (ACP)
+
+| Crate | Version | Role |
+|-------|---------|------|
+| `agent-client-protocol` | 3.6.x (`stdio`) | ACP v1 server SDK: typed schema, JSON-RPC dispatch over stdin/stdout |
+
+**Why the SDK**: `nca acp` is a protocol surface, not a place to hand-roll JSON-RPC. The SDK supplies the v1 request/notification types, the stdio transport, and the dispatch loop, so the crate only owns session lifecycle and `AgentEvent` → `session/update` translation. It is Rust-native and adds no JavaScript runtime.
+
+**Footprint**: the SDK is compiled into the existing `nca` binary; `nca acp` adds one crate (`nca-acp`) and no second process. Measured physical footprint on macOS: 3.5 MB after `initialize`, 4.8 MB with one live session, 5.2 MB while streaming.
+
+**Rejected**: hand-written JSON-RPC (fewer deps, but subtle enum and versioning mistakes), and any Node/Electron bridge (violates the single-binary, Rust-native constraint).
 
 ---
 
@@ -213,4 +227,6 @@ crates/cli      -> common, core, runtime, clap, ratatui, crossterm, reedline,
                    syntect, pulldown-cmark, colored, anyhow, tracing, tokio
 crates/runtime  -> common, core, portable-pty, tokio, serde_json, tracing,
                    thiserror, ignore, walkdir
+crates/acp      -> common, core, runtime, agent-client-protocol (stdio),
+                   tokio, serde_json, base64, chrono, anyhow, tracing
 ```

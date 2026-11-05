@@ -1,3 +1,4 @@
+use crate::pricing::ModelPricing;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
@@ -21,6 +22,9 @@ pub struct NcaConfig {
     /// CLI/TUI preferences (e.g. external editor).
     #[serde(default)]
     pub ui: UiConfig,
+    /// Price per model id, used for cost estimates. Overrides the built-in table.
+    #[serde(default)]
+    pub pricing: BTreeMap<String, ModelPricing>,
 }
 
 impl NcaConfig {
@@ -151,6 +155,9 @@ impl NcaConfig {
         }
         if let Some(recording) = partial.recording {
             self.recording.merge(recording);
+        }
+        if let Some(pricing) = partial.pricing {
+            self.pricing.extend(pricing);
         }
 
         if explicit_model_override {
@@ -1183,7 +1190,7 @@ impl Default for MiniMaxConfig {
             // International: https://api.minimax.io/anthropic
             // China:         https://api.minimaxi.com/anthropic
             base_url: "https://api.minimax.io/anthropic".into(),
-            model: "MiniMax-M2.5".into(),
+            model: "MiniMax-M3.1-Flash".into(),
             temperature: 0.7,
         }
     }
@@ -1228,7 +1235,7 @@ impl Default for OpenAiConfig {
             api_key_env: "OPENAI_API_KEY".into(),
             api_key: None,
             base_url: "https://api.openai.com".into(),
-            model: "gpt-4o-mini".into(),
+            model: "gpt-6-luna".into(),
             temperature: 0.7,
         }
     }
@@ -1320,7 +1327,7 @@ impl Default for AnthropicConfig {
             api_key_env: "ANTHROPIC_API_KEY".into(),
             api_key: None,
             base_url: "https://api.anthropic.com".into(),
-            model: "claude-3-7-sonnet-latest".into(),
+            model: "claude-sonnet-5-5".into(),
             temperature: 1.0,
         }
     }
@@ -1369,7 +1376,7 @@ impl Default for OpenRouterConfig {
             api_key_env: "OPENROUTER_API_KEY".into(),
             api_key: None,
             base_url: "https://openrouter.ai/api".into(),
-            model: "openai/gpt-4o-mini".into(),
+            model: "openai/gpt-6-luna".into(),
             temperature: 0.7,
             site_url: None,
             app_name: None,
@@ -1473,7 +1480,7 @@ pub struct ModelConfig {
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
-            default_model: "MiniMax-M2.5".into(),
+            default_model: "MiniMax-M3.1-Flash".into(),
             max_tokens: 8192,
             enable_thinking: false,
             thinking_budget: 5120,
@@ -1709,7 +1716,7 @@ impl Default for ContextConfig {
             max_retained_messages: default_max_retained_messages(),
             auto_summarize_threshold: default_summarize_threshold(),
             enable_auto_summarize: default_true(),
-            smart_compaction_mode: SmartCompactionMode::Off,
+            smart_compaction_mode: SmartCompactionMode::On,
         }
     }
 }
@@ -1757,6 +1764,19 @@ pub struct WebConfig {
     pub max_fetch_chars: usize,
     pub default_search_limit: usize,
     pub user_agent: String,
+    /// Search backends, tried in order until one returns usable results. Keyed and
+    /// keyless entries share this list; `default_search_backends` documents the order.
+    #[serde(default = "default_search_backends")]
+    pub search_backends: Vec<String>,
+    /// User agent for search requests. Search engines block clients that announce
+    /// themselves as such, so this defaults to a browser agent rather than `user_agent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_user_agent: Option<String>,
+    /// API keys for search backends, by backend name ("keenable", "exa", "tavily",
+    /// "serper", "brave-api"). Keenable accepts an optional key; the other API
+    /// backends are skipped when no key is set here or in their environment variable.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub search_keys: BTreeMap<String, String>,
 }
 
 impl Default for WebConfig {
@@ -1766,8 +1786,34 @@ impl Default for WebConfig {
             max_fetch_chars: 25_000,
             default_search_limit: 5,
             user_agent: "nca/0.5 (+https://github.com/user/native-cli-ai)".into(),
+            search_backends: default_search_backends(),
+            search_user_agent: None,
+            search_keys: BTreeMap::new(),
         }
     }
+}
+
+/// Search backends in the order they are tried.
+///
+/// Keenable's public API is the keyless primary. Other API providers are tried next when
+/// configured with keys, followed by HTML scrapers as best-effort fallbacks. Availability
+/// varies by network: DuckDuckGo is unreachable on some networks, Bing serves decoy
+/// results to some clients, and Mojeek serves a bot challenge, so the tool walks the list.
+fn default_search_backends() -> Vec<String> {
+    [
+        "keenable",
+        "exa",
+        "tavily",
+        "serper",
+        "brave-api",
+        "brave",
+        "duckduckgo",
+        "bing",
+        "mojeek",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
 }
 
 impl WebConfig {
@@ -1783,6 +1829,15 @@ impl WebConfig {
         }
         if let Some(user_agent) = partial.user_agent {
             self.user_agent = user_agent;
+        }
+        if let Some(search_backends) = partial.search_backends {
+            self.search_backends = search_backends;
+        }
+        if let Some(search_user_agent) = partial.search_user_agent {
+            self.search_user_agent = Some(search_user_agent);
+        }
+        if let Some(search_keys) = partial.search_keys {
+            self.search_keys = search_keys;
         }
     }
 }
@@ -1945,6 +2000,7 @@ struct PartialNcaConfig {
     web: Option<PartialWebConfig>,
     recording: Option<PartialRecordingConfig>,
     ui: Option<PartialUiConfig>,
+    pricing: Option<BTreeMap<String, ModelPricing>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -2110,6 +2166,9 @@ struct PartialWebConfig {
     max_fetch_chars: Option<usize>,
     default_search_limit: Option<usize>,
     user_agent: Option<String>,
+    search_backends: Option<Vec<String>>,
+    search_user_agent: Option<String>,
+    search_keys: Option<BTreeMap<String, String>>,
 }
 
 fn default_true() -> bool {
@@ -2122,17 +2181,18 @@ fn default_max_memory_notes() -> usize {
 
 fn default_model_aliases() -> BTreeMap<String, String> {
     BTreeMap::from([
-        ("default".into(), "MiniMax-M2.5".into()),
-        ("minimax".into(), "MiniMax-M2.5".into()),
+        ("default".into(), "MiniMax-M3.1-Flash".into()),
+        ("minimax".into(), "MiniMax-M3.1-Flash".into()),
+        ("m3.1-flash".into(), "MiniMax-M3.1-Flash".into()),
         ("m2.5".into(), "MiniMax-M2.5".into()),
-        ("coding".into(), "MiniMax-M2.5".into()),
-        ("reasoning".into(), "MiniMax-M2.5".into()),
-        ("openai".into(), "gpt-4o-mini".into()),
+        ("coding".into(), "MiniMax-M3.1-Flash".into()),
+        ("reasoning".into(), "MiniMax-M3.1-Flash".into()),
+        ("openai".into(), "gpt-6-luna".into()),
         ("gpt4o".into(), "gpt-4o".into()),
         ("gpt4omini".into(), "gpt-4o-mini".into()),
-        ("claude".into(), "claude-3-7-sonnet-latest".into()),
-        ("claude-sonnet".into(), "claude-3-7-sonnet-latest".into()),
-        ("openrouter".into(), "openai/gpt-4o-mini".into()),
+        ("claude".into(), "claude-sonnet-5-5".into()),
+        ("claude-sonnet".into(), "claude-sonnet-5-5".into()),
+        ("openrouter".into(), "openai/gpt-6-luna".into()),
         ("alibaba".into(), "qwen2.5-coder-32b-instruct".into()),
         ("qwen".into(), "qwen2.5-coder-32b-instruct".into()),
         ("dashscope".into(), "qwen2.5-coder-32b-instruct".into()),
@@ -2178,6 +2238,32 @@ mod tests {
     }
 
     #[test]
+    fn pricing_entries_merge_by_model_id() {
+        let raw = r#"
+            [pricing."MiniMax-M3.1-Flash"]
+            input_per_mtok = 0.2
+            output_per_mtok = 0.8
+            cached_input_per_mtok = 0.02
+
+            [pricing."deepseek-v4-1-flash"]
+            input_per_mtok = 0.27
+            output_per_mtok = 1.1
+        "#;
+        let partial: PartialNcaConfig = toml::from_str(raw).expect("parse");
+        let mut config = NcaConfig::default();
+        config.merge(partial);
+
+        let minimax = config
+            .pricing
+            .get("MiniMax-M3.1-Flash")
+            .expect("minimax price");
+        assert_eq!(minimax.input_per_mtok, 0.2);
+        assert_eq!(minimax.cached_input_per_mtok, Some(0.02));
+        assert_eq!(minimax.cache_write_per_mtok, None);
+        assert_eq!(config.pricing.len(), 2);
+    }
+
+    #[test]
     fn apply_model_override_updates_selected_provider_model() {
         let mut config = NcaConfig::default();
         config.provider.default = ProviderKind::OpenAi;
@@ -2187,7 +2273,7 @@ mod tests {
 
         assert_eq!(config.provider.openai.model, "gpt-4o");
         assert_eq!(config.model.default_model, "gpt-4o");
-        assert_eq!(config.provider.minimax.model, "MiniMax-M2.5");
+        assert_eq!(config.provider.minimax.model, "MiniMax-M3.1-Flash");
     }
 
     #[test]

@@ -54,10 +54,11 @@ Windows users: download `nca-*-pc-windows-msvc.zip` from [GitHub Releases](https
 | [Permissions](./permissions.md) | Approval system, permission modes, and safe mode |
 | [Skills](./skills.md) | Skill discovery, installation, and authoring |
 | [Advanced](./advanced.md) | Sub-agents, MCP servers, hooks, orchestration, and IPC |
+| [Desktop Clients (ACP)](./acp.md) | Run nca from T3 Code, Termul, Zed, and other ACP clients |
 
 ## Architecture
 
-nca is a Rust workspace with six crates:
+nca is a Rust workspace with seven crates:
 
 ```
 nca
@@ -65,6 +66,7 @@ nca
 ├── nca-core           Agent loop, LLM providers, tool protocol, harness
 ├── nca-runtime        Session lifecycle, IPC, persistence, worktrees, supervision
 ├── nca-tui            Full-screen TUI, line REPL, overlays, transcript
+├── nca-acp            Agent Client Protocol server for desktop clients
 ├── nca-cli            Binary entrypoint, clap commands, stream glue
 └── nca-autoresearch   Automated research capabilities
 ```

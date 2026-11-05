@@ -15,7 +15,7 @@ These tools are always available, including in [safe mode](./permissions.md).
 | `list_directory` | List files and directories at a path |
 | `git_status` | Show `git status` for the workspace |
 | `git_diff` | Show `git diff` (staged or unstaged) |
-| `web_search` | Search the web via DuckDuckGo |
+| `web_search` | Search the web via Keenable, then configured fallbacks |
 | `fetch_url` | Fetch and extract text content from a URL |
 
 ### Write Tools
@@ -128,7 +128,9 @@ Search the public web and return titles, URLs, and snippets.
 - `query` (string, required) — Search query
 - `limit` (int, optional) — Number of results (1–10, default from config)
 
-**Behavior:** HTTP GET to DuckDuckGo HTML search. Results are parsed and returned as structured text.
+**Behavior:** Tries Keenable's keyless search API first, then configured keyed APIs and
+keyless search engines in order. Results that do not match the query are rejected; if all
+backends fail, the tool returns an error naming the failures.
 
 ---
 

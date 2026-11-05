@@ -56,7 +56,7 @@ mod tests {
     fn minimax_default_is_vision() {
         assert!(model_accepts_native_images(
             ProviderKind::MiniMax,
-            "MiniMax-M2.5"
+            "MiniMax-M3.1-Flash"
         ));
     }
 
