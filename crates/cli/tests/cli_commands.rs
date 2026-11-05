@@ -64,16 +64,44 @@ fn write_event_log(workspace: &Path, id: &str, lines: &str) {
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
     fs::write(sessions_dir.join(format!("{id}.events.jsonl")), lines).expect("write event log");
 }
+fn nca_cmd(workspace: &Path, home: &Path) -> Command {
+    let mut cmd = Command::cargo_bin("nca").expect("binary");
+    cmd.current_dir(workspace).env("HOME", home);
+    for key in [
+        "MINIMAX_API_KEY",
+        "MINIMAX_BASE_URL",
+        "MINIMAX_MODEL",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENAI_MODEL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "OPENROUTER_API_KEY",
+        "OPENROUTER_BASE_URL",
+        "OPENROUTER_MODEL",
+        "CUSTOM_PROVIDER_API_KEY",
+        "CUSTOM_PROVIDER_BASE_URL",
+        "CUSTOM_PROVIDER_MODEL",
+        "DASHSCOPE_API_KEY",
+        "DASHSCOPE_BASE_URL",
+        "DASHSCOPE_MODEL",
+        "ALIBABA_API_KEY",
+        "ALIBABA_BASE_URL",
+        "ALIBABA_MODEL",
+        "NCA_DEFAULT_PROVIDER",
+        "NCA_MODEL",
+    ] {
+        cmd.env_remove(key);
+    }
+    cmd
+}
 
 #[test]
 fn run_without_config_exits_nonzero() {
     let temp = tempdir().expect("tempdir");
 
-    Command::cargo_bin("nca")
-        .expect("binary")
-        .current_dir(temp.path())
-        .env("HOME", temp.path())
-        .env_remove("MINIMAX_API_KEY")
+    nca_cmd(temp.path(), temp.path())
         .arg("run")
         .arg("--prompt")
         .arg("hello")
@@ -105,10 +133,7 @@ fn sessions_lists_newest_saved_sessions_first_with_status() {
         SessionStatus::Cancelled,
     );
 
-    Command::cargo_bin("nca")
-        .expect("binary")
-        .current_dir(temp.path())
-        .env("HOME", temp.path())
+    nca_cmd(temp.path(), temp.path())
         .arg("sessions")
         .assert()
         .success()
@@ -177,10 +202,7 @@ fn sessions_json_emits_sorted_machine_snapshots() {
         SessionStatus::Running,
     );
 
-    let output = Command::cargo_bin("nca")
-        .expect("binary")
-        .current_dir(temp.path())
-        .env("HOME", temp.path())
+    let output = nca_cmd(temp.path(), temp.path())
         .arg("sessions")
         .arg("--json")
         .assert()
@@ -214,10 +236,7 @@ fn status_outputs_session_snapshot_json() {
         SessionStatus::Completed,
     );
 
-    let output = Command::cargo_bin("nca")
-        .expect("binary")
-        .current_dir(temp.path())
-        .env("HOME", temp.path())
+    let output = nca_cmd(temp.path(), temp.path())
         .arg("status")
         .arg("session-status")
         .arg("--json")
@@ -246,10 +265,7 @@ fn cancel_json_updates_session_snapshot() {
         SessionStatus::Running,
     );
 
-    let output = Command::cargo_bin("nca")
-        .expect("binary")
-        .current_dir(temp.path())
-        .env("HOME", temp.path())
+    let output = nca_cmd(temp.path(), temp.path())
         .arg("cancel")
         .arg("session-cancel")
         .arg("--json")
@@ -281,10 +297,7 @@ fn attach_falls_back_to_enveloped_event_log() {
         "{\"id\":1,\"ts\":\"2026-03-14T00:00:00Z\",\"event\":{\"type\":\"SessionEnded\",\"reason\":\"Completed\"}}\n",
     );
 
-    Command::cargo_bin("nca")
-        .expect("binary")
-        .current_dir(temp.path())
-        .env("HOME", temp.path())
+    nca_cmd(temp.path(), temp.path())
         .arg("attach")
         .arg("session-log")
         .arg("--json")
@@ -299,10 +312,7 @@ fn attach_falls_back_to_enveloped_event_log() {
 fn spawn_json_reports_machine_paths() {
     let temp = tempdir().expect("tempdir");
 
-    let output = Command::cargo_bin("nca")
-        .expect("binary")
-        .current_dir(temp.path())
-        .env("HOME", temp.path())
+    let output = nca_cmd(temp.path(), temp.path())
         .arg("spawn")
         .arg("--prompt")
         .arg("hello")
@@ -356,10 +366,7 @@ model = "openai/gpt-4o-mini"
 "#,
     );
 
-    let output = Command::cargo_bin("nca")
-        .expect("binary")
-        .current_dir(temp.path())
-        .env("HOME", temp.path())
+    let output = nca_cmd(temp.path(), temp.path())
         .arg("models")
         .arg("--json")
         .assert()
@@ -374,9 +381,14 @@ model = "openai/gpt-4o-mini"
     let provider_models = payload["provider_models"]
         .as_array()
         .expect("provider_models array");
-    assert_eq!(provider_models.len(), 5);
+    assert_eq!(provider_models.len(), 6);
     assert!(provider_models.iter().any(|entry| {
         entry["provider"] == "OpenAI" && entry["model"] == "gpt-4o" && entry["selected"] == true
+    }));
+    assert!(provider_models.iter().any(|entry| {
+        entry["provider"] == "Alibaba"
+            && entry["model"] == "qwen2.5-coder-32b-instruct"
+            && entry["selected"] == false
     }));
     assert!(provider_models.iter().any(|entry| {
         entry["provider"] == "Custom"
@@ -403,10 +415,7 @@ model = "claude-3-7-sonnet-latest"
 "#,
     );
 
-    let output = Command::cargo_bin("nca")
-        .expect("binary")
-        .current_dir(temp.path())
-        .env("HOME", temp.path())
+    let output = nca_cmd(temp.path(), temp.path())
         .arg("doctor")
         .arg("--json")
         .assert()
@@ -419,11 +428,16 @@ model = "claude-3-7-sonnet-latest"
     assert_eq!(payload["provider"], "Anthropic");
     assert_eq!(payload["default_model"], "claude-3-7-sonnet-latest");
     let providers = payload["providers"].as_array().expect("providers array");
-    assert_eq!(providers.len(), 5);
+    assert_eq!(providers.len(), 6);
     assert!(providers.iter().any(|entry| {
         entry["provider"] == "Anthropic"
             && entry["selected"] == true
             && entry["api_key_present"] == true
+    }));
+    assert!(providers.iter().any(|entry| {
+        entry["provider"] == "Alibaba"
+            && entry["selected"] == false
+            && entry["api_key_present"] == false
     }));
     assert!(providers.iter().any(|entry| {
         entry["provider"] == "OpenAI"
@@ -443,10 +457,7 @@ fn index_build_writes_cli_index_json_under_nca_home() {
     let home = tempdir().expect("home");
     write_local_config(ws.path());
 
-    Command::cargo_bin("nca")
-        .expect("binary")
-        .current_dir(ws.path())
-        .env("HOME", home.path())
+    nca_cmd(ws.path(), home.path())
         .args(["index", "build"])
         .assert()
         .success()
@@ -477,36 +488,24 @@ fn index_show_and_build_json_status() {
     let home = tempdir().expect("home");
     write_local_config(ws.path());
 
-    Command::cargo_bin("nca")
-        .expect("binary")
-        .current_dir(ws.path())
-        .env("HOME", home.path())
+    nca_cmd(ws.path(), home.path())
         .args(["index", "build"])
         .assert()
         .success();
 
-    Command::cargo_bin("nca")
-        .expect("binary")
-        .current_dir(ws.path())
-        .env("HOME", home.path())
+    nca_cmd(ws.path(), home.path())
         .args(["index", "show"])
         .assert()
         .success()
         .stdout(predicates::str::contains("CLI index"));
 
-    Command::cargo_bin("nca")
-        .expect("binary")
-        .current_dir(ws.path())
-        .env("HOME", home.path())
+    nca_cmd(ws.path(), home.path())
         .args(["index", "show", "--json"])
         .assert()
         .success()
         .stdout(predicates::str::contains("schema_version"));
 
-    let out = Command::cargo_bin("nca")
-        .expect("binary")
-        .current_dir(ws.path())
-        .env("HOME", home.path())
+    let out = nca_cmd(ws.path(), home.path())
         .args(["index", "build", "--json"])
         .assert()
         .success()

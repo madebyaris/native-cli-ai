@@ -44,6 +44,7 @@ pub fn model_accepts_native_images(kind: ProviderKind, model: &str) -> bool {
                 || m.contains("gemini")
                 || m.contains("vision")
         }
+        ProviderKind::Alibaba => m.contains("vl") || m.contains("vision"),
     }
 }
 

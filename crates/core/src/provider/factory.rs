@@ -1,5 +1,6 @@
 use nca_common::config::{NcaConfig, ProviderKind};
 
+use super::alibaba::AlibabaProvider;
 use super::anthropic::AnthropicProvider;
 use super::custom::CustomProvider;
 use super::minimax::MiniMaxProvider;
@@ -14,6 +15,7 @@ pub fn build_provider(config: &NcaConfig) -> Result<Box<dyn Provider>, ProviderE
         ProviderKind::OpenRouter => Ok(Box::new(OpenRouterProvider::from_config(config)?)),
         ProviderKind::Anthropic => Ok(Box::new(AnthropicProvider::from_config(config)?)),
         ProviderKind::OpenAi => Ok(Box::new(OpenAiProvider::from_config(config)?)),
+        ProviderKind::Alibaba => Ok(Box::new(AlibabaProvider::from_config(config)?)),
         ProviderKind::Custom => Ok(Box::new(CustomProvider::from_config(config)?)),
     }
 }
@@ -44,6 +46,9 @@ mod tests {
                     config.provider.custom.api_key = Some("custom-key".into());
                     config.provider.custom.base_url = "https://custom.example".into();
                 }
+                ProviderKind::Alibaba => {
+                    config.provider.alibaba.api_key = Some("alibaba-key".into());
+                }
             }
 
             let provider = build_provider(&config);
@@ -60,6 +65,8 @@ mod tests {
     fn factory_fails_loudly_when_selected_provider_is_missing_credentials() {
         let mut config = NcaConfig::default();
         config.provider.default = ProviderKind::OpenAi;
+        config.provider.openai.api_key = None;
+        config.provider.openai.api_key_env = "__NONEXISTENT_TEST_KEY__".to_string();
         match build_provider(&config) {
             Ok(_) => panic!("missing credentials should fail"),
             Err(error) => {

@@ -2471,6 +2471,7 @@ dependencies = [
  "pulldown-cmark",
  "ratatui",
  "reedline",
+ "regex",
  "serde",
  "serde_json",
  "similar",
