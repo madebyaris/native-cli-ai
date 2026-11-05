@@ -1690,9 +1690,9 @@ pub struct WebConfig {
     /// themselves as such, so this defaults to a browser agent rather than `user_agent`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_user_agent: Option<String>,
-    /// API keys for keyed search backends, by backend name ("exa", "tavily",
-    /// "serper", "brave-api"). A backend is skipped when no key is set here or in
-    /// its environment variable.
+    /// API keys for search backends, by backend name ("keenable", "exa", "tavily",
+    /// "serper", "brave-api"). Keenable accepts an optional key; the other API
+    /// backends are skipped when no key is set here or in their environment variable.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub search_keys: BTreeMap<String, String>,
 }
@@ -1713,13 +1713,13 @@ impl Default for WebConfig {
 
 /// Search backends in the order they are tried.
 ///
-/// Keyed providers come first because a configured key is an explicit choice to use a
-/// real search API; they are skipped when no key exists. The keyless scrapers follow as
-/// best-effort fallbacks. Availability varies by network: DuckDuckGo is unreachable on
-/// some networks, Bing serves decoy results to some clients, and Mojeek serves a bot
-/// challenge, so the tool walks the list rather than trusting one endpoint.
+/// Keenable's public API is the keyless primary. Other API providers are tried next when
+/// configured with keys, followed by HTML scrapers as best-effort fallbacks. Availability
+/// varies by network: DuckDuckGo is unreachable on some networks, Bing serves decoy
+/// results to some clients, and Mojeek serves a bot challenge, so the tool walks the list.
 fn default_search_backends() -> Vec<String> {
     [
+        "keenable",
         "exa",
         "tavily",
         "serper",

@@ -202,15 +202,15 @@ max_fetch_chars = 25000
 default_search_limit = 5
 user_agent = "nca/0.5 (+https://github.com/user/native-cli-ai)"
 # Search backends, tried in order until one returns results for the query.
-# Keyed:    exa, tavily, serper, brave-api
-# Keyless:  keenable (optional key), brave, duckduckgo, bing, mojeek
-search_backends = ["exa", "tavily", "serper", "brave-api", "brave", "duckduckgo", "bing", "mojeek"]
+# Keenable is the keyless primary; keyed APIs and HTML scrapers are fallbacks.
+search_backends = ["keenable", "exa", "tavily", "serper", "brave-api", "brave", "duckduckgo", "bing", "mojeek"]
 # User agent for search requests only. Search engines block clients that announce
 # themselves as bots, so this defaults to a browser agent, not `user_agent`.
 # search_user_agent = "Mozilla/5.0 (...) Chrome/131.0.0.0 Safari/537.36"
 
 [web.search_keys]
-# Optional. A keyed backend without a key is skipped, not reported as a failure.
+# Optional. Keyed APIs without keys are skipped, not reported as failures.
+# keenable  = "..."   # optional; or KEENABLE_API_KEY
 # exa       = "..."   # or EXA_API_KEY
 tavily    = "tvly-..."
 serper    = "..."
@@ -221,19 +221,19 @@ brave-api = "..."
 
 | Backend | Needs a key | Env fallback | Notes |
 |---|---|---|---|
+| `keenable` | no (optional) | `KEENABLE_API_KEY` | Primary keyless search API; a key selects its authenticated endpoint |
 | `exa` | yes | `EXA_API_KEY` | Neural search with extracted highlights |
 | `tavily` | yes | `TAVILY_API_KEY` | `search_depth = "basic"` |
 | `serper` | yes | `SERPER_API_KEY` | Google results via Serper |
 | `brave-api` | yes | `BRAVE_API_KEY` | Official Brave Search API |
-| `keenable` | no (optional) | `KEENABLE_API_KEY` | Keenable search API; public endpoint without a key, keyed endpoint with one. Opt-in: add it to `search_backends` |
 | `brave` | no | — | Scrapes search.brave.com; rate limited under load |
 | `duckduckgo` | no | — | Unreachable on some networks |
 | `bing` | no | — | Sometimes answers with results for a different query; those are rejected |
 | `mojeek` | no | — | Often serves a bot challenge |
 
-Keyed providers are tried first because a configured key is an explicit choice to use a
-real search API. When no keyed provider is configured, nca falls back to scraping, which
-works best-effort: results are only accepted when the query is visible in them, so a decoy
+Keenable is tried first using its public endpoint. If it fails or returns no relevant
+results, nca tries keyed APIs when their keys are configured, then the keyless HTML
+scrapers. Scraper results are accepted only when the query is visible in them, so a decoy
 response is rejected instead of being handed to the model as fact. When every backend
 fails, `web_search` returns an error naming each one rather than an empty result.
 

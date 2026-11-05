@@ -120,7 +120,11 @@ impl WebSearchTool {
                         .map(|v| v.trim().to_string())
                         .filter(|v| !v.is_empty())
                 });
-                let body = serde_json::json!({ "query": query, "max_results": limit });
+                let body = serde_json::json!({
+                    "query": query,
+                    "max_results": limit,
+                    "snippet_max_length": 400,
+                });
                 let mut headers = vec![("X-Keenable-Title", "nca")];
                 let endpoint = match key.as_deref() {
                     Some(key) => {
@@ -957,6 +961,13 @@ mod tests {
     fn keenable_is_keyless_and_parses_description_or_snippet() {
         assert_eq!(Backend::from_name("keenable"), Some(Backend::Keenable));
         assert!(Backend::Keenable.key_env().is_none());
+        assert_eq!(
+            nca_common::config::WebConfig::default()
+                .search_backends
+                .first()
+                .map(String::as_str),
+            Some("keenable")
+        );
         let long = "x".repeat(500);
         let value = serde_json::json!({ "results": [
             { "title": "A", "url": "https://a.example", "description": "", "snippet": "snip a" },
