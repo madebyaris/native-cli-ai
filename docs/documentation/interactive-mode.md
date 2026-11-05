@@ -185,6 +185,16 @@ Available agent profiles:
 | `PageUp` / `PageDown` | Scroll the transcript one page (works without the mouse) |
 | `End` | Jump to bottom of transcript (on empty input) |
 
+### Prompt editing
+
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl+Left` / `Ctrl+Right` | Move to the previous / next whitespace-delimited word |
+| `Ctrl+Backspace` / `Ctrl+Delete` | Delete to the previous / next word boundary |
+| `Delete` | Delete the character after the cursor |
+
+Terminal support for modified keys varies by terminal and operating system.
+
 ### Agent and Model
 
 | Shortcut | Action |

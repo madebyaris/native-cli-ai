@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.6.0"
+VERSION="${NCA_VERSION:-latest}"
 REPO="madebyaris/native-cli-ai"
 BINARY="nca"
 INSTALL_DIR="${NCA_INSTALL_DIR:-/usr/local/bin}"
@@ -31,12 +31,19 @@ detect_platform() {
 }
 
 main() {
-    local platform target_url tmpdir archive
-
-    info "Installing ${BINARY} v${VERSION}"
+    local platform target_url archive
 
     platform="$(detect_platform)"
-    target_url="https://github.com/${REPO}/releases/download/v${VERSION}/${BINARY}-${platform}.tar.gz"
+    if [ "$VERSION" = "latest" ]; then
+        target_url="https://github.com/${REPO}/releases/latest/download/${BINARY}-${platform}.tar.gz"
+    else
+        VERSION="${VERSION#v}"
+        case "$VERSION" in
+            ''|*[!a-zA-Z0-9._-]*) error "Invalid NCA_VERSION" ;;
+        esac
+        target_url="https://github.com/${REPO}/releases/download/v${VERSION}/${BINARY}-${platform}.tar.gz"
+    fi
+    info "Installing ${BINARY} (${VERSION})"
 
     info "Platform: ${platform}"
     info "Downloading from: ${target_url}"
@@ -65,7 +72,7 @@ main() {
 
     chmod +x "${INSTALL_DIR}/${BINARY}"
 
-    info "Installed ${BINARY} v${VERSION} to ${INSTALL_DIR}/${BINARY}"
+    info "Installed ${BINARY} (${VERSION}) to ${INSTALL_DIR}/${BINARY}"
     info "Run 'nca --help' to get started"
 }
 

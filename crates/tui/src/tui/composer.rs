@@ -33,6 +33,32 @@ pub fn cursor_byte_index(line: &str, cursor_char_idx: usize) -> usize {
         .unwrap_or(line.len())
 }
 
+/// Find the previous word boundary using Unicode whitespace and character indices.
+pub fn previous_word_boundary(buffer: &str, cursor: usize) -> usize {
+    let chars: Vec<char> = buffer.chars().collect();
+    let mut i = cursor.min(chars.len());
+    while i > 0 && chars[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    while i > 0 && !chars[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    i
+}
+
+/// Find the next word boundary using Unicode whitespace and character indices.
+pub fn next_word_boundary(buffer: &str, cursor: usize) -> usize {
+    let chars: Vec<char> = buffer.chars().collect();
+    let mut i = cursor.min(chars.len());
+    while i < chars.len() && !chars[i].is_whitespace() {
+        i += 1;
+    }
+    while i < chars.len() && chars[i].is_whitespace() {
+        i += 1;
+    }
+    i
+}
+
 pub fn at_panel_height(n: usize) -> u16 {
     if n == 0 {
         return 0;

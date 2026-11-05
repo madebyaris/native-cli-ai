@@ -131,7 +131,7 @@ jobs:
 
   release:
     needs: build
-    if: always() && startsWith(github.ref, 'refs/tags/v')
+    if: needs.build.result == 'success' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -149,32 +149,3 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  update-install-script:
-    needs: release
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract version
-        id: version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
-
-      - name: Update install script version
-        run: |
-          if [[ "$(uname)" == "Darwin" ]]; then
-            sed -i '' "s/^VERSION=.*/VERSION=\"${{ steps.version.outputs.version }}\"/" install.sh
-          else
-            sed -i "s/^VERSION=.*/VERSION=\"${{ steps.version.outputs.version }}\"/" install.sh
-          fi
-
-      - name: Commit updated install script
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add install.sh
-          git diff --staged --quiet || git commit -m "chore: bump install script to v${{ steps.version.outputs.version }}"
-          git push origin HEAD:main

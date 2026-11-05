@@ -5,8 +5,9 @@ use crate::tui::composer::{
     PaletteRow, SLASH_PANEL_MAX_ROWS, apply_at_completion, apply_selected_at_completion,
     at_completion_active, at_completion_matches, branch_picker_enter_command,
     composer_chrome_height, composer_line, delete_completed_at_mention, filter_palette_rows,
-    filter_slash_entries, filtered_branch_indices, load_slash_entries, palette_command_for_label,
-    palette_selectable_indices, slash_panel_visible,
+    filter_slash_entries, filtered_branch_indices, load_slash_entries, next_word_boundary,
+    palette_command_for_label, palette_selectable_indices, previous_word_boundary,
+    remove_char_range, slash_panel_visible,
 };
 use crate::tui::connect_modal::{
     ConnectRow, build_connect_rows, clamp_selection, provider_at_selection,
@@ -2931,6 +2932,16 @@ pub fn run_blocking(
                                 }
                             }
                         }
+                        (KeyCode::Left, modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+                            g.cursor_char_idx =
+                                previous_word_boundary(&g.input_buffer, g.cursor_char_idx);
+                        }
+                        (KeyCode::Right, modifiers)
+                            if modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            g.cursor_char_idx =
+                                next_word_boundary(&g.input_buffer, g.cursor_char_idx);
+                        }
                         (KeyCode::Left, _) => {
                             g.cursor_char_idx = g.cursor_char_idx.saturating_sub(1);
                         }
@@ -3003,6 +3014,34 @@ pub fn run_blocking(
                                         }
                                     }
                                 }
+                            }
+                        }
+                        (KeyCode::Backspace, modifiers)
+                            if modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            let end = g.cursor_char_idx;
+                            let start = previous_word_boundary(&g.input_buffer, end);
+                            g.input_buffer = remove_char_range(&g.input_buffer, start, end);
+                            g.cursor_char_idx = start;
+                            g.slash_menu_index = 0;
+                            g.at_menu_index = 0;
+                        }
+                        (KeyCode::Delete, modifiers)
+                            if modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            let start = g.cursor_char_idx;
+                            let end = next_word_boundary(&g.input_buffer, start);
+                            g.input_buffer = remove_char_range(&g.input_buffer, start, end);
+                            g.slash_menu_index = 0;
+                            g.at_menu_index = 0;
+                        }
+                        (KeyCode::Delete, _) => {
+                            let start = g.cursor_char_idx;
+                            if start < g.input_buffer.chars().count() {
+                                g.input_buffer =
+                                    remove_char_range(&g.input_buffer, start, start + 1);
+                                g.slash_menu_index = 0;
+                                g.at_menu_index = 0;
                             }
                         }
                         (KeyCode::Backspace, _) => {

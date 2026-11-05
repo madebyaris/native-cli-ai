@@ -2320,7 +2320,7 @@ dependencies = [
 
 [[package]]
 name = "nca-acp"
-version = "0.6.0"
+version = "0.65.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -2338,7 +2338,7 @@ dependencies = [
 
 [[package]]
 name = "nca-autoresearch"
-version = "0.6.0"
+version = "0.65.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2358,7 +2358,7 @@ dependencies = [
 
 [[package]]
 name = "nca-cli"
-version = "0.6.0"
+version = "0.65.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2389,7 +2389,7 @@ dependencies = [
 
 [[package]]
 name = "nca-common"
-version = "0.6.0"
+version = "0.65.0"
 dependencies = [
  "chrono",
  "serde",
@@ -2403,7 +2403,7 @@ dependencies = [
 
 [[package]]
 name = "nca-core"
-version = "0.6.0"
+version = "0.65.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2430,7 +2430,7 @@ dependencies = [
 
 [[package]]
 name = "nca-runtime"
-version = "0.6.0"
+version = "0.65.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2452,7 +2452,7 @@ dependencies = [
 
 [[package]]
 name = "nca-tui"
-version = "0.6.0"
+version = "0.65.0"
 dependencies = [
  "anyhow",
  "arboard",
