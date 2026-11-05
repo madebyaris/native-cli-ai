@@ -24,6 +24,7 @@ use stream::{StreamMode, spawn_stream_task};
 #[derive(Parser, Debug)]
 #[command(
     name = "nca",
+    version,
     about = "Native CLI AI - a Rust-powered coding assistant"
 )]
 struct Cli {
