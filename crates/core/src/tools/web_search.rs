@@ -111,6 +111,27 @@ impl WebSearchTool {
                     .await?;
                 Ok(parse_tavily(&value))
             }
+            Backend::Keenable => {
+                // Keyless by default; an optional key (web.search_keys.keenable or
+                // KEENABLE_API_KEY) switches to the keyed endpoint.
+                let key = key.map(str::to_string).or_else(|| {
+                    std::env::var("KEENABLE_API_KEY")
+                        .ok()
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                });
+                let body = serde_json::json!({ "query": query, "max_results": limit });
+                let mut headers = vec![("X-Keenable-Title", "nca")];
+                let endpoint = match key.as_deref() {
+                    Some(key) => {
+                        headers.push(("X-API-Key", key));
+                        KEENABLE_KEYED_ENDPOINT
+                    }
+                    None => backend.endpoint(),
+                };
+                let value = self.post_json(endpoint, body, &headers).await?;
+                Ok(parse_keenable(&value))
+            }
             Backend::Serper => {
                 let body = serde_json::json!({ "q": query, "num": limit });
                 let value = self
@@ -299,6 +320,7 @@ struct SearchHit {
 enum Backend {
     Exa,
     Tavily,
+    Keenable,
     Serper,
     BraveApi,
     Brave,
@@ -312,6 +334,7 @@ impl Backend {
         match name.to_ascii_lowercase().as_str() {
             "exa" => Some(Self::Exa),
             "tavily" => Some(Self::Tavily),
+            "keenable" => Some(Self::Keenable),
             "serper" => Some(Self::Serper),
             "brave-api" | "brave_api" => Some(Self::BraveApi),
             "brave" => Some(Self::Brave),
@@ -326,6 +349,7 @@ impl Backend {
         match self {
             Self::Exa => "exa",
             Self::Tavily => "tavily",
+            Self::Keenable => "keenable",
             Self::Serper => "serper",
             Self::BraveApi => "brave-api",
             Self::Brave => "brave",
@@ -339,6 +363,7 @@ impl Backend {
         match self {
             Self::Exa => "https://api.exa.ai/search",
             Self::Tavily => "https://api.tavily.com/search",
+            Self::Keenable => "https://api.keenable.ai/v1/search/public",
             Self::Serper => "https://google.serper.dev/search",
             Self::BraveApi => "https://api.search.brave.com/res/v1/web/search",
             Self::Brave => "https://search.brave.com/search",
@@ -475,6 +500,29 @@ fn parse_tavily(value: &serde_json::Value) -> Vec<SearchHit> {
             snippet: &["content", "raw_content"],
         },
     )
+}
+
+/// Keyed Keenable endpoint, used when a key is configured.
+const KEENABLE_KEYED_ENDPOINT: &str = "https://api.keenable.ai/v1/search";
+
+/// Keenable: `results[]` with `title`, `url`, `description` (often empty) and
+/// `snippet` (can be a whole page, so it is cut to 400 chars like Exa's).
+fn parse_keenable(value: &serde_json::Value) -> Vec<SearchHit> {
+    let mut hits = json_hits(
+        value,
+        &["results"],
+        HitFields {
+            title: &["title"],
+            url: &["url"],
+            snippet: &["description", "snippet"],
+        },
+    );
+    for hit in &mut hits {
+        if hit.snippet.chars().count() > 400 {
+            hit.snippet = hit.snippet.chars().take(400).collect();
+        }
+    }
+    hits
 }
 
 /// Serper: `organic[]` with `title`, `link`, `snippet`.
@@ -903,6 +951,23 @@ mod tests {
 
         assert!(parse_exa(&value).is_empty());
         assert!(parse_tavily(&value).is_empty());
+    }
+
+    #[test]
+    fn keenable_is_keyless_and_parses_description_or_snippet() {
+        assert_eq!(Backend::from_name("keenable"), Some(Backend::Keenable));
+        assert!(Backend::Keenable.key_env().is_none());
+        let long = "x".repeat(500);
+        let value = serde_json::json!({ "results": [
+            { "title": "A", "url": "https://a.example", "description": "", "snippet": "snip a" },
+            { "title": "B", "url": "https://b.example", "description": "desc b", "snippet": "s" },
+            { "title": "C", "url": "https://c.example", "description": "", "snippet": long },
+        ]});
+        let hits = parse_keenable(&value);
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].snippet, "snip a");
+        assert_eq!(hits[1].snippet, "desc b");
+        assert_eq!(hits[2].snippet.chars().count(), 400);
         assert!(parse_serper(&value).is_empty());
         assert!(parse_brave_api(&value).is_empty());
     }

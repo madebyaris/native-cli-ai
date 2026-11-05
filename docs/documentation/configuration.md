@@ -203,7 +203,7 @@ default_search_limit = 5
 user_agent = "nca/0.5 (+https://github.com/user/native-cli-ai)"
 # Search backends, tried in order until one returns results for the query.
 # Keyed:    exa, tavily, serper, brave-api
-# Keyless:  brave, duckduckgo, bing, mojeek
+# Keyless:  keenable (optional key), brave, duckduckgo, bing, mojeek
 search_backends = ["exa", "tavily", "serper", "brave-api", "brave", "duckduckgo", "bing", "mojeek"]
 # User agent for search requests only. Search engines block clients that announce
 # themselves as bots, so this defaults to a browser agent, not `user_agent`.
@@ -225,6 +225,7 @@ brave-api = "..."
 | `tavily` | yes | `TAVILY_API_KEY` | `search_depth = "basic"` |
 | `serper` | yes | `SERPER_API_KEY` | Google results via Serper |
 | `brave-api` | yes | `BRAVE_API_KEY` | Official Brave Search API |
+| `keenable` | no (optional) | `KEENABLE_API_KEY` | Keenable search API; public endpoint without a key, keyed endpoint with one. Opt-in: add it to `search_backends` |
 | `brave` | no | — | Scrapes search.brave.com; rate limited under load |
 | `duckduckgo` | no | — | Unreachable on some networks |
 | `bing` | no | — | Sometimes answers with results for a different query; those are rejected |
