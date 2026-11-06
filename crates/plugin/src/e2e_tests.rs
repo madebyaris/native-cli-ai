@@ -1,0 +1,186 @@
+//! End-to-end: install the example plugin from a real git repo, then drive every
+//! hook through the sandbox. Uses `examples/plugin-template/plugin.wasm`
+//! (rebuild with `examples/plugin-template/build.sh` after changing the WIT).
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use crate::host::PluginSet;
+use crate::install::{self, InstallOptions};
+use crate::registry::Registry;
+use crate::types::{Credential, SpawnDecision, SpawnRequest, ToolDecision};
+
+fn example_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugin-template")
+}
+
+fn git(cwd: &Path, args: &[&str]) {
+    let st = Command::new("git")
+        .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+        .args(args)
+        .current_dir(cwd)
+        .status()
+        .unwrap();
+    assert!(st.success(), "git {args:?}");
+}
+
+fn make_repo(root: &Path) -> PathBuf {
+    let repo = root.join("plugin-repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    for f in ["nca-plugin.toml", "plugin.wasm"] {
+        std::fs::copy(example_dir().join(f), repo.join(f)).unwrap();
+    }
+    git(&repo, &["init", "--quiet"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "--quiet", "-m", "init"]);
+    repo
+}
+
+#[test]
+fn install_load_and_run_every_hook() {
+    let tmp = tempfile::tempdir().unwrap();
+    // SAFETY: this is the only test in the crate touching process env.
+    unsafe {
+        std::env::set_var("NCA_PLUGIN_HOME", tmp.path().join("home"));
+        std::env::remove_var("EXAMPLE_API_KEY");
+    }
+    let repo = make_repo(tmp.path());
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    // Declined approval installs nothing.
+    let deny = |_: &install::ApprovalRequest<'_>| false;
+    let err = install::add(
+        repo.to_str().unwrap(),
+        &InstallOptions {
+            workspace: None,
+            approve: &deny,
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("not approved"), "{err}");
+    assert!(Registry::load().unwrap().plugins.is_empty());
+
+    // Approved install; approval sees the declared capabilities.
+    let seen = std::cell::RefCell::new(Vec::new());
+    let approve = |r: &install::ApprovalRequest<'_>| {
+        seen.replace(r.manifest.capabilities.describe());
+        true
+    };
+    let entry = install::add(
+        repo.to_str().unwrap(),
+        &InstallOptions {
+            workspace: None,
+            approve: &approve,
+        },
+    )
+    .unwrap();
+    assert_eq!(seen.borrow().as_slice(), ["environment: EXAMPLE_API_KEY"]);
+    assert_eq!(entry.name, "example");
+    assert_eq!(entry.commit.len(), 40);
+
+    // Duplicate install is refused.
+    assert!(
+        install::add(
+            repo.to_str().unwrap(),
+            &InstallOptions {
+                workspace: None,
+                approve: &approve
+            }
+        )
+        .is_err()
+    );
+
+    let registry = Registry::load().unwrap();
+    let set = PluginSet::load(&registry.plugins, &ws);
+    assert_eq!(set.names(), ["example"]);
+
+    // auth: no key in env -> falls through to the core default via next-credential.
+    let core = Credential {
+        api_key: Some("core-key".into()),
+        base_url: Some("https://core".into()),
+    };
+    let got = set
+        .resolve_credential("anthropic", Some(core.clone()))
+        .unwrap();
+    assert_eq!(got, Some(core.clone()));
+
+    // auth: env var granted by the manifest -> plugin overrides.
+    unsafe { std::env::set_var("EXAMPLE_API_KEY", "plugin-key") };
+    let got = set
+        .resolve_credential("anthropic", Some(core.clone()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.api_key.as_deref(), Some("plugin-key"));
+    // other providers are untouched.
+    assert_eq!(
+        set.resolve_credential("openai", Some(core.clone()))
+            .unwrap(),
+        Some(core)
+    );
+
+    // subagent: plugin rewrites the request after consulting core.
+    let req = SpawnRequest {
+        task: "t".into(),
+        focus_files: vec![],
+        skills: vec![],
+        use_worktree: false,
+    };
+    match set.before_spawn(req).unwrap() {
+        SpawnDecision::Allow(r) => assert!(r.use_worktree),
+        other => panic!("{other:?}"),
+    }
+
+    // agent: prompt rewrite + tool policy.
+    let prompt = set.transform_system_prompt("base".into());
+    assert!(prompt.starts_with("base\n\n") && prompt.contains("terse senior engineer"));
+    assert_eq!(
+        set.before_tool_use("bash", r#"{"cmd":"ls"}"#),
+        ToolDecision::Allow
+    );
+    match set.before_tool_use("bash", r#"{"cmd":"rm -rf /"}"#) {
+        ToolDecision::Deny(reason) => assert!(reason.contains("blocked"), "{reason}"),
+        other => panic!("{other:?}"),
+    }
+
+    // cosmetic: plugin sees core defaults and overrides one token.
+    let defaults = vec![
+        ("assistant".to_string(), "#aaaaaa".to_string()),
+        ("bg".to_string(), "#000000".to_string()),
+    ];
+    let theme = set.theme(defaults).unwrap();
+    assert!(theme.contains(&("assistant".into(), "#f97316".into())));
+    assert!(theme.contains(&("bg".into(), "#000000".into())));
+    assert!(!theme.contains(&("assistant".into(), "#aaaaaa".into())));
+
+    // Tampering with the installed wasm after approval is detected; plugin is skipped.
+    let wasm_path = entry.dir.join("plugin.wasm");
+    let mut bytes = std::fs::read(&wasm_path).unwrap();
+    bytes.push(0);
+    std::fs::write(&wasm_path, bytes).unwrap();
+    assert!(PluginSet::load(&registry.plugins, &ws).is_empty());
+    assert!(
+        registry.plugins[0]
+            .load_verified()
+            .unwrap_err()
+            .to_string()
+            .contains("hash mismatch")
+    );
+
+    // Disabled / other-workspace plugins are not loaded; remove deletes files.
+    install::set_enabled("example", None, false).unwrap();
+    assert!(PluginSet::load(&Registry::load().unwrap().plugins, &ws).is_empty());
+    install::remove("example", None).unwrap();
+    assert!(!entry.dir.exists());
+    assert!(Registry::load().unwrap().plugins.is_empty());
+}
+
+#[test]
+fn http_is_denied_without_network_grant() {
+    let err = crate::host::http_request_for_test(&[], "GET", "https://evil.example/x").unwrap_err();
+    assert!(err.contains("not granted"), "{err}");
+    let err =
+        crate::host::http_request_for_test(&["a.example".into()], "GET", "file:///etc/passwd")
+            .unwrap_err();
+    assert!(err.contains("scheme"), "{err}");
+}

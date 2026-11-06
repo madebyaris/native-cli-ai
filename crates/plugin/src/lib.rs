@@ -1,0 +1,132 @@
+//! WASM plugin factory for nca.
+//!
+//! * [`install`]: `nca add <git-url>` and friends (clone, validate, approve, install).
+//! * [`registry`]: what is installed, with hashes pinned at approval time.
+//! * [`host`]: sandboxed wasmtime runtime and hook chain.
+//! * this module: the process-wide hook API called from core, runtime and TUI.
+//!
+//! Every hook is a no-op when no plugin is installed.
+
+pub mod error;
+pub mod host;
+pub mod install;
+pub mod manifest;
+pub mod registry;
+pub mod types;
+
+use std::path::Path;
+use std::sync::OnceLock;
+
+use nca_common::config::{NcaConfig, ProviderKind};
+
+pub use error::PluginError;
+pub use host::PluginSet;
+pub use types::{Credential, SpawnDecision, SpawnRequest, ThemeEntries, ToolDecision};
+
+static GLOBAL: OnceLock<PluginSet> = OnceLock::new();
+
+/// Load installed plugins for this process. Call once at startup, after the
+/// workspace is known. Later calls are ignored.
+pub fn init(workspace: &Path) {
+    GLOBAL.get_or_init(|| match registry::Registry::load() {
+        Ok(reg) if !reg.plugins.is_empty() => PluginSet::load(&reg.plugins, workspace),
+        Ok(_) => PluginSet::empty(),
+        Err(e) => {
+            tracing::warn!("plugins disabled: {e}");
+            PluginSet::empty()
+        }
+    });
+}
+
+fn active() -> Option<&'static PluginSet> {
+    GLOBAL.get().filter(|s| !s.is_empty())
+}
+
+/// Names of loaded plugins, in chain order.
+pub fn loaded_names() -> Vec<String> {
+    GLOBAL.get().map(|s| s.names().to_vec()).unwrap_or_default()
+}
+
+fn provider_name(kind: ProviderKind) -> &'static str {
+    match kind {
+        ProviderKind::MiniMax => "minimax",
+        ProviderKind::OpenAi => "openai",
+        ProviderKind::Anthropic => "anthropic",
+        ProviderKind::OpenRouter => "openrouter",
+        ProviderKind::Alibaba => "alibaba",
+        ProviderKind::Custom => "custom",
+    }
+}
+
+fn configured_credential(config: &NcaConfig, kind: ProviderKind) -> Credential {
+    let p = &config.provider;
+    let (api_key, base_url) = match kind {
+        ProviderKind::MiniMax => (p.minimax.resolve_api_key(), &p.minimax.base_url),
+        ProviderKind::OpenAi => (p.openai.resolve_api_key(), &p.openai.base_url),
+        ProviderKind::Anthropic => (p.anthropic.resolve_api_key(), &p.anthropic.base_url),
+        ProviderKind::OpenRouter => (p.openrouter.resolve_api_key(), &p.openrouter.base_url),
+        ProviderKind::Alibaba => (p.alibaba.resolve_api_key(), &p.alibaba.base_url),
+        ProviderKind::Custom => (p.custom.resolve_api_key(), &p.custom.base_url),
+    };
+    Credential {
+        api_key,
+        base_url: Some(base_url.clone()),
+    }
+}
+
+/// Auth hook. Lets plugins replace the API key / base URL of the default
+/// provider before it is built. Fail-closed: a plugin error is returned.
+pub fn apply_auth(config: &mut NcaConfig) -> Result<(), PluginError> {
+    let Some(set) = active() else { return Ok(()) };
+    let kind = config.provider.default;
+    let default = configured_credential(config, kind);
+    let resolved = set.resolve_credential(provider_name(kind), Some(default))?;
+    if let Some(cred) = resolved {
+        if let Some(key) = cred.api_key {
+            config.set_provider_api_key(kind, key);
+        }
+        if let Some(url) = cred.base_url {
+            config.set_provider_base_url(kind, url);
+        }
+    }
+    Ok(())
+}
+
+/// Subagent hook. `Deny` must stop the spawn; `Allow` carries the request to use.
+/// Fail-closed: a plugin error denies.
+pub fn before_spawn(request: SpawnRequest) -> SpawnDecision {
+    let Some(set) = active() else {
+        return SpawnDecision::Allow(request);
+    };
+    set.before_spawn(request)
+        .unwrap_or_else(|e| SpawnDecision::Deny(e.to_string()))
+}
+
+/// Agent hook: system prompt rewriting. Fail-open: errors keep the prompt.
+pub fn transform_system_prompt(prompt: String) -> String {
+    match active() {
+        Some(set) => set.transform_system_prompt(prompt),
+        None => prompt,
+    }
+}
+
+/// Agent hook: policy check before each tool call. Fail-closed.
+pub fn before_tool_use(tool: &str, input_json: &str) -> ToolDecision {
+    match active() {
+        Some(set) => set.before_tool_use(tool, input_json),
+        None => ToolDecision::Allow,
+    }
+}
+
+/// Cosmetic hook. `defaults` are the built-in `(token, "#rrggbb")` pairs; the
+/// result is the effective theme. Fail-open: errors return `defaults`.
+pub fn theme(defaults: ThemeEntries) -> ThemeEntries {
+    let Some(set) = active() else { return defaults };
+    set.theme(defaults.clone()).unwrap_or_else(|e| {
+        tracing::warn!("{e}; using default theme");
+        defaults
+    })
+}
+
+#[cfg(test)]
+mod e2e_tests;

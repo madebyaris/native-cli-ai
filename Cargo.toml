@@ -8,6 +8,7 @@ members = [
     "crates/cli",
     "crates/acp",
     "crates/autoresearch",
+    "crates/plugin",
 ]
 
 [workspace.package]
@@ -51,3 +52,4 @@ nca-runtime = { path = "crates/runtime" }
 nca-acp = { path = "crates/acp" }
 nca-tui = { path = "crates/tui" }
 nca-autoresearch = { path = "crates/autoresearch" }
+nca-plugin = { path = "crates/plugin" }

@@ -9,7 +9,12 @@ use super::openrouter::OpenRouterProvider;
 use super::{Provider, ProviderError};
 
 /// Build the configured provider for the current workspace.
+///
+/// Installed auth plugins may override the API key / base URL first.
 pub fn build_provider(config: &NcaConfig) -> Result<Box<dyn Provider>, ProviderError> {
+    let mut config = config.clone();
+    nca_plugin::apply_auth(&mut config).map_err(|e| ProviderError::Other(e.to_string()))?;
+    let config = &config;
     match config.provider.default {
         ProviderKind::MiniMax => Ok(Box::new(MiniMaxProvider::from_config(config)?)),
         ProviderKind::OpenRouter => Ok(Box::new(OpenRouterProvider::from_config(config)?)),
