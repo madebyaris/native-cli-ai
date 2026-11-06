@@ -648,6 +648,9 @@ impl Repl {
                         provider.display_name(),
                         if self.runtime.config().provider.api_key_present_for(provider) {
                             "configured"
+                        } else if nca_plugin::plugin_supplies_key(self.runtime.config(), provider)
+                        {
+                            "configured (plugin)"
                         } else {
                             "missing"
                         }
@@ -1298,6 +1301,32 @@ impl Repl {
                     for l in &lines {
                         out.println(l);
                     }
+                }
+            }
+            "/login" => {
+                // Subscription-style login: providers whose credentials come from an auth
+                // plugin (for example claude-provider). API-key providers use /connect.
+                let mut chosen = None;
+                let mut notes = Vec::new();
+                for p in ProviderKind::ALL {
+                    match nca_plugin::plugin_key_status(self.runtime.config(), p) {
+                        Some(Ok(())) => {
+                            notes.push(format!("{}: signed in via plugin", p.display_name()));
+                            chosen.get_or_insert(p);
+                        }
+                        Some(Err(e)) => notes.push(format!("{}: {e}", p.display_name())),
+                        None => {}
+                    }
+                }
+                for note in &notes {
+                    out.println(&format!("[login] {note}"));
+                }
+                match chosen {
+                    Some(p) => self.apply_provider_in_session(p, out).await?,
+                    None if notes.is_empty() => out.println(
+                        "[login] no auth plugin supplies credentials. Install one, e.g. `nca add https://github.com/igun997/claude-provider`, or use /connect for API keys.",
+                    ),
+                    None => {}
                 }
             }
             "/connect" => {
@@ -2720,6 +2749,8 @@ fn build_model_picker_entries(
         let model = config.provider.model_for(p);
         let key_status = if config.provider.api_key_present_for(p) {
             "key ✓"
+        } else if nca_plugin::plugin_supplies_key(config, p) {
+            "plugin ✓"
         } else {
             "no key"
         };

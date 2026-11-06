@@ -691,7 +691,10 @@ async fn try_main() -> anyhow::Result<()> {
                     && stdout().is_terminal()
                     && stdin().is_terminal()
                     && matches!(cli.stream, StreamMode::Human);
-                if config.needs_onboarding() && onboarding_tui {
+                if config.needs_onboarding()
+                    && onboarding_tui
+                    && !nca_plugin::plugin_supplies_key(&config, config.provider.default)
+                {
                     config = nca_tui::tui::onboarding::run_onboarding(config).await?;
                 }
 

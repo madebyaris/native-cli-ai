@@ -284,6 +284,15 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         Always
     ),
     command!(
+        "login",
+        "/login",
+        [],
+        "Sign in with an auth plugin (subscription)",
+        Provider,
+        "",
+        Always
+    ),
+    command!(
         "connect",
         "/connect",
         ["/provider", "/apikey", "/custom"],

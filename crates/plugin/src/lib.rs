@@ -92,6 +92,26 @@ pub fn apply_auth(config: &mut NcaConfig) -> Result<(), PluginError> {
     Ok(())
 }
 
+/// What an installed auth plugin says about `kind`: `None` = no opinion (no key from a
+/// plugin), `Some(Ok(()))` = it supplies a key, `Some(Err(msg))` = it tried and failed
+/// (for example an expired subscription token). UI use only.
+pub fn plugin_key_status(config: &NcaConfig, kind: ProviderKind) -> Option<Result<(), String>> {
+    let set = active()?;
+    let default = configured_credential(config, kind);
+    match set.resolve_credential(provider_name(kind), Some(default.clone())) {
+        Ok(Some(Credential {
+            api_key: Some(key), ..
+        })) if default.api_key.as_deref() != Some(key.as_str()) => Some(Ok(())),
+        Ok(_) => None,
+        Err(e) => Some(Err(e.to_string())),
+    }
+}
+
+/// Whether an installed auth plugin currently supplies an API key for `kind`.
+pub fn plugin_supplies_key(config: &NcaConfig, kind: ProviderKind) -> bool {
+    matches!(plugin_key_status(config, kind), Some(Ok(())))
+}
+
 /// Subagent hook. `Deny` must stop the spawn; `Allow` carries the request to use.
 /// Fail-closed: a plugin error denies.
 pub fn before_spawn(request: SpawnRequest) -> SpawnDecision {
