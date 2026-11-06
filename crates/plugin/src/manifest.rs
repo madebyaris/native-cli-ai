@@ -73,13 +73,16 @@ impl Hooks {
     }
 }
 
-/// Deny-by-default grants. `$NCA_PLUGIN_DATA` in path lists expands to the
+/// Grants. Files and environment are deny-by-default; network is allow-by-default
+/// (any http/https host) unless the manifest lists hosts, or `network = []` to deny.
+/// `$NCA_PLUGIN_DATA` in path lists expands to the
 /// plugin's private data directory.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capabilities {
-    /// Hostnames the plugin may reach over HTTP(S).
+    /// Hostnames the plugin may reach over HTTP(S). `None` (key omitted) = any host,
+    /// `Some([])` = no network, `Some([..])` = only those hosts.
     #[serde(default)]
-    pub network: Vec<String>,
+    pub network: Option<Vec<String>>,
     #[serde(default)]
     pub fs_read: Vec<String>,
     #[serde(default)]
@@ -91,7 +94,7 @@ pub struct Capabilities {
 
 impl Capabilities {
     pub fn is_empty(&self) -> bool {
-        self.network.is_empty()
+        self.network.as_deref().is_some_and(<[String]>::is_empty)
             && self.fs_read.is_empty()
             && self.fs_write.is_empty()
             && self.env.is_empty()
@@ -100,8 +103,12 @@ impl Capabilities {
     /// Human-readable lines for the install approval prompt.
     pub fn describe(&self) -> Vec<String> {
         let mut lines = Vec::new();
-        if !self.network.is_empty() {
-            lines.push(format!("network: {}", self.network.join(", ")));
+        match &self.network {
+            None => lines.push("network: any host (default)".into()),
+            Some(hosts) if !hosts.is_empty() => {
+                lines.push(format!("network: {}", hosts.join(", ")));
+            }
+            Some(_) => {}
         }
         if !self.fs_read.is_empty() {
             lines.push(format!("read files: {}", self.fs_read.join(", ")));
@@ -160,7 +167,7 @@ impl Manifest {
                 "plugin.wasm must point at a .wasm file".into(),
             ));
         }
-        for host in &self.capabilities.network {
+        for host in self.capabilities.network.iter().flatten() {
             if host.is_empty() || host.contains('/') || host.contains(':') || host.contains('*') {
                 return Err(PluginError::Manifest(format!(
                     "capabilities.network entry `{host}` must be a bare hostname"
@@ -207,7 +214,10 @@ network = ["login.acme.com"]
         let m = Manifest::parse(OK).unwrap();
         assert_eq!(m.plugin.name, "acme-sso");
         assert_eq!(m.hooks.names(), vec!["auth"]);
-        assert_eq!(m.capabilities.network, vec!["login.acme.com"]);
+        assert_eq!(
+            m.capabilities.network,
+            Some(vec!["login.acme.com".to_string()])
+        );
     }
 
     #[test]

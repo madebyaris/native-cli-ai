@@ -47,7 +47,8 @@ priority = 0                 # optional; lower runs first
 auth = true
 cosmetic = true
 
-[capabilities]               # deny by default
+[capabilities]               # files and env: deny by default
+# network: omit = any http(s) host (default); list = only those hosts; [] = none
 network = ["login.acme.com"]                # bare hostnames, no redirects followed
 fs_read = []                                # absolute paths, $HOME, $NCA_PLUGIN_DATA, $WORKSPACE
 fs_write = ["$NCA_PLUGIN_DATA"]
@@ -77,7 +78,7 @@ Returning `none` from `auth.resolve-credential` passes to the next plugin.
 
 * Each guest call: 5 s wall clock (epoch interruption), 256 MiB memory.
 * stdout/stderr are discarded; use `host.log`. No sockets: HTTP goes through
-  `host.http-request`, restricted to `capabilities.network`, 8 MiB response cap, no redirects.
+  `host.http-request`, any http(s) host unless `capabilities.network` lists hosts (or is `[]`), 8 MiB response cap, no redirects.
 * Filesystem and env access only as granted by the manifest.
 * A plugin that fails to verify, compile or instantiate is skipped with a warning.
 * Failures at call time: `auth` fails closed (provider is not built), `subagent` and

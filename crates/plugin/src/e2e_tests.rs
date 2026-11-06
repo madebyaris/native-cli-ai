@@ -75,7 +75,13 @@ fn install_load_and_run_every_hook() {
         },
     )
     .unwrap();
-    assert_eq!(seen.borrow().as_slice(), ["environment: EXAMPLE_API_KEY"]);
+    assert_eq!(
+        seen.borrow().as_slice(),
+        [
+            "network: any host (default)",
+            "environment: EXAMPLE_API_KEY"
+        ]
+    );
     assert_eq!(entry.name, "example");
     assert_eq!(entry.commit.len(), 40);
 
@@ -176,11 +182,17 @@ fn install_load_and_run_every_hook() {
 }
 
 #[test]
-fn http_is_denied_without_network_grant() {
-    let err = crate::host::http_request_for_test(&[], "GET", "https://evil.example/x").unwrap_err();
-    assert!(err.contains("not granted"), "{err}");
+fn http_network_allow_by_default_but_deniable() {
     let err =
-        crate::host::http_request_for_test(&["a.example".into()], "GET", "file:///etc/passwd")
-            .unwrap_err();
+        crate::host::http_request_for_test(Some(&[]), "GET", "https://evil.example/x").unwrap_err();
+    assert!(err.contains("not granted"), "{err}");
+    let err = crate::host::http_request_for_test(None, "GET", "file:///etc/passwd").unwrap_err();
     assert!(err.contains("scheme"), "{err}");
+    let err = crate::host::http_request_for_test(
+        Some(&["a.example".to_string()]),
+        "GET",
+        "https://b.example/x",
+    )
+    .unwrap_err();
+    assert!(err.contains("not granted"), "{err}");
 }

@@ -12,7 +12,7 @@ agent = true
 cosmetic = true
 
 [capabilities]
-# Deny by default. This template only reads one env var.
+# Files and env are deny-by-default; network is allowed unless you set `network`. This template reads one env var.
 env = ["EXAMPLE_API_KEY"]
 
 [config]

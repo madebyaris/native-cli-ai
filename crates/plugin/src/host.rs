@@ -108,7 +108,7 @@ struct HostState {
     name: String,
     config: BTreeMap<String, String>,
     allowed_env: Vec<String>,
-    allowed_hosts: Vec<String>,
+    allowed_hosts: Option<Vec<String>>,
     next: Option<Arc<Node>>,
     defaults: Defaults,
 }
@@ -155,7 +155,7 @@ impl wit_host::Host for HostState {
         headers: Vec<(String, String)>,
         body: Option<Vec<u8>>,
     ) -> Result<wit_host::HttpResponse, String> {
-        http_request(&self.allowed_hosts, &method, &url, headers, body)
+        http_request(self.allowed_hosts.as_deref(), &method, &url, headers, body)
     }
 
     fn next_credential(&mut self, provider: String) -> Result<Option<wit::Credential>, String> {
@@ -182,7 +182,7 @@ impl wit_host::Host for HostState {
 }
 
 fn http_request(
-    allowed: &[String],
+    allowed: Option<&[String]>,
     method: &str,
     url: &str,
     headers: Vec<(String, String)>,
@@ -193,7 +193,9 @@ fn http_request(
         return Err(format!("scheme `{}` is not allowed", parsed.scheme()));
     }
     let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
-    if !allowed.iter().any(|h| h.eq_ignore_ascii_case(&host)) {
+    if let Some(allowed) = allowed
+        && !allowed.iter().any(|h| h.eq_ignore_ascii_case(&host))
+    {
         return Err(format!(
             "network access to `{host}` is not granted by the plugin manifest"
         ));
@@ -621,7 +623,7 @@ impl From<SpawnDecision> for wit::SpawnDecision {
 
 #[cfg(test)]
 pub(crate) fn http_request_for_test(
-    allowed: &[String],
+    allowed: Option<&[String]>,
     method: &str,
     url: &str,
 ) -> Result<(), String> {
