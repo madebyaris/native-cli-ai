@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 nca-autoresearch = { workspace = true }
 nca-common = { workspace = true }
+nca-plugin = { workspace = true }
 nca-core = { workspace = true }
 nca-runtime = { workspace = true }
 nca-tui = { workspace = true }

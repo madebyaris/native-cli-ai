@@ -847,7 +847,8 @@ impl Supervisor {
     pub fn refresh_system_prompt(&mut self) {
         let snapshot = self.build_harness_snapshot();
         let prompt = build_system_prompt(&self.config, &snapshot, self.orchestration.as_ref());
-        self.agent.set_system_prompt(prompt);
+        self.agent
+            .set_system_prompt(nca_plugin::transform_system_prompt(prompt));
     }
 
     fn load_memory_notes_for_harness(&self) -> Vec<HarnessMemoryNote> {
@@ -1381,7 +1382,33 @@ pub fn spawn_subagent_consumer(
         let parent_sessions_dir = resolve_sessions_dir(&config, &workspace_root);
         let parent_summary = build_parent_summary(&parent_messages);
 
-        while let Some(req) = spawn_rx.recv().await {
+        while let Some(mut req) = spawn_rx.recv().await {
+            match nca_plugin::before_spawn(nca_plugin::SpawnRequest {
+                task: req.task.clone(),
+                focus_files: req.focus_files.clone(),
+                skills: req.skills.clone(),
+                use_worktree: req.use_worktree,
+            }) {
+                nca_plugin::SpawnDecision::Allow(r) => {
+                    req.task = r.task;
+                    req.focus_files = r.focus_files;
+                    req.skills = r.skills;
+                    req.use_worktree = r.use_worktree;
+                }
+                nca_plugin::SpawnDecision::Deny(reason) => {
+                    let _ = req
+                        .reply
+                        .send(nca_core::tools::spawn_subagent::SpawnResponse {
+                            child_session_id: String::new(),
+                            status: "error".into(),
+                            output: format!("sub-agent spawn denied by plugin: {reason}"),
+                            workspace: workspace_root.display().to_string(),
+                            branch: None,
+                            worktree_path: None,
+                        });
+                    continue;
+                }
+            }
             let parent_session_id = parent_session_id.clone();
             let workspace_root = workspace_root.clone();
             let config = config.clone();

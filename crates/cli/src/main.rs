@@ -1,5 +1,6 @@
 mod approval_prompts;
 mod cli_index;
+mod plugin_cmd;
 mod stream;
 
 use crate::approval_prompts::InteractiveIpcApprovalHandler;
@@ -203,6 +204,13 @@ enum Command {
         session_id: String,
         #[arg(long)]
         json: bool,
+    },
+    /// Install a WASM plugin from a git URL (public or private): `nca add <url>[@ref]`
+    Add(plugin_cmd::AddArgs),
+    /// Manage WASM plugins: list, info, enable, disable, update, remove
+    Plugin {
+        #[command(subcommand)]
+        command: plugin_cmd::PluginCommand,
     },
     /// Manage skills: list, add, remove, update
     Skills {
@@ -411,7 +419,12 @@ async fn try_main() -> anyhow::Result<()> {
     }
 
     let workspace_root = PathBuf::from(".");
+    if let Ok(ws) = workspace_root.canonicalize() {
+        nca_plugin::init(&ws);
+    }
     match cli.command {
+        Some(Command::Add(args)) => plugin_cmd::add(&args, &workspace_root)?,
+        Some(Command::Plugin { command }) => plugin_cmd::run(command, &workspace_root)?,
         Some(Command::Acp {
             model,
             safe,

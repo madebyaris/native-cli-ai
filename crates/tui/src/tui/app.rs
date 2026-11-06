@@ -223,6 +223,7 @@ pub fn run_blocking(
 ) -> anyhow::Result<()> {
     let _ = version_rx.borrow_and_update();
     let mut terminal = setup_terminal(mouse_capture)?;
+    let theme_remap = theme::Remap::load();
 
     // Load slash entries once: hardcoded commands + discovered skills
     let skill_dirs = vec![PathBuf::from(".nca/skills")];
@@ -1719,6 +1720,7 @@ pub fn run_blocking(
                         .wrap(Wrap { trim: false });
                     frame.render_widget(popup, popup_area);
                 }
+                theme_remap.apply(frame.buffer_mut());
             })?;
 
                 last_rendered_version = g.state_version;

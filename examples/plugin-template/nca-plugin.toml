@@ -1,0 +1,21 @@
+[plugin]
+name = "example"
+version = "0.1.0"
+api_version = "1"
+wasm = "plugin.wasm"
+description = "Template: one small override per extension point"
+
+[hooks]
+auth = true
+subagent = true
+agent = true
+cosmetic = true
+
+[capabilities]
+# Deny by default. This template only reads one env var.
+env = ["EXAMPLE_API_KEY"]
+
+[config]
+prompt_suffix = "Answer in the style of a terse senior engineer."
+blocked_command = "rm -rf /"
+accent = "#f97316"
