@@ -248,10 +248,10 @@ pub(crate) struct Node {
 }
 
 impl Node {
-    fn call<R>(
+    fn call<R: Send>(
         &self,
         defaults: &Defaults,
-        f: impl FnOnce(&mut Bindings, &mut Store<HostState>) -> wasmtime::Result<R>,
+        f: impl FnOnce(&mut Bindings, &mut Store<HostState>) -> wasmtime::Result<R> + Send,
     ) -> Result<R, PluginError> {
         let mut guard = self
             .instance
@@ -260,7 +260,20 @@ impl Node {
         let Instance { store, bindings } = &mut *guard;
         store.data_mut().defaults = defaults.clone();
         store.set_epoch_deadline((CALL_TIMEOUT.as_millis() / EPOCH_TICK.as_millis()) as u64);
-        f(bindings, store).map_err(|e| rt_err(&self.name, e))
+        // wasmtime-wasi blocks on its own runtime for filesystem access, which panics if
+        // the current thread is already driving a tokio runtime. Run the guest on a
+        // plain scoped thread in that case.
+        let out = if tokio::runtime::Handle::try_current().is_ok() {
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| f(bindings, store))
+                    .join()
+                    .unwrap_or_else(|_| Err(wasmtime::Error::msg("plugin call panicked")))
+            })
+        } else {
+            f(bindings, store)
+        };
+        out.map_err(|e| rt_err(&self.name, e))
     }
 }
 
@@ -469,13 +482,15 @@ impl PluginSet {
 }
 
 fn expand_path(raw: &str, data_dir: &Path, workspace: &Path) -> Result<PathBuf, PluginError> {
+    let home = std::env::var("HOME").unwrap_or_default();
     let expanded = raw
+        .replace("$HOME", &home)
         .replace("$NCA_PLUGIN_DATA", &data_dir.to_string_lossy())
         .replace("$WORKSPACE", &workspace.to_string_lossy());
     let path = PathBuf::from(expanded);
     if !path.is_absolute() {
         return Err(PluginError::Manifest(format!(
-            "capability path `{raw}` must be absolute or start with $NCA_PLUGIN_DATA / $WORKSPACE"
+            "capability path `{raw}` must be absolute or start with $HOME / $NCA_PLUGIN_DATA / $WORKSPACE"
         )));
     }
     Ok(path)

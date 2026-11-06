@@ -49,7 +49,7 @@ cosmetic = true
 
 [capabilities]               # deny by default
 network = ["login.acme.com"]                # bare hostnames, no redirects followed
-fs_read = []                                # absolute paths, $NCA_PLUGIN_DATA, $WORKSPACE
+fs_read = []                                # absolute paths, $HOME, $NCA_PLUGIN_DATA, $WORKSPACE
 fs_write = ["$NCA_PLUGIN_DATA"]
 env = ["ACME_TOKEN"]
 

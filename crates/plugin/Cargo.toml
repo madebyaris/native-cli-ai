@@ -6,6 +6,7 @@ license.workspace = true
 description = "WASM plugin factory: manifest, installer and sandboxed host for nca plugins"
 
 [dependencies]
+tokio = { workspace = true }
 nca-common = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
