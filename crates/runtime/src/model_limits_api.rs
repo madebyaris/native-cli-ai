@@ -121,6 +121,21 @@ async fn resolve_model_limits_in(
     }
 }
 
+/// The config as the provider will see it once an auth plugin has supplied its credential.
+///
+/// The model list and the context window are asked of the provider with the same key the
+/// chat uses; without this, an account whose only credential is a plugin's (a Claude
+/// subscription token, say) would get an empty list. A plugin that fails leaves the
+/// configured credential in place, and the chat path reports that failure itself.
+fn with_plugin_auth(config: &NcaConfig) -> NcaConfig {
+    let mut resolved = config.clone();
+    if let Err(err) = nca_plugin::apply_auth(&mut resolved) {
+        tracing::debug!(error = %err, "model catalog: auth plugin gave no credential");
+        return config.clone();
+    }
+    resolved
+}
+
 /// Whether this run may ask the provider for a context window at all.
 fn api_lookup_enabled(config: &NcaConfig) -> bool {
     std::env::var("NCA_SKIP_CONTEXT_API").ok().as_deref() != Some("1")
@@ -131,6 +146,7 @@ fn api_lookup_enabled(config: &NcaConfig) -> bool {
 /// Asks the active provider for the model's context window. `None` when the provider has no
 /// lookup, the key is missing, or the request fails.
 async fn query_provider_limits(config: &NcaConfig, model: &str) -> Option<usize> {
+    let config = &with_plugin_auth(config);
     let client = match http_client() {
         Ok(c) => c,
         Err(e) => {
@@ -403,10 +419,7 @@ async fn fetch_anthropic_context(
             url.push_str(id);
         }
 
-        let resp = client
-            .get(&url)
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
+        let resp = nca_core::provider::anthropic::with_anthropic_auth(client.get(&url), api_key)
             .send()
             .await
             .ok()?;
@@ -598,6 +611,7 @@ async fn fetch_provider_model_ids_live(config: &NcaConfig) -> Vec<String> {
     if !config.memory.context.query_provider_models_api {
         return Vec::new();
     }
+    let config = &with_plugin_auth(config);
     if std::env::var("NCA_SKIP_CONTEXT_API").ok().as_deref() == Some("1") {
         return Vec::new();
     }
@@ -740,10 +754,7 @@ async fn fetch_anthropic_model_ids(client: &reqwest::Client, config: &NcaConfig)
             url.push_str("&after_id=");
             url.push_str(id);
         }
-        let resp = match client
-            .get(&url)
-            .header("x-api-key", &key)
-            .header("anthropic-version", "2023-06-01")
+        let resp = match nca_core::provider::anthropic::with_anthropic_auth(client.get(&url), &key)
             .send()
             .await
         {

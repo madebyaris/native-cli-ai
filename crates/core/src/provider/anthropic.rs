@@ -26,6 +26,21 @@ fn is_oauth_token(key: &str) -> bool {
     key.starts_with("sk-ant-oat")
 }
 
+/// Adds Anthropic credentials to a request that is not a chat turn (the models list, for
+/// one): `Authorization: Bearer` plus the OAuth beta for a subscription token, `x-api-key`
+/// for a regular key.
+pub fn with_anthropic_auth(req: reqwest::RequestBuilder, key: &str) -> reqwest::RequestBuilder {
+    let req = req.header("anthropic-version", "2023-06-01");
+    if is_oauth_token(key) {
+        req.bearer_auth(key)
+            .header("anthropic-beta", OAUTH_BETA)
+            .header("x-app", "cli")
+            .header(reqwest::header::USER_AGENT, OAUTH_USER_AGENT)
+    } else {
+        req.header("x-api-key", key)
+    }
+}
+
 /// Subscription tokens require the Claude Code identity as the first system block.
 fn with_oauth_system(body: &mut serde_json::Value) {
     let mut blocks = vec![serde_json::json!({"type": "text", "text": OAUTH_SYSTEM_IDENTITY})];
@@ -152,6 +167,33 @@ mod tests {
     use nca_common::message::Message;
     use nca_common::tool::ToolDefinition;
     use serde_json::json;
+
+    fn auth_headers(key: &str) -> reqwest::header::HeaderMap {
+        let client = reqwest::Client::new();
+        with_anthropic_auth(client.get("http://localhost/v1/models"), key)
+            .build()
+            .expect("request builds")
+            .headers()
+            .clone()
+    }
+
+    #[test]
+    fn models_request_uses_bearer_and_oauth_beta_for_a_subscription_token() {
+        let headers = auth_headers("sk-ant-oat01-test");
+        assert_eq!(headers["authorization"], "Bearer sk-ant-oat01-test");
+        assert_eq!(headers["anthropic-beta"], OAUTH_BETA);
+        assert_eq!(headers["anthropic-version"], "2023-06-01");
+        assert!(headers.get("x-api-key").is_none());
+    }
+
+    #[test]
+    fn models_request_uses_x_api_key_for_a_regular_key() {
+        let headers = auth_headers("sk-ant-api03-test");
+        assert_eq!(headers["x-api-key"], "sk-ant-api03-test");
+        assert_eq!(headers["anthropic-version"], "2023-06-01");
+        assert!(headers.get("authorization").is_none());
+        assert!(headers.get("anthropic-beta").is_none());
+    }
 
     #[test]
     fn oauth_system_identity_comes_first() {
