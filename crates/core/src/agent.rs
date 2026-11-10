@@ -82,6 +82,14 @@ impl ModelTurn {
     }
 }
 
+/// Policy check from installed agent plugins; `Some(reason)` blocks the call.
+fn plugin_tool_denial(call: &ToolCall) -> Option<String> {
+    match nca_plugin::before_tool_use(&call.name, &call.input.to_string()) {
+        nca_plugin::ToolDecision::Allow => None,
+        nca_plugin::ToolDecision::Deny(reason) => Some(reason),
+    }
+}
+
 /// Harness-authored guidance. It reaches the model on the next request only and is never persisted.
 fn harness_note(text: impl AsRef<str>) -> Message {
     Message::user(format!("[nca harness] {}", text.as_ref()))
@@ -973,6 +981,15 @@ impl AgentLoop {
                     }
 
                     if approved {
+                        if let Some(reason) = plugin_tool_denial(call) {
+                            tickets.push(Ticket::Resolved(ToolResult {
+                                call_id: call.id.clone(),
+                                success: false,
+                                output: String::new(),
+                                error: Some(reason),
+                            }));
+                            continue;
+                        }
                         if let Some(hooks) = &self.hooks
                             && let Err(reason) = hooks
                                 .run(
@@ -1020,6 +1037,15 @@ impl AgentLoop {
                 }
 
                 PermissionTier::Allowed => {
+                    if let Some(reason) = plugin_tool_denial(call) {
+                        tickets.push(Ticket::Resolved(ToolResult {
+                            call_id: call.id.clone(),
+                            success: false,
+                            output: String::new(),
+                            error: Some(reason),
+                        }));
+                        continue;
+                    }
                     if let Some(hooks) = &self.hooks
                         && let Err(reason) = hooks
                             .run(

@@ -188,6 +188,9 @@ pub const STREAM_TRANSCRIPT_DIRTY_MS: u128 = 50;
 pub enum ModelPickerAction {
     SwitchProvider(ProviderKind),
     ApplyModel(String),
+    /// Flip a plugin between enabled and disabled (the `/plugins` list): name and the
+    /// workspace it is scoped to (`None` = global), since both scopes can hold the same name.
+    TogglePlugin(String, Option<String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1386,6 +1389,12 @@ impl TuiSessionState {
                 } else {
                     DisplayBlock::ErrorLine(message.clone())
                 });
+                if lower.contains("signed out:") {
+                    self.blocks.push(DisplayBlock::System(
+                        "↻ Sign-in expired. Run /login to sign in again; your session is kept."
+                            .into(),
+                    ));
+                }
                 if lower.contains("run cancelled") {
                     self.set_busy_state(BusyState::Idle);
                 } else if soft_retry {

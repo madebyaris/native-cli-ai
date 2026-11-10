@@ -8,6 +8,7 @@ description = "PTY management, sandboxed process execution, IPC server, and sess
 [dependencies]
 anyhow = { workspace = true }
 nca-common = { workspace = true }
+nca-plugin = { workspace = true }
 nca-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

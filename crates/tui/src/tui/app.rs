@@ -76,6 +76,8 @@ pub enum TuiCmd {
     ApplyModel(String),
     /// Switch provider (from the model picker).
     ApplyModelProvider(ProviderKind),
+    /// Enable or disable a plugin (from the `/plugins` list): name and scope (`None` = global).
+    TogglePlugin(String, Option<String>),
     /// Apply permission mode (from the permission picker).
     ApplyPermission(usize),
     /// Switch agent profile (from the agent picker).
@@ -223,6 +225,7 @@ pub fn run_blocking(
 ) -> anyhow::Result<()> {
     let _ = version_rx.borrow_and_update();
     let mut terminal = setup_terminal(mouse_capture)?;
+    let theme_remap = theme::Remap::load();
 
     // Load slash entries once: hardcoded commands + discovered skills
     let skill_dirs = vec![PathBuf::from(".nca/skills")];
@@ -1529,6 +1532,19 @@ pub fn run_blocking(
                     let list_start = g.model_picker_scroll();
                     let list_end = (list_start + viewport_rows).min(n_visible);
 
+                    // The same popup lists plugins for `/plugins`; its words change with it.
+                    let plugin_list = g
+                        .model_picker_entries()
+                        .iter()
+                        .any(|e| matches!(e.action, ModelPickerAction::TogglePlugin(..)));
+                    // Section headers stay visible while filtering; "nothing matches" means no
+                    // selectable row is left.
+                    let nothing_to_pick = {
+                        let entries = g.model_picker_entries();
+                        vis_indices
+                            .iter()
+                            .all(|&i| entries.get(i).is_none_or(|e| e.is_header))
+                    };
                     let search_display = if g.model_picker_search().is_empty() {
                         "type to filter…".to_string()
                     } else {
@@ -1549,9 +1565,13 @@ pub fn run_blocking(
                         ]),
                         Line::default(),
                     ];
-                    if vis_indices.is_empty() {
+                    if nothing_to_pick {
                         lines.push(Line::from(Span::styled(
-                            " No models match",
+                            if plugin_list {
+                                " No plugins match"
+                            } else {
+                                " No models match"
+                            },
                             Style::default().fg(theme::MUTED),
                         )));
                     } else {
@@ -1606,7 +1626,11 @@ pub fn run_blocking(
                     }
                     lines.push(Line::default());
                     lines.push(Line::from(Span::styled(
-                        " ↑↓ select · Enter apply · Esc close ",
+                        if plugin_list {
+                            " ↑↓ select · Enter enable/disable · Esc close "
+                        } else {
+                            " ↑↓ select · Enter apply · Esc close "
+                        },
                         Style::default().fg(theme::MUTED),
                     )));
                     frame.render_widget(ClearWidget, popup_area);
@@ -1616,7 +1640,7 @@ pub fn run_blocking(
                                 .borders(Borders::ALL)
                                 .border_style(Style::default().fg(theme::BORDER))
                                 .title(Span::styled(
-                                    " models ",
+                                    if plugin_list { " plugins " } else { " models " },
                                     Style::default().fg(theme::MUTED),
                                 )),
                         )
@@ -1719,6 +1743,7 @@ pub fn run_blocking(
                         .wrap(Wrap { trim: false });
                     frame.render_widget(popup, popup_area);
                 }
+                theme_remap.apply(frame.buffer_mut());
             })?;
 
                 last_rendered_version = g.state_version;
@@ -2023,6 +2048,10 @@ pub fn run_blocking(
                                         }
                                         ModelPickerAction::ApplyModel(m) => {
                                             let _ = cmd_tx.try_send(TuiCmd::ApplyModel(m));
+                                        }
+                                        ModelPickerAction::TogglePlugin(name, scope) => {
+                                            let _ =
+                                                cmd_tx.try_send(TuiCmd::TogglePlugin(name, scope));
                                         }
                                     }
                                 }

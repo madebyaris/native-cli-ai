@@ -185,6 +185,8 @@ pub struct Repl {
     history_path: Option<std::path::PathBuf>,
     agent_profile: AgentProfile,
     current_agent_label: String,
+    /// A sign-in started with `/login` that waits for the code the user pastes.
+    pending_login: Option<ProviderKind>,
 }
 
 impl Repl {
@@ -200,6 +202,7 @@ impl Repl {
             history_path,
             agent_profile,
             current_agent_label,
+            pending_login: None,
         }
     }
 
@@ -646,7 +649,10 @@ impl Repl {
                     lines.push(format!(
                         "  {:<12} key {}",
                         provider.display_name(),
-                        if self.runtime.config().provider.api_key_present_for(provider) {
+                        // A plugin's key replaces the configured one (`apply_auth`), so say so first.
+                        if nca_plugin::plugin_supplies_key(self.runtime.config(), provider) {
+                            "configured (plugin)"
+                        } else if self.runtime.config().provider.api_key_present_for(provider) {
                             "configured"
                         } else {
                             "missing"
@@ -1298,6 +1304,149 @@ impl Repl {
                     for l in &lines {
                         out.println(l);
                     }
+                }
+            }
+            "/plugins" | "/plugin" => {
+                let ws = self
+                    .runtime
+                    .workspace_root()
+                    .canonicalize()
+                    .unwrap_or_else(|_| self.runtime.workspace_root().to_path_buf());
+                let mut args = rest.split_whitespace();
+                let sub = args.next().unwrap_or("list");
+                let name = args.next();
+                match (sub, name) {
+                    ("list", _) => match nca_plugin::manage::list(&ws) {
+                        Ok(plugins) if plugins.is_empty() => out.println(
+                            "[plugins] none installed. Install one with `nca add <git-url>`.",
+                        ),
+                        Ok(plugins) => {
+                            if let ReplOutput::Tui(st) = &out {
+                                if let Ok(mut g) = st.lock() {
+                                    g.open_model_picker(plugin_picker_entries(&plugins));
+                                }
+                            } else {
+                                for p in &plugins {
+                                    out.println(&format!(
+                                        "  {:<20} v{:<10} {}",
+                                        p.entry.name,
+                                        p.entry.version,
+                                        p.state_label()
+                                    ));
+                                }
+                            }
+                        }
+                        Err(e) => out.eprintln(&format!("[plugins] {e}")),
+                    },
+                    ("info", Some(name)) => match nca_plugin::manage::find(name, &ws) {
+                        Ok(entry) => {
+                            let lines = plugin_info_lines(&entry);
+                            if let ReplOutput::Tui(st) = &out {
+                                if let Ok(mut g) = st.lock() {
+                                    g.open_info_modal("plugin", lines);
+                                }
+                            } else {
+                                for l in &lines {
+                                    out.println(l);
+                                }
+                            }
+                        }
+                        Err(e) => out.eprintln(&format!("[plugins] {e}")),
+                    },
+                    ("enable" | "disable", Some(name)) => {
+                        let enable = sub == "enable";
+                        match nca_plugin::manage::set_enabled(name, &ws, enable) {
+                            Ok(status) => out.println(&plugin_change_note(&status)),
+                            Err(e) => out.eprintln(&format!("[plugins] {e}")),
+                        }
+                    }
+                    _ => out.println(
+                        "usage: /plugins [list] | info <name> | enable <name> | disable <name>",
+                    ),
+                }
+            }
+            "/login" => {
+                // Subscription-style login: providers whose credentials come from an auth
+                // plugin (for example claude-provider). API-key providers use /connect.
+                let arg = rest.trim();
+                // Step 2: the user pastes the code the approval page showed.
+                if let Some(kind) = self.pending_login
+                    && !arg.is_empty()
+                    && !matches!(arg, "new" | "again")
+                {
+                    self.pending_login = None;
+                    match nca_plugin::complete_login(kind, arg) {
+                        Ok(()) => {
+                            out.println(&format!("[login] signed in to {}", kind.display_name()));
+                            self.apply_provider_in_session(kind, out).await?;
+                        }
+                        Err(e) => out.println(&format!(
+                            "[login] sign-in failed: {e}. Run /login to try again."
+                        )),
+                    }
+                    return Ok(true);
+                }
+
+                let mut chosen = None;
+                let mut notes = Vec::new();
+                // `custom` is configured with /custom, not signed in; the session switch rejects it.
+                for p in ProviderKind::ALL
+                    .into_iter()
+                    .filter(|p| *p != ProviderKind::Custom)
+                {
+                    match nca_plugin::plugin_key_status(self.runtime.config(), p) {
+                        Some(Ok(())) => {
+                            notes.push(format!("{}: signed in via plugin", p.display_name()));
+                            chosen.get_or_insert(p);
+                        }
+                        Some(Err(e)) => notes.push(format!("{}: {e}", p.display_name())),
+                        None => {}
+                    }
+                }
+                // Step 1: start a browser sign-in for a provider whose plugin offers one,
+                // when nothing is signed in yet or the user asks (`/login new`).
+                let can_login = nca_plugin::login_plugins();
+                let loginable = ProviderKind::ALL.into_iter().find(|p| {
+                    *p != ProviderKind::Custom
+                        && can_login
+                        .iter()
+                        .any(|(_, ps)| ps.iter().any(|x| x == nca_plugin::provider_name(*p)))
+                });
+                let wants_new = matches!(arg, "new" | "again");
+                if let Some(kind) = loginable
+                    && (chosen.is_none() || wants_new)
+                {
+                    match nca_plugin::begin_login(kind) {
+                        Ok(c) => {
+                            self.pending_login = Some(kind);
+                            out.println(&format!(
+                                "[login] {} sign-in via plugin `{}`",
+                                kind.display_name(),
+                                c.plugin
+                            ));
+                            out.println(&format!("[login] open: {}", c.url));
+                            out.println(&format!("[login] {}", c.instructions));
+                            out.println("[login] then run: /login <code>");
+                            open_in_browser(&c.url);
+                            return Ok(true);
+                        }
+                        Err(e) => notes.push(format!("{}: cannot start sign-in: {e}", kind.display_name())),
+                    }
+                }
+                for note in &notes {
+                    out.println(&format!("[login] {note}"));
+                }
+                match chosen {
+                    Some(p) => {
+                        if loginable.is_some() {
+                            out.println("[login] use `/login new` to sign in again.");
+                        }
+                        self.apply_provider_in_session(p, out).await?
+                    }
+                    None if notes.is_empty() => out.println(
+                        "[login] no auth plugin supplies credentials. Install one, e.g. `nca add https://github.com/igun997/claude-provider`, or use /connect for API keys.",
+                    ),
+                    None => {}
                 }
             }
             "/connect" => {
@@ -2129,6 +2278,37 @@ impl Repl {
                         }
                     }
                 }
+                TuiCmd::TogglePlugin(name, scope) => {
+                    let ws = self
+                        .runtime
+                        .workspace_root()
+                        .canonicalize()
+                        .unwrap_or_else(|_| self.runtime.workspace_root().to_path_buf());
+                    // Flip the saved flag, say what happened, and show the list again so the
+                    // person can switch several in a row.
+                    let scope = scope.map(std::path::PathBuf::from);
+                    let result = nca_plugin::manage::find_in(&name, scope.as_deref(), &ws)
+                        .and_then(|entry| {
+                            nca_plugin::manage::set_enabled_in(
+                                &name,
+                                scope.as_deref(),
+                                &ws,
+                                !entry.enabled,
+                            )
+                        });
+                    if let Ok(mut g) = tui_state.lock() {
+                        match result {
+                            Ok(status) => {
+                                g.blocks
+                                    .push(DisplayBlock::System(plugin_change_note(&status)));
+                            }
+                            Err(e) => g.push_error(format!("[plugins] {e}")),
+                        }
+                        if let Ok(plugins) = nca_plugin::manage::list(&ws) {
+                            g.open_model_picker(plugin_picker_entries(&plugins));
+                        }
+                    }
+                }
                 TuiCmd::ApplyModel(model_name) => {
                     let resolved = self.runtime.config().model.resolve_alias(&model_name);
                     let mut cfg = self.runtime.config().clone();
@@ -2705,6 +2885,83 @@ impl Completer for Repl {
     }
 }
 
+/// Rows for the `/plugins` list: one selectable row per plugin, Enter flips its enabled flag.
+fn plugin_picker_entries(plugins: &[nca_plugin::manage::PluginStatus]) -> Vec<ModelPickerEntry> {
+    let mut entries = vec![ModelPickerEntry {
+        label: "Plugins".into(),
+        detail: String::new(),
+        action: ModelPickerAction::ApplyModel(String::new()),
+        is_header: true,
+    }];
+    for p in plugins {
+        let scope = if p.entry.workspace.is_some() {
+            "project"
+        } else {
+            "global"
+        };
+        let hooks = match &p.hooks {
+            Ok(h) if h.is_empty() => String::new(),
+            Ok(h) => format!(" · [{}]", h.join(",")),
+            Err(e) => format!(" · INVALID: {e}"),
+        };
+        entries.push(ModelPickerEntry {
+            label: format!("{} v{}", p.entry.name, p.entry.version),
+            detail: format!("{} · {scope}{hooks}", p.state_label()),
+            action: ModelPickerAction::TogglePlugin(
+                p.entry.name.clone(),
+                p.entry.workspace.clone(),
+            ),
+            is_header: false,
+        });
+    }
+    entries
+}
+
+/// What to tell the person after a plugin was switched: plugins load once per process, so a
+/// change to a loaded (or not yet loaded) plugin only takes hold on the next start.
+fn plugin_change_note(status: &nca_plugin::manage::PluginStatus) -> String {
+    let verb = if status.entry.enabled {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    if status.needs_restart() {
+        format!(
+            "[plugins] {verb} {} (restart nca to apply)",
+            status.entry.name
+        )
+    } else {
+        format!("[plugins] {verb} {}", status.entry.name)
+    }
+}
+
+/// The text of `/plugins info <name>`.
+fn plugin_info_lines(entry: &nca_plugin::registry::Entry) -> Vec<String> {
+    let mut lines = vec![
+        format!("name       {}", entry.name),
+        format!("version    {}", entry.version),
+        format!("source     {}", entry.source),
+        format!("commit     {}", entry.commit),
+        format!("enabled    {}", entry.enabled),
+        format!("dir        {}", entry.dir.display()),
+    ];
+    match entry.load_verified() {
+        Ok((m, _)) => {
+            lines.push("integrity  ok".into());
+            lines.push(format!("hooks      {}", m.hooks.names().join(", ")));
+            let caps = m.capabilities.describe();
+            if caps.is_empty() {
+                lines.push("grants     none".into());
+            }
+            for line in caps {
+                lines.push(format!("grant      {line}"));
+            }
+        }
+        Err(err) => lines.push(format!("integrity  FAILED: {err}")),
+    }
+    lines
+}
+
 fn build_model_picker_entries(
     config: &nca_common::config::NcaConfig,
     provider_models: &[String],
@@ -2718,7 +2975,9 @@ fn build_model_picker_entries(
     });
     for p in ProviderKind::ALL {
         let model = config.provider.model_for(p);
-        let key_status = if config.provider.api_key_present_for(p) {
+        let key_status = if nca_plugin::plugin_supplies_key(config, p) {
+            "plugin ✓"
+        } else if config.provider.api_key_present_for(p) {
             "key ✓"
         } else {
             "no key"
@@ -2804,6 +3063,23 @@ fn parse_permission_mode(raw: &str) -> Option<PermissionMode> {
     }
 }
 
+/// Best-effort: open `url` in the default browser. The URL is also printed, so a
+/// failure (no display, SSH session) is harmless.
+fn open_in_browser(url: &str) {
+    use std::process::{Command, Stdio};
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = Command::new(opener)
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2823,5 +3099,53 @@ mod tests {
             Some(PermissionMode::BypassPermissions)
         );
         assert_eq!(parse_permission_mode("invalid"), None);
+    }
+    fn status(
+        enabled: bool,
+        state: nca_plugin::manage::LoadState,
+    ) -> nca_plugin::manage::PluginStatus {
+        nca_plugin::manage::PluginStatus {
+            entry: nca_plugin::registry::Entry {
+                name: "demo".into(),
+                version: "0.2.0".into(),
+                source: "https://example.test/demo".into(),
+                requested_ref: None,
+                commit: "0".repeat(40),
+                wasm_sha256: String::new(),
+                manifest_sha256: String::new(),
+                installed_at: String::new(),
+                enabled,
+                workspace: None,
+                dir: "/nonexistent".into(),
+            },
+            hooks: Ok(vec!["auth".into()]),
+            state,
+        }
+    }
+
+    #[test]
+    fn plugin_list_rows_toggle_the_plugin_they_show() {
+        use nca_plugin::manage::LoadState;
+        let entries = plugin_picker_entries(&[status(true, LoadState::Active)]);
+        assert!(entries[0].is_header);
+        assert_eq!(entries[1].label, "demo v0.2.0");
+        assert_eq!(entries[1].detail, "enabled · global · [auth]");
+        assert_eq!(
+            entries[1].action,
+            ModelPickerAction::TogglePlugin("demo".into(), None)
+        );
+    }
+
+    #[test]
+    fn a_change_says_when_it_needs_a_restart() {
+        use nca_plugin::manage::LoadState;
+        assert_eq!(
+            plugin_change_note(&status(false, LoadState::PendingDisable)),
+            "[plugins] disabled demo (restart nca to apply)"
+        );
+        assert_eq!(
+            plugin_change_note(&status(false, LoadState::Off)),
+            "[plugins] disabled demo"
+        );
     }
 }

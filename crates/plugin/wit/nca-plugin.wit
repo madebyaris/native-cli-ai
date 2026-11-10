@@ -1,0 +1,155 @@
+/// nca plugin API, version 1.
+///
+/// A plugin is a WASM component targeting the `plugin` world. Every export
+/// must be present, and a hook the manifest does not declare is never called.
+/// `capabilities.fs_read` / `fs_write` grant directories (they are preopened for the plugin), not single files.
+/// How a hook defers depends on the hook:
+///   * `auth.resolve-credential`: return `none`, or call `host.next-credential`.
+///   * `subagent.before-spawn`: the first plugin that declares the hook decides. To let the
+///     rest of the chain and core decide, return `host.next-spawn-decision`.
+///   * `cosmetic.resolve-theme`: return a theme (partial is fine, omitted tokens keep their
+///     value), or return `host.next-theme`.
+///   * `agent.*`: there is no `next` import; every agent plugin runs in order. Return `none`
+///     (keep the prompt) / `allow` (no objection).
+package nca:plugin@1.0.0;
+
+interface types {
+    /// Provider credentials. Unset fields keep the core / config value.
+    record credential {
+        api-key: option<string>,
+        base-url: option<string>,
+    }
+
+    record spawn-request {
+        task: string,
+        focus-files: list<string>,
+        skills: list<string>,
+        use-worktree: bool,
+    }
+
+    variant spawn-decision {
+        /// Spawn, using this (possibly rewritten) request.
+        allow(spawn-request),
+        /// Refuse to spawn; the string is shown to the parent agent.
+        deny(string),
+    }
+
+    variant tool-decision {
+        allow,
+        deny(string),
+    }
+
+    /// Colour tokens as `(token, "#rrggbb")`.
+    /// Tokens: bg surface border mention-bg user assistant tool muted text success error warn.
+    type theme = list<tuple<string, string>>;
+
+    enum log-level { debug, info, warn, error }
+}
+
+/// Services the host provides to plugins. Everything here is gated by the
+/// capabilities declared in `nca-plugin.toml`.
+interface host {
+    use types.{credential, spawn-request, spawn-decision, theme, log-level};
+
+    log: func(level: log-level, message: string);
+
+    /// Value from the `[config]` table of the manifest.
+    config-get: func(key: string) -> option<string>;
+
+    /// Environment variable declared in `capabilities.env`.
+    env-get: func(name: string) -> option<string>;
+
+    record http-response {
+        status: u16,
+        body: list<u8>,
+    }
+
+    /// Blocking HTTP request. Host must be listed in `capabilities.network`.
+    http-request: func(
+        method: string,
+        url: string,
+        headers: list<tuple<string, string>>,
+        body: option<list<u8>>,
+    ) -> result<http-response, string>;
+
+    /// Core / next-plugin behavior for `auth.resolve-credential`.
+    next-credential: func(provider: string) -> result<option<credential>, string>;
+
+    /// Core / next-plugin behavior for `subagent.before-spawn`.
+    next-spawn-decision: func(request: spawn-request) -> result<spawn-decision, string>;
+
+    /// Core / next-plugin behavior for `cosmetic.resolve-theme`.
+    next-theme: func() -> result<theme, string>;
+}
+
+interface auth {
+    use types.{credential};
+    /// Called whenever a provider is built. `none` = no opinion (use next-credential).
+    /// An `err` aborts provider construction (fail-closed).
+    resolve-credential: func(provider: string) -> result<option<credential>, string>;
+}
+
+interface subagent {
+    use types.{spawn-request, spawn-decision};
+    before-spawn: func(request: spawn-request) -> result<spawn-decision, string>;
+}
+
+interface agent {
+    use types.{tool-decision};
+    /// Receives the assembled system prompt, returns a replacement (`none` = keep).
+    transform-system-prompt: func(prompt: string) -> option<string>;
+    /// Runs before every tool call, after the built-in approval flow.
+    before-tool-use: func(tool: string, input-json: string) -> tool-decision;
+}
+
+interface cosmetic {
+    use types.{theme};
+    /// Returns the full or partial theme. Unlisted tokens keep their value.
+    resolve-theme: func() -> result<theme, string>;
+}
+
+/// Interactive sign-in and re-login for plugins that own a credential
+/// (for example an OAuth subscription token). Optional: a plugin that does not
+/// need it targets the plain `plugin` world and nca never calls these.
+interface login {
+    record challenge {
+        /// Page the user opens to approve access.
+        url: string,
+        /// Text to show next to the URL.
+        instructions: string,
+        /// How the user finishes: `paste-code`, the only mode nca supports today. The user
+        /// copies the code the page shows and runs `/login <code>`; nca passes it to
+        /// `complete-login`. Any other value is rejected.
+        mode: string,
+    }
+
+    /// Providers this plugin can sign in to (for example `anthropic`).
+    providers: func() -> list<string>;
+
+    /// Start a sign-in. The plugin keeps its own pending state (PKCE verifier and so on).
+    begin-login: func(provider: string) -> result<challenge, string>;
+
+    /// Finish the sign-in with the pasted code or callback query string.
+    complete-login: func(provider: string, input: string) -> result<_, string>;
+
+    /// The provider rejected the credential (HTTP 401/403). `some(key)`: a fresh
+    /// credential, retry once. `none`: cannot recover, the user must sign in again.
+    /// `err`: a hard failure with a message. A dropped connection is NOT an auth
+    /// failure and is never reported here.
+    on-auth-failure: func(provider: string, status: u16) -> result<option<string>, string>;
+}
+
+world plugin {
+    import host;
+    export auth;
+    export subagent;
+    export agent;
+    export cosmetic;
+}
+
+/// Same as `plugin`, plus the optional `login` interface. Declare `login = true`
+/// under `[hooks]` in the manifest.
+world plugin-login {
+    include plugin;
+    export login;
+}

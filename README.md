@@ -204,6 +204,8 @@ The main interface is designed to feel like a serious terminal tool, not a toy o
 | `nca doctor` | Check provider readiness, skills, and memory/config paths. |
 | `nca config` | Print effective config and resolved paths. |
 | `nca memory list\|add` | Inspect or append workspace memory notes. |
+| `nca add <git-url>` | Install a WASM plugin (auth, subagent, agent, cosmetic overrides); see [docs/plugins.md](docs/plugins.md). |
+| `nca plugin` | List, inspect, enable, disable, update, remove plugins. |
 | `nca skills` | List discovered skills with their source (`AGENTS.md`, filesystem, or user directory). |
 | `nca mcp` | List configured MCP servers. |
 | `nca completion <shell>` | Generate shell completions. |

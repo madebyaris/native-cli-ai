@@ -1,0 +1,13 @@
+[plugin]
+name = "spin"
+version = "0.1.0"
+api_version = "1"
+wasm = "plugin.wasm"
+description = "Test fixture: before-tool-use never returns, to exercise the sandbox timeout"
+
+[hooks]
+agent = true
+
+[capabilities]
+# A test fixture that only burns time and memory: it needs nothing from the host.
+network = []

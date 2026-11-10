@@ -1,0 +1,19 @@
+[package]
+name = "nca-spin-plugin"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.46"
+
+# Not part of the nca workspace: it targets wasm32-wasip2.
+[workspace]
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

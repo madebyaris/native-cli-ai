@@ -96,6 +96,14 @@ async fn resolve_model_limits_in(
     if !api_lookup_enabled(config) {
         return static_limits;
     }
+    // Resolve the credential once: the cache key, the request and the lookup all use it.
+    let resolved = with_plugin_auth(config).await;
+    // The disk cache is keyed by endpoint and model, not by credential, so a plugin-supplied
+    // credential (another account, another endpoint) must not read or write it.
+    let plugin_credential = default_api_key(&resolved) != default_api_key(config)
+        || resolved_base_url(&resolved) != resolved_base_url(config);
+    let cache_file = if plugin_credential { None } else { cache_file };
+    let config = &resolved;
     let key = limits_cache_key(config, model);
     if let Some(cached) = cache_file.and_then(|path| read_disk_cache(path, &key)) {
         tracing::debug!(model = %model, "context window from the disk cache");
@@ -119,6 +127,54 @@ async fn resolve_model_limits_in(
         }
         _ => static_limits,
     }
+}
+
+/// The config as the provider will see it once an auth plugin has supplied its credential.
+///
+/// The model list and the context window are asked of the provider with the same key the
+/// chat uses; without this, an account whose only credential is a plugin's (a Claude
+/// subscription token, say) would get an empty list. A plugin that fails leaves the
+/// configured credential in place, and the chat path reports that failure itself.
+///
+/// Plugin hooks run WASM and may do network I/O, so they run on the blocking pool.
+async fn with_plugin_auth(config: &NcaConfig) -> NcaConfig {
+    if !nca_plugin::has_auth_plugin() {
+        return config.clone();
+    }
+    let original = config.clone();
+    let mut resolved = config.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        nca_plugin::apply_auth(&mut resolved).map(|()| resolved)
+    })
+    .await;
+    match outcome {
+        Ok(Ok(resolved)) => resolved,
+        Ok(Err(err)) => {
+            tracing::debug!(error = %err, "model catalog: auth plugin gave no credential");
+            original
+        }
+        Err(err) => {
+            tracing::debug!(error = %err, "model catalog: auth plugin task failed");
+            original
+        }
+    }
+}
+
+/// The default provider's API key, as the config alone resolves it.
+fn default_api_key(config: &NcaConfig) -> Option<String> {
+    let p = &config.provider;
+    match p.default {
+        ProviderKind::MiniMax => p.minimax.resolve_api_key(),
+        ProviderKind::OpenAi => p.openai.resolve_api_key(),
+        ProviderKind::Anthropic => p.anthropic.resolve_api_key(),
+        ProviderKind::OpenRouter => p.openrouter.resolve_api_key(),
+        ProviderKind::Alibaba => p.alibaba.resolve_api_key(),
+        ProviderKind::Custom => p.custom.resolve_api_key(),
+    }
+}
+
+fn resolved_base_url(config: &NcaConfig) -> String {
+    limits_cache_key(config, "")
 }
 
 /// Whether this run may ask the provider for a context window at all.
@@ -403,10 +459,7 @@ async fn fetch_anthropic_context(
             url.push_str(id);
         }
 
-        let resp = client
-            .get(&url)
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
+        let resp = nca_core::provider::anthropic::with_anthropic_auth(client.get(&url), api_key)
             .send()
             .await
             .ok()?;
@@ -575,6 +628,11 @@ fn write_catalog_disk(path: &Path, key: &str, ids: &[String]) {
 /// The active provider's model ids saved by an earlier fetch (up to a day
 /// old), without touching the network. Empty when nothing is saved.
 pub fn cached_provider_model_ids(config: &NcaConfig) -> Vec<String> {
+    // The saved list is keyed by endpoint, not by credential; an auth plugin may be using a
+    // different account, so do not serve a list fetched with another one.
+    if nca_plugin::has_auth_plugin() {
+        return Vec::new();
+    }
     catalog_disk_path()
         .map(|path| read_catalog_disk(&path, &catalog_disk_key(config)))
         .unwrap_or_default()
@@ -587,6 +645,7 @@ pub async fn fetch_provider_model_ids(config: &NcaConfig) -> Vec<String> {
     let ids = fetch_provider_model_ids_live(config).await;
     if !ids.is_empty()
         && config.provider.default != ProviderKind::MiniMax
+        && !nca_plugin::has_auth_plugin()
         && let Some(path) = catalog_disk_path()
     {
         write_catalog_disk(&path, &catalog_disk_key(config), &ids);
@@ -598,9 +657,11 @@ async fn fetch_provider_model_ids_live(config: &NcaConfig) -> Vec<String> {
     if !config.memory.context.query_provider_models_api {
         return Vec::new();
     }
+    // Check the switch before resolving auth: a disabled lookup must not run a plugin.
     if std::env::var("NCA_SKIP_CONTEXT_API").ok().as_deref() == Some("1") {
         return Vec::new();
     }
+    let config = &with_plugin_auth(config).await;
     let client = match http_client() {
         Ok(c) => c,
         Err(_) => return Vec::new(),
@@ -740,10 +801,7 @@ async fn fetch_anthropic_model_ids(client: &reqwest::Client, config: &NcaConfig)
             url.push_str("&after_id=");
             url.push_str(id);
         }
-        let resp = match client
-            .get(&url)
-            .header("x-api-key", &key)
-            .header("anthropic-version", "2023-06-01")
+        let resp = match nca_core::provider::anthropic::with_anthropic_auth(client.get(&url), &key)
             .send()
             .await
         {

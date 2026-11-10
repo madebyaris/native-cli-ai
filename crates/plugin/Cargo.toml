@@ -1,0 +1,22 @@
+[package]
+name = "nca-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WASM plugin factory: manifest, installer and sandboxed host for nca plugins"
+
+[dependencies]
+tokio = { workspace = true }
+nca-common = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+sha2 = "0.10"
+tempfile = "3"
+chrono = { version = "0.4", features = ["clock"] }
+reqwest = { workspace = true, features = ["blocking"] }
+wasmtime = { version = "49", default-features = false, features = ["runtime", "cranelift", "component-model", "std", "parallel-compilation"] }
+wasmtime-wasi = { version = "49", default-features = false }
+
