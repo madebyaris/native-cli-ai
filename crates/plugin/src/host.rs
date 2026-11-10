@@ -290,6 +290,22 @@ struct LoginFuncs {
 
 type FailureReply = Result<Option<String>, String>;
 
+/// Only the paste-code flow exists in the TUI; reject any other mode instead of sending the
+/// user through a sign-in that cannot finish.
+fn challenge_from_wire(plugin: &str, c: WireChallenge) -> Result<LoginChallenge, String> {
+    if c.mode != "paste-code" {
+        return Err(format!(
+            "login mode `{}` is not supported; this nca supports `paste-code`",
+            c.mode
+        ));
+    }
+    Ok(LoginChallenge {
+        plugin: plugin.to_string(),
+        url: c.url,
+        instructions: c.instructions,
+    })
+}
+
 const LOGIN_INTERFACE: &str = "nca:plugin/login@1.0.0";
 
 fn login_funcs(
@@ -624,26 +640,13 @@ impl PluginSet {
         let node = self.login_node(provider)?;
         let p = provider.to_string();
         let (out,) = node.call_login(move |l, s| l.begin.call(s, (p,)))?;
-        let fail = |message: String| PluginError::Runtime {
+        let c = out.map_err(|message| PluginError::Runtime {
             plugin: node.name.clone(),
             message,
-        };
-        let c = out.map_err(fail)?;
-        // Only the paste-code flow exists in the TUI; reject anything else instead of sending
-        // the user through a sign-in that cannot finish.
-        if c.mode != "paste-code" {
-            return Err(PluginError::Runtime {
-                plugin: node.name.clone(),
-                message: format!(
-                    "login mode `{}` is not supported; this nca supports `paste-code`",
-                    c.mode
-                ),
-            });
-        }
-        Ok(LoginChallenge {
+        })?;
+        challenge_from_wire(&node.name, c).map_err(|message| PluginError::Runtime {
             plugin: node.name.clone(),
-            url: c.url,
-            instructions: c.instructions,
+            message,
         })
     }
 
@@ -891,4 +894,34 @@ pub(crate) fn http_request_for_test(
     url: &str,
 ) -> Result<(), String> {
     http_request(allowed, method, url, Vec::new(), None, HTTP_TIMEOUT).map(|_| ())
+}
+
+#[cfg(test)]
+mod login_mode_tests {
+    use super::*;
+
+    fn wire(mode: &str) -> WireChallenge {
+        WireChallenge {
+            url: "https://example.test/login".into(),
+            instructions: "paste the code".into(),
+            mode: mode.into(),
+        }
+    }
+
+    #[test]
+    fn paste_code_is_accepted() {
+        let c = challenge_from_wire("p", wire("paste-code")).unwrap();
+        assert_eq!(
+            (c.plugin.as_str(), c.url.as_str()),
+            ("p", "https://example.test/login")
+        );
+    }
+
+    #[test]
+    fn any_other_mode_is_rejected() {
+        for mode in ["local-callback", "paste_code", "", "PASTE-CODE"] {
+            let err = challenge_from_wire("p", wire(mode)).unwrap_err();
+            assert!(err.contains("not supported") && err.contains(mode), "{err}");
+        }
+    }
 }
