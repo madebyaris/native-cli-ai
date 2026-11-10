@@ -49,16 +49,29 @@ fn workspace(workspace_root: &Path) -> anyhow::Result<PathBuf> {
     Ok(workspace_root.canonicalize()?)
 }
 
+/// Replace control characters (newlines, ANSI escapes) in untrusted text with `?`.
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
+}
+
 fn prompt_approval(yes: bool) -> impl Fn(&ApprovalRequest<'_>) -> bool {
     move |req| {
         let m = req.manifest;
-        println!("Plugin   {} v{}", m.plugin.name, m.plugin.version);
+        // Manifest text comes from the plugin's repository: strip control characters so it
+        // cannot move the cursor or fake the trust summary and prompt below.
+        println!(
+            "Plugin   {} v{}",
+            printable(&m.plugin.name),
+            printable(&m.plugin.version)
+        );
         if let Some(desc) = &m.plugin.description {
-            println!("         {desc}");
+            println!("         {}", printable(desc));
         }
         println!(
             "Source   {} @ {}",
-            req.source,
+            printable(req.source),
             &req.commit[..req.commit.len().min(12)]
         );
         println!("Wasm     sha256:{}", req.wasm_sha256);
@@ -69,13 +82,25 @@ fn prompt_approval(yes: bool) -> impl Fn(&ApprovalRequest<'_>) -> bool {
         } else {
             println!("Grants");
             for line in caps {
-                println!("  - {line}");
+                println!("  - {}", printable(&line));
             }
         }
         if let Some(prev) = req.previous
-            && (prev.hooks != m.hooks || prev.capabilities != m.capabilities)
+            && (prev.hooks != m.hooks
+                || prev.capabilities != m.capabilities
+                || prev.config != m.config)
         {
-            println!("Changed  hooks/capabilities differ from the installed version");
+            println!("Changed  hooks, capabilities or config differ from the installed version");
+            if prev.config != m.config {
+                for (key, value) in &m.config {
+                    if prev.config.get(key) != Some(value) {
+                        println!("  config {} = {}", printable(key), printable(value));
+                    }
+                }
+                for key in prev.config.keys().filter(|k| !m.config.contains_key(*k)) {
+                    println!("  config {} removed", printable(key));
+                }
+            }
         }
         if yes {
             return true;

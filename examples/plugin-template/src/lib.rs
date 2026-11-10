@@ -27,7 +27,7 @@ impl auth::Guest for Example {
     /// Prefer `EXAMPLE_API_KEY` for the anthropic provider, otherwise defer to core.
     fn resolve_credential(provider: String) -> Result<Option<Credential>, String> {
         if provider == "anthropic"
-            && let Some(key) = host::env_get("EXAMPLE_API_KEY")
+            && let Some(key) = host::env_get("EXAMPLE_API_KEY").filter(|k| !k.trim().is_empty())
         {
             host::log(LogLevel::Info, "using EXAMPLE_API_KEY");
             return Ok(Some(Credential {
@@ -110,7 +110,7 @@ impl agent::Guest for Example {
 
     fn before_tool_use(tool: String, input_json: String) -> ToolDecision {
         if let Some(blocked) = host::config_get("blocked_command")
-            && tool == "bash"
+            && tool == "execute_bash"
             && input_json.contains(&blocked)
         {
             return ToolDecision::Deny(format!("`{blocked}` is blocked by the example plugin"));

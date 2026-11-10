@@ -78,7 +78,6 @@ fn install_load_and_run_every_hook() {
     assert_eq!(
         seen.borrow().as_slice(),
         [
-            "network: any host (default)",
             "write files: $NCA_PLUGIN_DATA",
             "environment: EXAMPLE_API_KEY"
         ]
@@ -142,10 +141,10 @@ fn install_load_and_run_every_hook() {
     let prompt = set.transform_system_prompt("base".into());
     assert!(prompt.starts_with("base\n\n") && prompt.contains("terse senior engineer"));
     assert_eq!(
-        set.before_tool_use("bash", r#"{"cmd":"ls"}"#),
+        set.before_tool_use("execute_bash", r#"{"cmd":"ls"}"#),
         ToolDecision::Allow
     );
-    match set.before_tool_use("bash", r#"{"cmd":"rm -rf /"}"#) {
+    match set.before_tool_use("execute_bash", r#"{"cmd":"rm -rf /"}"#) {
         ToolDecision::Deny(reason) => assert!(reason.contains("blocked"), "{reason}"),
         other => panic!("{other:?}"),
     }
@@ -199,7 +198,41 @@ fn install_load_and_run_every_hook() {
     ));
     assert_eq!(set.on_auth_failure("openai", 401), AuthRecovery::NoPlugin);
 
+    // Disabled and workspace-scoped plugins, checked on an unmodified install.
+    let other = tmp.path().join("other-ws");
+    std::fs::create_dir_all(&other).unwrap();
+    install::set_enabled("example", None, false).unwrap();
+    assert!(
+        PluginSet::load(&Registry::load().unwrap().plugins, &ws).is_empty(),
+        "a disabled plugin must not load"
+    );
+    install::set_enabled("example", None, true).unwrap();
+    assert_eq!(
+        PluginSet::load(&Registry::load().unwrap().plugins, &ws).names(),
+        ["example"]
+    );
+    let project = install::add(
+        repo.to_str().unwrap(),
+        &InstallOptions {
+            workspace: Some(other.clone()),
+            approve: &approve,
+        },
+    )
+    .unwrap();
+    assert_eq!(project.workspace.as_deref(), other.to_str());
+    let all = Registry::load().unwrap().plugins;
+    // The project copy applies only to its own workspace, and shadows the global copy there.
+    assert_eq!(PluginSet::load(&all, &ws).names(), ["example"]);
+    assert_eq!(PluginSet::load(&all, &other).names(), ["example"]);
+    install::set_enabled("example", None, false).unwrap();
+    let all = Registry::load().unwrap().plugins;
+    assert!(PluginSet::load(&all, &ws).is_empty());
+    assert_eq!(PluginSet::load(&all, &other).names(), ["example"]);
+    install::remove("example", Some(&other)).unwrap();
+    install::set_enabled("example", None, true).unwrap();
+
     // Tampering with the installed wasm after approval is detected; plugin is skipped.
+    let registry = Registry::load().unwrap();
     let wasm_path = entry.dir.join("plugin.wasm");
     let mut bytes = std::fs::read(&wasm_path).unwrap();
     bytes.push(0);
@@ -213,9 +246,7 @@ fn install_load_and_run_every_hook() {
             .contains("hash mismatch")
     );
 
-    // Disabled / other-workspace plugins are not loaded; remove deletes files.
-    install::set_enabled("example", None, false).unwrap();
-    assert!(PluginSet::load(&Registry::load().unwrap().plugins, &ws).is_empty());
+    // `remove` deletes the files.
     install::remove("example", None).unwrap();
     assert!(!entry.dir.exists());
     assert!(Registry::load().unwrap().plugins.is_empty());

@@ -1,9 +1,15 @@
 /// nca plugin API, version 1.
 ///
 /// A plugin is a WASM component targeting the `plugin` world. Every export
-/// must be present; hooks a plugin does not care about return `none` / `allow`,
-/// which makes nca fall back to the next plugin in the chain and finally to the
-/// built-in core behavior.
+/// must be present, and a hook the manifest does not declare is never called.
+/// How a hook defers depends on the hook:
+///   * `auth.resolve-credential`: return `none`, or call `host.next-credential`.
+///   * `subagent.before-spawn`: the first plugin that declares the hook decides. To let the
+///     rest of the chain and core decide, return `host.next-spawn-decision`.
+///   * `cosmetic.resolve-theme`: return a theme (partial is fine, omitted tokens keep their
+///     value), or return `host.next-theme`.
+///   * `agent.*`: there is no `next` import; every agent plugin runs in order. Return `none`
+///     (keep the prompt) / `allow` (no objection).
 package nca:plugin@1.0.0;
 
 interface types {

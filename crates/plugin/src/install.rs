@@ -78,7 +78,14 @@ fn clone(source: &Source, dest: &Path) -> Result<String, PluginError> {
     match &source.git_ref {
         Some(r) if looks_like_sha(r) => {
             git(&["clone", "--quiet", "--", &source.url, &dest_s], None)?;
-            git(&["checkout", "--quiet", r], Some(dest))?;
+            git(&["checkout", "--quiet", "--detach", r], Some(dest))?;
+            // A SHA-looking ref can also be a path or a branch; the pin must resolve to that commit.
+            let head = git(&["rev-parse", "HEAD"], Some(dest))?;
+            if !head.starts_with(&r.to_ascii_lowercase()) {
+                return Err(PluginError::Install(format!(
+                    "`{r}` is not a commit of this repository (it resolved to {head})"
+                )));
+            }
         }
         Some(r) => {
             git(
@@ -187,16 +194,42 @@ fn install_dir(name: &str, workspace: Option<&Path>) -> Result<PathBuf, PluginEr
     })
 }
 
+/// Refuse to write through a symlink: a project checkout is untrusted and could pre-create
+/// `.nca/plugins/<name>` (or the files in it) as a link to somewhere else the user can write.
+fn reject_symlink(path: &Path) -> Result<(), PluginError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => Err(PluginError::Install(format!(
+            "{} is a symlink; refusing to install through it",
+            path.display()
+        ))),
+        _ => Ok(()),
+    }
+}
+
 fn write_install(f: &Fetched, dir: &Path) -> Result<(), PluginError> {
     let io = |e: std::io::Error| PluginError::Install(format!("{}: {e}", dir.display()));
-    std::fs::create_dir_all(dir).map_err(io)?;
-    std::fs::create_dir_all(dir.join("data")).map_err(io)?;
+    // Every directory above the install dir that nca may have to create or traverse,
+    // up to the `.nca` / plugin home root.
+    for ancestor in dir.ancestors().take(3) {
+        reject_symlink(ancestor)?;
+    }
     let wasm_dest = dir.join(&f.manifest.plugin.wasm);
+    let manifest_dest = dir.join(MANIFEST_FILE);
+    let data = dir.join("data");
+    std::fs::create_dir_all(dir).map_err(io)?;
+    std::fs::create_dir_all(&data).map_err(io)?;
     if let Some(parent) = wasm_dest.parent() {
         std::fs::create_dir_all(parent).map_err(io)?;
+        // `Manifest::parse` already rejects `..`, so everything between `dir` and the file is ours.
+        for part in parent.ancestors().take_while(|p| p.starts_with(dir)) {
+            reject_symlink(part)?;
+        }
+    }
+    for path in [&data, &wasm_dest, &manifest_dest] {
+        reject_symlink(path)?;
     }
     std::fs::write(&wasm_dest, &f.wasm).map_err(io)?;
-    std::fs::write(dir.join(MANIFEST_FILE), &f.manifest_text).map_err(io)
+    std::fs::write(&manifest_dest, &f.manifest_text).map_err(io)
 }
 
 fn entry_for(f: &Fetched, source: &Source, dir: PathBuf, workspace: Option<&Path>) -> Entry {
@@ -222,12 +255,15 @@ pub fn add(input: &str, opts: &InstallOptions<'_>) -> Result<Entry, PluginError>
     let name = fetched.manifest.plugin.name.clone();
     let ws = opts.workspace.as_deref();
 
-    let mut registry = Registry::load()?;
-    if registry.find(&name, ws).is_some() {
-        return Err(PluginError::Install(format!(
-            "plugin `{name}` is already installed; use `nca plugin update {name}` or `nca plugin remove {name}`"
-        )));
-    }
+    let already = |registry: &Registry| -> Result<(), PluginError> {
+        if registry.find(&name, ws).is_some() {
+            return Err(PluginError::Install(format!(
+                "plugin `{name}` is already installed; use `nca plugin update {name}` or `nca plugin remove {name}`"
+            )));
+        }
+        Ok(())
+    };
+    already(&Registry::load()?)?;
     let request = ApprovalRequest {
         manifest: &fetched.manifest,
         source: &source.url,
@@ -238,6 +274,10 @@ pub fn add(input: &str, opts: &InstallOptions<'_>) -> Result<Entry, PluginError>
     if !(opts.approve)(&request) {
         return Err(PluginError::Install("installation not approved".into()));
     }
+    // Lock only for the read-modify-write, not while the user decides.
+    let _lock = Registry::lock()?;
+    let mut registry = Registry::load()?;
+    already(&registry)?;
     let dir = install_dir(&name, ws)?;
     write_install(&fetched, &dir)?;
     let entry = entry_for(&fetched, &source, dir, ws);
@@ -260,7 +300,7 @@ pub fn update(
     workspace: Option<&Path>,
     approve: Approver<'_>,
 ) -> Result<UpdateOutcome, PluginError> {
-    let mut registry = Registry::load()?;
+    let registry = Registry::load()?;
     let current = registry
         .find(name, workspace)
         .cloned()
@@ -277,7 +317,12 @@ pub fn update(
         )));
     }
     let wasm_sha = sha256_hex(&fetched.wasm);
-    if fetched.commit == current.commit && wasm_sha == current.wasm_sha256 {
+    // "Unchanged" must also mean the files on disk still match what was approved, so an
+    // update can repair a tampered or half-written install.
+    if fetched.commit == current.commit
+        && wasm_sha == current.wasm_sha256
+        && current.load_verified().is_ok()
+    {
         return Ok(UpdateOutcome::Unchanged);
     }
     let previous = current.load_verified().ok().map(|(m, _)| m);
@@ -298,6 +343,8 @@ pub fn update(
             return Err(PluginError::Install("update not approved".into()));
         }
     }
+    let _lock = Registry::lock()?;
+    let mut registry = Registry::load()?;
     write_install(&fetched, &current.dir)?;
     let mut entry = entry_for(&fetched, &source, current.dir.clone(), workspace);
     entry.enabled = current.enabled;
@@ -307,19 +354,22 @@ pub fn update(
 }
 
 pub fn remove(name: &str, workspace: Option<&Path>) -> Result<Entry, PluginError> {
+    let _lock = Registry::lock()?;
     let mut registry = Registry::load()?;
     let entry = registry
         .remove(name, workspace)
         .ok_or_else(|| PluginError::Install(format!("plugin `{name}` is not installed")))?;
-    registry.save()?;
+    // Delete the files first: if that fails the registry entry is still there to retry with.
     if entry.dir.exists() {
         std::fs::remove_dir_all(&entry.dir)
             .map_err(|e| PluginError::Install(format!("{}: {e}", entry.dir.display())))?;
     }
+    registry.save()?;
     Ok(entry)
 }
 
 pub fn set_enabled(name: &str, workspace: Option<&Path>, enabled: bool) -> Result<(), PluginError> {
+    let _lock = Registry::lock()?;
     let mut registry = Registry::load()?;
     let entry = registry
         .find_mut(name, workspace)
@@ -331,6 +381,24 @@ pub fn set_enabled(name: &str, workspace: Option<&Path>, enabled: bool) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_to_install_through_a_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = tmp.path().join("plugins-link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(
+            reject_symlink(&link)
+                .unwrap_err()
+                .to_string()
+                .contains("symlink")
+        );
+        assert!(reject_symlink(&target).is_ok());
+        assert!(reject_symlink(&tmp.path().join("missing")).is_ok());
+    }
 
     #[test]
     fn parses_sources() {

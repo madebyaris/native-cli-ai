@@ -1,8 +1,9 @@
 //! Hook latency benchmark: `cargo run --release -p nca-plugin --example perf -- [spin]`.
 //!
 //! Uses whatever plugins `NCA_PLUGIN_HOME` (or `~/.nca/plugins`) has installed.
-//! With `spin`, also times the sandbox timeout / memory cap against the
-//! `examples/plugin-spin` fixture.
+//! With `spin`, also times the sandbox timeout / memory cap. That needs the
+//! `examples/plugin-spin` fixture installed first: `nca add examples/plugin-spin --yes`
+//! (use a throwaway `NCA_PLUGIN_HOME`; it is a test fixture, not a plugin to keep).
 
 use nca_common::config::{NcaConfig, ProviderKind};
 use nca_plugin::{SpawnRequest, ThemeEntries};
@@ -12,14 +13,17 @@ use std::time::{Duration, Instant};
 const WARMUP: usize = 200;
 const ITERS: usize = 3000;
 
-fn bench(name: &str, mut f: impl FnMut()) {
+/// Times only `f`. `setup` builds each call's owned input outside the timed region, so the
+/// numbers are hook latency, not the cost of cloning arguments.
+fn bench<T>(name: &str, mut setup: impl FnMut() -> T, mut f: impl FnMut(T)) {
     for _ in 0..WARMUP {
-        f();
+        f(setup());
     }
     let mut samples: Vec<Duration> = Vec::with_capacity(ITERS);
     for _ in 0..ITERS {
+        let input = setup();
         let t = Instant::now();
-        f();
+        f(input);
         samples.push(t.elapsed());
     }
     samples.sort();
@@ -72,22 +76,41 @@ fn main() {
         use_worktree: false,
     };
 
-    bench("auth.resolve-credential", || {
-        let mut c = config.clone();
-        black_box(nca_plugin::apply_auth(&mut c).ok());
-    });
-    bench("subagent.before-spawn", || {
-        black_box(nca_plugin::before_spawn(req.clone()));
-    });
-    bench("agent.system-prompt (8KB)", || {
-        black_box(nca_plugin::transform_system_prompt(prompt.clone()));
-    });
-    bench("agent.before-tool-use", || {
-        black_box(nca_plugin::before_tool_use("bash", r#"{"cmd":"ls -la"}"#));
-    });
-    bench("cosmetic.theme", || {
-        black_box(nca_plugin::theme(theme.clone()));
-    });
+    bench(
+        "auth.resolve-credential",
+        || config.clone(),
+        |mut c| {
+            black_box(nca_plugin::apply_auth(&mut c).ok());
+        },
+    );
+    bench(
+        "subagent.before-spawn",
+        || req.clone(),
+        |r| {
+            black_box(nca_plugin::before_spawn(r));
+        },
+    );
+    bench(
+        "agent.system-prompt (8KB)",
+        || prompt.clone(),
+        |p| {
+            black_box(nca_plugin::transform_system_prompt(p));
+        },
+    );
+    bench(
+        "agent.before-tool-use",
+        || (),
+        |()| {
+            black_box(nca_plugin::before_tool_use("bash", r#"{"cmd":"ls -la"}"#));
+        },
+    );
+    bench(
+        "cosmetic.theme",
+        || theme.clone(),
+        |t| {
+            black_box(nca_plugin::theme(t));
+        },
+    );
 
     if spin {
         for tool in ["loop", "hog"] {

@@ -180,8 +180,36 @@ impl Manifest {
                 )));
             }
         }
+        for (field, paths) in [
+            ("capabilities.fs_read", &self.capabilities.fs_read),
+            ("capabilities.fs_write", &self.capabilities.fs_write),
+        ] {
+            for raw in paths {
+                grant_path(raw, field)?;
+            }
+        }
         Ok(())
     }
+}
+
+/// A file grant must be absolute or start with `$HOME`, `$NCA_PLUGIN_DATA` or `$WORKSPACE`
+/// (the forms the host can expand), and must not climb with `..`. Checked at install time so a
+/// bad grant is rejected before approval instead of silently disabling the plugin later.
+fn grant_path(raw: &str, field: &str) -> Result<(), PluginError> {
+    let rooted = Path::new(raw).is_absolute()
+        || ["$HOME", "$NCA_PLUGIN_DATA", "$WORKSPACE"].iter().any(|v| {
+            raw.strip_prefix(v)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        });
+    let climbs = Path::new(raw)
+        .components()
+        .any(|c| matches!(c, Component::ParentDir));
+    if raw.is_empty() || !rooted || climbs {
+        return Err(PluginError::Manifest(format!(
+            "{field} entry `{raw}` must be an absolute path or start with $HOME / $NCA_PLUGIN_DATA / $WORKSPACE, without `..`"
+        )));
+    }
+    Ok(())
 }
 
 /// Reject absolute paths and `..` so a manifest cannot point outside its repo.
@@ -224,6 +252,26 @@ network = ["login.acme.com"]
             m.capabilities.network,
             Some(vec!["login.acme.com".to_string()])
         );
+    }
+
+    #[test]
+    fn rejects_unusable_file_grants() {
+        let with = |grant: &str| {
+            format!(
+                "[plugin]\nname = \"p\"\nversion = \"1\"\napi_version = \"1\"\nwasm = \"p.wasm\"\n[hooks]\nauth = true\n[capabilities]\nfs_read = [\"{grant}\"]\n"
+            )
+        };
+        for ok in [
+            "/etc/hosts",
+            "$HOME/.claude",
+            "$NCA_PLUGIN_DATA",
+            "$WORKSPACE/src",
+        ] {
+            assert!(Manifest::parse(&with(ok)).is_ok(), "{ok}");
+        }
+        for bad in ["relative/dir", "~/.ssh", "$HOMEX/a", "$HOME/../x", ""] {
+            assert!(Manifest::parse(&with(bad)).is_err(), "{bad}");
+        }
     }
 
     #[test]

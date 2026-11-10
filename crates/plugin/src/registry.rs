@@ -88,6 +88,10 @@ impl Entry {
     }
 }
 
+/// Held while the registry is being modified. The lock is released when this is dropped.
+#[derive(Debug)]
+pub struct RegistryLock(#[allow(dead_code)] std::fs::File);
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Registry {
     #[serde(default)]
@@ -110,6 +114,24 @@ impl Registry {
             .map_err(|e| PluginError::Registry(format!("parse {}: {e}", path.display())))
     }
 
+    /// Exclusive inter-process lock for a load-modify-save sequence, so two `nca plugin`
+    /// commands cannot overwrite each other's registry changes. Released on drop.
+    pub fn lock() -> Result<RegistryLock, PluginError> {
+        let dir = plugin_home()?;
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| PluginError::Registry(format!("create {}: {e}", dir.display())))?;
+        let path = dir.join("registry.lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(|e| PluginError::Registry(format!("open {}: {e}", path.display())))?;
+        file.lock()
+            .map_err(|e| PluginError::Registry(format!("lock {}: {e}", path.display())))?;
+        Ok(RegistryLock(file))
+    }
+
     pub fn save(&self) -> Result<(), PluginError> {
         let path = Self::path()?;
         if let Some(parent) = path.parent() {
@@ -119,7 +141,8 @@ impl Registry {
         let text =
             serde_json::to_string_pretty(self).map_err(|e| PluginError::Registry(e.to_string()))?;
         // Write-then-rename so a crash never leaves a truncated registry.
-        let tmp = path.with_extension("json.tmp");
+        // The temp name is unique per process, so concurrent saves never share one file.
+        let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
         std::fs::write(&tmp, text)
             .and_then(|_| std::fs::rename(&tmp, &path))
             .map_err(|e| PluginError::Registry(format!("write {}: {e}", path.display())))

@@ -7,8 +7,9 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use wasmtime::component::{
     Component, ComponentType, HasSelf, Lift, Linker, Lower, ResourceTable, TypedFunc,
@@ -118,6 +119,8 @@ struct HostState {
     allowed_hosts: Option<Vec<String>>,
     next: Option<Arc<Node>>,
     defaults: Defaults,
+    /// End of the current guest call's wall-clock budget; bounds host HTTP requests.
+    deadline: Option<Instant>,
 }
 
 impl WasiView for HostState {
@@ -162,7 +165,17 @@ impl wit_host::Host for HostState {
         headers: Vec<(String, String)>,
         body: Option<Vec<u8>>,
     ) -> Result<wit_host::HttpResponse, String> {
-        http_request(self.allowed_hosts.as_deref(), &method, &url, headers, body)
+        let budget = self.deadline.map_or(HTTP_TIMEOUT, |d| {
+            d.saturating_duration_since(Instant::now())
+        });
+        http_request(
+            self.allowed_hosts.as_deref(),
+            &method,
+            &url,
+            headers,
+            body,
+            budget,
+        )
     }
 
     fn next_credential(&mut self, provider: String) -> Result<Option<wit::Credential>, String> {
@@ -194,7 +207,14 @@ fn http_request(
     url: &str,
     headers: Vec<(String, String)>,
     body: Option<Vec<u8>>,
+    budget: Duration,
 ) -> Result<wit_host::HttpResponse, String> {
+    // The guest cannot be interrupted while it waits on this call, so the request must end
+    // inside what is left of the call's wall-clock budget.
+    if budget.is_zero() {
+        return Err("plugin call budget used up before the request".into());
+    }
+    let timeout = HTTP_TIMEOUT.min(budget);
     let parsed = reqwest::Url::parse(url).map_err(|e| format!("bad url: {e}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(format!("scheme `{}` is not allowed", parsed.scheme()));
@@ -216,7 +236,7 @@ fn http_request(
                 // Redirects are disabled: a 302 must not escape the allowlist.
                 let client = reqwest::blocking::Client::builder()
                     .redirect(reqwest::redirect::Policy::none())
-                    .timeout(HTTP_TIMEOUT)
+                    .timeout(timeout)
                     .build()
                     .map_err(|e| e.to_string())?;
                 let mut req = client.request(method, parsed);
@@ -295,6 +315,9 @@ pub(crate) struct Node {
     pub hooks: Hooks,
     next: Option<Arc<Node>>,
     instance: Mutex<Instance>,
+    /// Set after a trap or timeout; later calls are refused (a trapped instance may be inconsistent).
+    poisoned: AtomicBool,
+    has_login: bool,
 }
 
 impl Node {
@@ -316,6 +339,12 @@ impl Node {
         &self,
         f: impl FnOnce(&LoginFuncs, &mut Store<HostState>) -> wasmtime::Result<R> + Send,
     ) -> Result<R, PluginError> {
+        if !self.has_login {
+            return Err(rt_err(
+                &self.name,
+                "the plugin does not export the `login` interface",
+            ));
+        }
         let name = self.name.clone();
         self.run(&Defaults::default(), LOGIN_TIMEOUT, move |inst| {
             let Instance { store, login, .. } = inst;
@@ -334,12 +363,19 @@ impl Node {
         timeout: Duration,
         f: impl FnOnce(&mut Instance) -> wasmtime::Result<R> + Send,
     ) -> Result<R, PluginError> {
+        if self.poisoned.load(Ordering::Acquire) {
+            return Err(rt_err(
+                &self.name,
+                "plugin instance poisoned by an earlier trap",
+            ));
+        }
         let mut guard = self
             .instance
             .lock()
             .map_err(|_| rt_err(&self.name, "plugin instance poisoned by an earlier trap"))?;
         let inst = &mut *guard;
         inst.store.data_mut().defaults = defaults.clone();
+        inst.store.data_mut().deadline = Some(Instant::now() + timeout);
         inst.store
             .set_epoch_deadline((timeout.as_millis() / EPOCH_TICK.as_millis()) as u64);
         // wasmtime-wasi blocks on its own runtime for filesystem access, which panics if
@@ -355,7 +391,12 @@ impl Node {
         } else {
             f(inst)
         };
-        out.map_err(|e| rt_err(&self.name, e))
+        out.map_err(|e| {
+            // An error from the call itself (trap, timeout, out of memory) means the guest
+            // may be half-way through something: stop calling it.
+            self.poisoned.store(true, Ordering::Release);
+            rt_err(&self.name, e)
+        })
     }
 }
 
@@ -461,10 +502,18 @@ impl PluginSet {
     /// plugin must not stop nca from starting.
     pub fn load(entries: &[Entry], workspace: &Path) -> Self {
         let mut loaded: Vec<(i32, String, Entry, Manifest, Vec<u8>)> = Vec::new();
-        for entry in entries
+        // A project-scoped plugin shadows a global one with the same name, so the same
+        // plugin never runs twice.
+        let applicable: Vec<&Entry> = entries
             .iter()
             .filter(|e| e.enabled && e.applies_to(workspace))
-        {
+            .collect();
+        for entry in applicable.iter().copied().filter(|e| {
+            e.workspace.is_some()
+                || !applicable
+                    .iter()
+                    .any(|o| o.workspace.is_some() && o.name == e.name)
+        }) {
             match entry.load_verified() {
                 Ok((manifest, wasm)) => loaded.push((
                     manifest.plugin.priority,
@@ -700,6 +749,7 @@ fn instantiate(
         allowed_hosts: manifest.capabilities.network.clone(),
         next: next.clone(),
         defaults: Defaults::default(),
+        deadline: None,
     };
     let mut store = Store::new(engine, state);
     store.limiter(|s| &mut s.limits);
@@ -724,11 +774,13 @@ fn instantiate(
         name,
         hooks: manifest.hooks.clone(),
         next,
+        has_login: login.is_some(),
         instance: Mutex::new(Instance {
             store,
             bindings,
             login,
         }),
+        poisoned: AtomicBool::new(false),
     })
 }
 
@@ -793,5 +845,5 @@ pub(crate) fn http_request_for_test(
     method: &str,
     url: &str,
 ) -> Result<(), String> {
-    http_request(allowed, method, url, Vec::new(), None).map(|_| ())
+    http_request(allowed, method, url, Vec::new(), None, HTTP_TIMEOUT).map(|_| ())
 }

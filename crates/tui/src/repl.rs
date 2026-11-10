@@ -649,11 +649,11 @@ impl Repl {
                     lines.push(format!(
                         "  {:<12} key {}",
                         provider.display_name(),
-                        if self.runtime.config().provider.api_key_present_for(provider) {
-                            "configured"
-                        } else if nca_plugin::plugin_supplies_key(self.runtime.config(), provider)
-                        {
+                        // A plugin's key replaces the configured one (`apply_auth`), so say so first.
+                        if nca_plugin::plugin_supplies_key(self.runtime.config(), provider) {
                             "configured (plugin)"
+                        } else if self.runtime.config().provider.api_key_present_for(provider) {
+                            "configured"
                         } else {
                             "missing"
                         }
@@ -1389,7 +1389,11 @@ impl Repl {
 
                 let mut chosen = None;
                 let mut notes = Vec::new();
-                for p in ProviderKind::ALL {
+                // `custom` is configured with /custom, not signed in; the session switch rejects it.
+                for p in ProviderKind::ALL
+                    .into_iter()
+                    .filter(|p| *p != ProviderKind::Custom)
+                {
                     match nca_plugin::plugin_key_status(self.runtime.config(), p) {
                         Some(Ok(())) => {
                             notes.push(format!("{}: signed in via plugin", p.display_name()));
@@ -1403,7 +1407,8 @@ impl Repl {
                 // when nothing is signed in yet or the user asks (`/login new`).
                 let can_login = nca_plugin::login_plugins();
                 let loginable = ProviderKind::ALL.into_iter().find(|p| {
-                    can_login
+                    *p != ProviderKind::Custom
+                        && can_login
                         .iter()
                         .any(|(_, ps)| ps.iter().any(|x| x == nca_plugin::provider_name(*p)))
                 });
@@ -2962,10 +2967,10 @@ fn build_model_picker_entries(
     });
     for p in ProviderKind::ALL {
         let model = config.provider.model_for(p);
-        let key_status = if config.provider.api_key_present_for(p) {
-            "key ✓"
-        } else if nca_plugin::plugin_supplies_key(config, p) {
+        let key_status = if nca_plugin::plugin_supplies_key(config, p) {
             "plugin ✓"
+        } else if config.provider.api_key_present_for(p) {
+            "key ✓"
         } else {
             "no key"
         };

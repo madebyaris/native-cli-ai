@@ -112,9 +112,42 @@ pub fn plugin_key_status(config: &NcaConfig, kind: ProviderKind) -> Option<Resul
     }
 }
 
-/// Whether an installed auth plugin currently supplies an API key for `kind`.
+/// How long [`plugin_supplies_key`] reuses an answer. A plugin call can touch the network
+/// (a token refresh), and UI code asks on every redraw of a picker.
+const KEY_STATUS_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+type KeyStatusCache =
+    std::sync::Mutex<std::collections::HashMap<&'static str, (std::time::Instant, bool)>>;
+
+fn key_status_cache() -> &'static KeyStatusCache {
+    static CACHE: OnceLock<KeyStatusCache> = OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+fn forget_key_status() {
+    if let Ok(mut cache) = key_status_cache().lock() {
+        cache.clear();
+    }
+}
+
+/// Whether an installed auth plugin currently supplies an API key for `kind`. Cached for a
+/// short time so it is safe to call while drawing; sign-in and auth failures clear the cache.
 pub fn plugin_supplies_key(config: &NcaConfig, kind: ProviderKind) -> bool {
-    matches!(plugin_key_status(config, kind), Some(Ok(())))
+    if active().is_none() {
+        return false;
+    }
+    let name = provider_name(kind);
+    if let Ok(cache) = key_status_cache().lock()
+        && let Some((at, supplied)) = cache.get(name)
+        && at.elapsed() < KEY_STATUS_TTL
+    {
+        return *supplied;
+    }
+    let supplied = matches!(plugin_key_status(config, kind), Some(Ok(())));
+    if let Ok(mut cache) = key_status_cache().lock() {
+        cache.insert(name, (std::time::Instant::now(), supplied));
+    }
+    supplied
 }
 
 /// Plugins that can sign a provider in, as `(plugin, providers)`. UI use only.
@@ -137,12 +170,14 @@ pub fn complete_login(kind: ProviderKind, input: &str) -> Result<(), PluginError
         plugin: "login".into(),
         message: "no plugins are loaded".into(),
     })?;
+    forget_key_status();
     set.complete_login(provider_name(kind), input)
 }
 
 /// The provider answered 401/403 to a credential a plugin supplied. Lets the
 /// plugin refresh it. Network failures are not auth failures: do not call this for them.
 pub fn on_auth_failure(kind: ProviderKind, status: u16) -> AuthRecovery {
+    forget_key_status();
     match active() {
         Some(set) => set.on_auth_failure(provider_name(kind), status),
         None => AuthRecovery::NoPlugin,
@@ -179,10 +214,40 @@ pub fn before_tool_use(tool: &str, input_json: &str) -> ToolDecision {
 /// result is the effective theme. Fail-open: errors return `defaults`.
 pub fn theme(defaults: ThemeEntries) -> ThemeEntries {
     let Some(set) = active() else { return defaults };
-    set.theme(defaults.clone()).unwrap_or_else(|e| {
-        tracing::warn!("{e}; using default theme");
-        defaults
-    })
+    match set.theme(defaults.clone()) {
+        // A plugin may return only the tokens it changes: anything it omits keeps its default.
+        Ok(returned) => merge_theme(defaults, returned),
+        Err(e) => {
+            tracing::warn!("{e}; using default theme");
+            defaults
+        }
+    }
+}
+
+fn merge_theme(defaults: ThemeEntries, returned: ThemeEntries) -> ThemeEntries {
+    let mut out = defaults;
+    for (token, value) in returned {
+        match out.iter_mut().find(|(t, _)| *t == token) {
+            Some(slot) => slot.1 = value,
+            None => out.push((token, value)),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod theme_tests {
+    use super::merge_theme;
+
+    #[test]
+    fn omitted_tokens_keep_their_default() {
+        let defaults = vec![("bg".into(), "#000".into()), ("text".into(), "#fff".into())];
+        let merged = merge_theme(defaults, vec![("text".into(), "#eee".into())]);
+        assert_eq!(
+            merged,
+            vec![("bg".into(), "#000".into()), ("text".into(), "#eee".into())]
+        );
+    }
 }
 
 #[cfg(test)]

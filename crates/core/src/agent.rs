@@ -82,7 +82,6 @@ impl ModelTurn {
     }
 }
 
-/// Harness-authored guidance. It reaches the model on the next request only and is never persisted.
 /// Policy check from installed agent plugins; `Some(reason)` blocks the call.
 fn plugin_tool_denial(call: &ToolCall) -> Option<String> {
     match nca_plugin::before_tool_use(&call.name, &call.input.to_string()) {
@@ -91,6 +90,7 @@ fn plugin_tool_denial(call: &ToolCall) -> Option<String> {
     }
 }
 
+/// Harness-authored guidance. It reaches the model on the next request only and is never persisted.
 fn harness_note(text: impl AsRef<str>) -> Message {
     Message::user(format!("[nca harness] {}", text.as_ref()))
 }

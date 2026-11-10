@@ -18,7 +18,9 @@ nca add https://github.com/acme/nca-plugin-sso          # public
 nca add git@github.com:acme/private-plugin.git          # private: uses your own git credentials
 nca add acme/nca-plugin-sso@v1.2.0                      # pin a tag, branch or commit
 nca add <url> --project                                 # only for the current workspace
-nca plugin list | info <name> | enable <name> | disable <name> | update [name] | remove <name>
+nca plugin list                                         # also: info <name>, enable <name>, disable <name>
+nca plugin update [name]                                # re-fetch; asks again if grants changed
+nca plugin remove <name>
 ```
 
 `nca add` clones the repo, reads `nca-plugin.toml`, loads the prebuilt `.wasm` it names
@@ -62,8 +64,18 @@ tenant = "acme"
 ## Writing a plugin
 
 The interface is `crates/plugin/wit/nca-plugin.wit` (package `nca:plugin@1.0.0`, world
-`plugin`). A component must export all four hook interfaces; return `none` / `allow` for the
-ones it does not care about. A plugin that also needs sign-in targets the world `plugin-login`
+`plugin`). A component must export all four hook interfaces (a hook the manifest does not
+declare is never called). What an unused hook should return:
+
+| Hook | Defer to the rest of the chain / core | Notes |
+| --- | --- | --- |
+| `auth.resolve-credential` | `none`, or `host.next-credential` | an `err` fails closed |
+| `subagent.before-spawn` | `host.next-spawn-decision` | must return `allow(request)` or `deny(reason)`; the first plugin that declares the hook decides, so it must call `next-spawn-decision` to let later plugins and core decide |
+| `agent.transform-system-prompt` | `none` (keep the prompt) | every agent plugin runs, in order |
+| `agent.before-tool-use` | `allow` | every agent plugin runs, in order; the first `deny` wins. The shell tool is named `execute_bash` |
+| `cosmetic.resolve-theme` | `host.next-theme` | returns a theme; a partial one is merged over the defaults |
+
+A plugin that also needs sign-in targets the world `plugin-login`
 (the same plus `login`) and sets `login = true` under `[hooks]`; plugins built against `plugin`
 keep working unchanged. See `examples/plugin-template` (Rust, `wasm32-wasip2`):
 
@@ -73,9 +85,15 @@ cd examples/plugin-template && ./build.sh      # -> plugin.wasm
 nca add /path/to/plugin-template --yes         # local checkout works too
 ```
 
-Chaining: plugins are ordered by `priority`, then name. A hook call enters the first plugin
-that declared the hook; its `host.next-*` import runs the rest of the chain and finally core.
-Returning `none` from `auth.resolve-credential` passes to the next plugin.
+Chaining: plugins are ordered by `priority`, then name. For `auth`, `subagent` and `cosmetic`, a
+hook call enters the first plugin that declared the hook; its `host.next-*` import runs the rest of
+the chain and finally core. Returning `none` from `auth.resolve-credential` passes to the next plugin.
+The `agent` hooks have no `next` import: each declaring plugin is called in order.
+If a project-scoped and a global plugin share a name, only the project one runs.
+
+Scope: plugins load once per process, for the workspace nca was started in. Project-scoped plugins
+apply to that workspace only; a long-lived host such as ACP that opens other workspaces keeps the
+plugins of the startup directory.
 
 ## Sign-in and re-login (`login` hook)
 

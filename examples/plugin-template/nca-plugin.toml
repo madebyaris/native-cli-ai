@@ -13,7 +13,9 @@ cosmetic = true
 login = true
 
 [capabilities]
-# Files and env are deny-by-default; network is allowed unless you set `network`. This template reads one env var.
+# Files and env are deny-by-default; network is allowed unless you set `network`. This template makes
+# no HTTP requests, so it denies the network. It reads one env var.
+network = []
 env = ["EXAMPLE_API_KEY"]
 # The login hook keeps its own token in the plugin data directory.
 fs_write = ["$NCA_PLUGIN_DATA"]
