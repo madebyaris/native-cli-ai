@@ -1426,9 +1426,7 @@ impl Repl {
                             ));
                             out.println(&format!("[login] open: {}", c.url));
                             out.println(&format!("[login] {}", c.instructions));
-                            if c.paste_code {
-                                out.println("[login] then run: /login <code>");
-                            }
+                            out.println("[login] then run: /login <code>");
                             open_in_browser(&c.url);
                             return Ok(true);
                         }
@@ -2280,7 +2278,7 @@ impl Repl {
                         }
                     }
                 }
-                TuiCmd::TogglePlugin(name) => {
+                TuiCmd::TogglePlugin(name, scope) => {
                     let ws = self
                         .runtime
                         .workspace_root()
@@ -2288,9 +2286,16 @@ impl Repl {
                         .unwrap_or_else(|_| self.runtime.workspace_root().to_path_buf());
                     // Flip the saved flag, say what happened, and show the list again so the
                     // person can switch several in a row.
-                    let result = nca_plugin::manage::find(&name, &ws).and_then(|entry| {
-                        nca_plugin::manage::set_enabled(&name, &ws, !entry.enabled)
-                    });
+                    let scope = scope.map(std::path::PathBuf::from);
+                    let result = nca_plugin::manage::find_in(&name, scope.as_deref(), &ws)
+                        .and_then(|entry| {
+                            nca_plugin::manage::set_enabled_in(
+                                &name,
+                                scope.as_deref(),
+                                &ws,
+                                !entry.enabled,
+                            )
+                        });
                     if let Ok(mut g) = tui_state.lock() {
                         match result {
                             Ok(status) => {
@@ -2902,7 +2907,10 @@ fn plugin_picker_entries(plugins: &[nca_plugin::manage::PluginStatus]) -> Vec<Mo
         entries.push(ModelPickerEntry {
             label: format!("{} v{}", p.entry.name, p.entry.version),
             detail: format!("{} · {scope}{hooks}", p.state_label()),
-            action: ModelPickerAction::TogglePlugin(p.entry.name.clone()),
+            action: ModelPickerAction::TogglePlugin(
+                p.entry.name.clone(),
+                p.entry.workspace.clone(),
+            ),
             is_header: false,
         });
     }
@@ -3124,7 +3132,7 @@ mod tests {
         assert_eq!(entries[1].detail, "enabled · global · [auth]");
         assert_eq!(
             entries[1].action,
-            ModelPickerAction::TogglePlugin("demo".into())
+            ModelPickerAction::TogglePlugin("demo".into(), None)
         );
     }
 

@@ -188,8 +188,9 @@ pub const STREAM_TRANSCRIPT_DIRTY_MS: u128 = 50;
 pub enum ModelPickerAction {
     SwitchProvider(ProviderKind),
     ApplyModel(String),
-    /// Flip a plugin between enabled and disabled (the `/plugins` list).
-    TogglePlugin(String),
+    /// Flip a plugin between enabled and disabled (the `/plugins` list): name and the
+    /// workspace it is scoped to (`None` = global), since both scopes can hold the same name.
+    TogglePlugin(String, Option<String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -36,9 +36,6 @@ pub struct LoginChallenge {
     pub plugin: String,
     pub url: String,
     pub instructions: String,
-    /// `true`: the user pastes the code the page shows. `false`: a local callback
-    /// passes the query string.
-    pub paste_code: bool,
 }
 
 /// Result of telling a plugin its credential was rejected (HTTP 401/403).

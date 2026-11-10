@@ -167,7 +167,7 @@ fn install_load_and_run_every_hook() {
     );
     let challenge = set.begin_login("anthropic").unwrap();
     assert_eq!(challenge.plugin, "example");
-    assert!(challenge.paste_code && challenge.url.starts_with("https://"));
+    assert!(challenge.url.starts_with("https://"));
     assert!(
         set.begin_login("openai").is_err(),
         "no plugin signs in to openai"

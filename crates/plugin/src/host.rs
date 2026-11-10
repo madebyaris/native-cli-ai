@@ -476,6 +476,7 @@ pub(crate) fn chain_theme(
 pub struct PluginSet {
     head: Option<Arc<Node>>,
     names: Vec<String>,
+    ids: Vec<(String, Option<String>)>,
     /// Plugins in chain order, for sequential (non-`next`) hooks.
     order: Vec<Arc<Node>>,
 }
@@ -485,6 +486,7 @@ impl PluginSet {
         Self {
             head: None,
             names: Vec::new(),
+            ids: Vec::new(),
             order: Vec::new(),
         }
     }
@@ -495,6 +497,16 @@ impl PluginSet {
 
     pub fn names(&self) -> &[String] {
         &self.names
+    }
+
+    /// Whether any loaded plugin declared the `auth` hook (so credentials may not be the configured ones).
+    pub fn has_auth_plugin(&self) -> bool {
+        self.order.iter().any(|n| n.hooks.auth)
+    }
+
+    /// `(name, workspace)` of each loaded plugin, in chain order.
+    pub fn ids(&self) -> &[(String, Option<String>)] {
+        &self.ids
     }
 
     /// Load every enabled plugin that applies to `workspace`. A plugin that
@@ -530,10 +542,12 @@ impl PluginSet {
         // Build tail-first so each node can own its `next`.
         let mut next: Option<Arc<Node>> = None;
         let mut order_rev = Vec::new();
+        let mut ids_rev = Vec::new();
         for (_, name, entry, manifest, wasm) in loaded.into_iter().rev() {
             match instantiate(&entry, &manifest, &wasm, workspace, next.clone()) {
                 Ok(node) => {
                     let node = Arc::new(node);
+                    ids_rev.push((entry.name.clone(), entry.workspace.clone()));
                     order_rev.push(node.clone());
                     next = Some(node);
                 }
@@ -541,9 +555,11 @@ impl PluginSet {
             }
         }
         order_rev.reverse();
+        ids_rev.reverse();
         Self {
             head: next,
             names: order_rev.iter().map(|n| n.name.clone()).collect(),
+            ids: ids_rev,
             order: order_rev,
         }
     }
@@ -575,14 +591,29 @@ impl PluginSet {
             .collect()
     }
 
+    /// The login plugin that can sign in to `provider`. `Ok(None)`: none can. `Err`: a login
+    /// plugin failed while being asked, which is not the same as there being none.
+    fn find_login_node(&self, provider: &str) -> Result<Option<&Arc<Node>>, PluginError> {
+        let mut first_error = None;
+        for node in self.order.iter().filter(|n| n.hooks.login) {
+            match node.call_login(|l, s| l.providers.call(s, ())) {
+                Ok((providers,)) if providers.iter().any(|p| p == provider) => {
+                    return Ok(Some(node));
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    first_error.get_or_insert(e);
+                }
+            }
+        }
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(None),
+        }
+    }
+
     fn login_node(&self, provider: &str) -> Result<&Arc<Node>, PluginError> {
-        self.order
-            .iter()
-            .filter(|n| n.hooks.login)
-            .find(|n| {
-                n.call_login(|l, s| l.providers.call(s, ()))
-                    .is_ok_and(|(ps,)| ps.iter().any(|p| p == provider))
-            })
+        self.find_login_node(provider)?
             .ok_or_else(|| PluginError::Runtime {
                 plugin: "login".into(),
                 message: format!("no installed plugin can sign in to `{provider}`"),
@@ -593,15 +624,26 @@ impl PluginSet {
         let node = self.login_node(provider)?;
         let p = provider.to_string();
         let (out,) = node.call_login(move |l, s| l.begin.call(s, (p,)))?;
-        out.map(|c| LoginChallenge {
+        let fail = |message: String| PluginError::Runtime {
+            plugin: node.name.clone(),
+            message,
+        };
+        let c = out.map_err(fail)?;
+        // Only the paste-code flow exists in the TUI; reject anything else instead of sending
+        // the user through a sign-in that cannot finish.
+        if c.mode != "paste-code" {
+            return Err(PluginError::Runtime {
+                plugin: node.name.clone(),
+                message: format!(
+                    "login mode `{}` is not supported; this nca supports `paste-code`",
+                    c.mode
+                ),
+            });
+        }
+        Ok(LoginChallenge {
             plugin: node.name.clone(),
             url: c.url,
             instructions: c.instructions,
-            paste_code: c.mode != "local-callback",
-        })
-        .map_err(|message| PluginError::Runtime {
-            plugin: node.name.clone(),
-            message,
         })
     }
 
@@ -616,8 +658,11 @@ impl PluginSet {
     }
 
     pub(crate) fn on_auth_failure(&self, provider: &str, status: u16) -> AuthRecovery {
-        let Ok(node) = self.login_node(provider) else {
-            return AuthRecovery::NoPlugin;
+        let node = match self.find_login_node(provider) {
+            Ok(Some(node)) => node,
+            Ok(None) => return AuthRecovery::NoPlugin,
+            // A login plugin trapped or timed out: say so instead of treating it as absent.
+            Err(e) => return AuthRecovery::Unavailable(e.to_string()),
         };
         let p = provider.to_string();
         match node.call_login(move |l, s| l.on_failure.call(s, (p, status))) {

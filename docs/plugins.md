@@ -103,7 +103,7 @@ For plugins that own a credential, such as an OAuth subscription token. The inte
 | Function | Called when | Returns |
 | --- | --- | --- |
 | `providers` | nca needs to know who can sign in | provider ids, e.g. `anthropic` |
-| `begin-login(provider)` | the user runs `/login` | `{ url, instructions, mode }`; nca prints the URL and tries to open the browser |
+| `begin-login(provider)` | the user runs `/login` | `{ url, instructions, mode }`; nca prints the URL and tries to open the browser. `mode` must be `paste-code` (the only mode supported; anything else is rejected) |
 | `complete-login(provider, input)` | the user runs `/login <code>` | `ok`, or an error shown to the user |
 | `on-auth-failure(provider, status)` | the provider answered 401/403 to a credential from this plugin | `some(key)`: retry once with it; `none`: sign in again; `err`: could not try |
 

@@ -181,6 +181,11 @@ impl Provider for AnthropicProvider {
                     *self.refreshed_key.lock().unwrap_or_else(|e| e.into_inner()) = Some(key);
                     response = self.send(&body).await?;
                     status = response.status();
+                    if matches!(status.as_u16(), 401 | 403) {
+                        return Err(ProviderError::AuthError(format!(
+                            "{SIGNED_OUT_PREFIX}the refreshed token was rejected too. Run /login to sign in again."
+                        )));
+                    }
                 }
                 nca_plugin::AuthRecovery::Unavailable(message) => {
                     return Err(ProviderError::AuthError(format!(
@@ -192,11 +197,6 @@ impl Provider for AnthropicProvider {
                         "{SIGNED_OUT_PREFIX}{message}. Run /login to sign in again."
                     )));
                 }
-            }
-            if matches!(status.as_u16(), 401 | 403) && self.oauth {
-                return Err(ProviderError::AuthError(format!(
-                    "{SIGNED_OUT_PREFIX}the refreshed token was rejected too. Run /login to sign in again."
-                )));
             }
         }
 

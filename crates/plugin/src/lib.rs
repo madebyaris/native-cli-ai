@@ -51,6 +51,18 @@ pub fn loaded_names() -> Vec<String> {
     GLOBAL.get().map(|s| s.names().to_vec()).unwrap_or_default()
 }
 
+/// Whether a loaded plugin may replace credentials. Cheap: it calls no plugin. Caches keyed
+/// by the configured credential are not safe to share while this is true.
+pub fn has_auth_plugin() -> bool {
+    GLOBAL.get().is_some_and(PluginSet::has_auth_plugin)
+}
+
+/// `(name, workspace)` of each loaded plugin. The workspace tells a global copy from a
+/// project-scoped one of the same name.
+pub fn loaded_ids() -> Vec<(String, Option<String>)> {
+    GLOBAL.get().map(|s| s.ids().to_vec()).unwrap_or_default()
+}
+
 /// The provider id plugins see (`anthropic`, `openai`, ...).
 pub fn provider_name(kind: ProviderKind) -> &'static str {
     match kind {

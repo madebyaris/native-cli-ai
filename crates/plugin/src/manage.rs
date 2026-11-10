@@ -20,6 +20,8 @@ pub enum LoadState {
     PendingDisable,
     /// Disabled and not loaded.
     Off,
+    /// Enabled, but a project-scoped copy of the same name runs instead.
+    Shadowed,
 }
 
 #[derive(Debug, Clone)]
@@ -45,12 +47,18 @@ impl PluginStatus {
             LoadState::PendingEnable => "enabled · restart to load",
             LoadState::PendingDisable => "disabled · restart to unload",
             LoadState::Off => "disabled",
+            LoadState::Shadowed => "enabled · replaced by the project copy",
         }
     }
 }
 
-fn state_of(entry: &Entry, loaded: &[String]) -> LoadState {
-    match (entry.enabled, loaded.iter().any(|n| n == &entry.name)) {
+/// `loaded` holds `(name, workspace)` of what this process runs: the scope matters because a
+/// global and a project copy can share a name.
+fn state_of(entry: &Entry, loaded: &[(String, Option<String>)]) -> LoadState {
+    let is_loaded = loaded
+        .iter()
+        .any(|(n, w)| n == &entry.name && w == &entry.workspace);
+    match (entry.enabled, is_loaded) {
         (true, true) => LoadState::Active,
         (true, false) => LoadState::PendingEnable,
         (false, true) => LoadState::PendingDisable,
@@ -60,17 +68,31 @@ fn state_of(entry: &Entry, loaded: &[String]) -> LoadState {
 
 /// Plugins that apply to `workspace` (global ones and this workspace's own).
 pub fn list(workspace: &Path) -> Result<Vec<PluginStatus>, PluginError> {
-    let loaded = crate::loaded_names();
-    Ok(Registry::load()?
+    let loaded = crate::loaded_ids();
+    let applicable: Vec<Entry> = Registry::load()?
         .plugins
         .into_iter()
         .filter(|e| e.applies_to(workspace))
+        .collect();
+    let project_names: Vec<String> = applicable
+        .iter()
+        .filter(|e| e.enabled && e.workspace.is_some())
+        .map(|e| e.name.clone())
+        .collect();
+    Ok(applicable
+        .into_iter()
         .map(|entry| {
             let hooks = entry
                 .load_verified()
                 .map(|(m, _)| m.hooks.names().iter().map(|h| h.to_string()).collect())
                 .map_err(|e| e.to_string());
-            let state = state_of(&entry, &loaded);
+            let shadowed =
+                entry.enabled && entry.workspace.is_none() && project_names.contains(&entry.name);
+            let state = if shadowed {
+                LoadState::Shadowed
+            } else {
+                state_of(&entry, &loaded)
+            };
             PluginStatus {
                 entry,
                 hooks,
@@ -90,6 +112,14 @@ pub fn find(name: &str, workspace: &Path) -> Result<Entry, PluginError> {
         .ok_or_else(|| PluginError::Install(format!("plugin `{name}` is not installed")))
 }
 
+/// Finds the copy in an exact scope (`None` = global, `Some(ws)` = that workspace's own).
+pub fn find_in(name: &str, scope: Option<&Path>, _workspace: &Path) -> Result<Entry, PluginError> {
+    Registry::load()?
+        .find(name, scope)
+        .cloned()
+        .ok_or_else(|| PluginError::Install(format!("plugin `{name}` is not installed")))
+}
+
 /// Saves the enabled flag. Returns the plugin's status after the change.
 pub fn set_enabled(
     name: &str,
@@ -98,10 +128,22 @@ pub fn set_enabled(
 ) -> Result<PluginStatus, PluginError> {
     let entry = find(name, workspace)?;
     let scope = entry.workspace.as_ref().map(std::path::PathBuf::from);
-    crate::install::set_enabled(&entry.name, scope.as_deref(), enabled)?;
+    set_enabled_in(name, scope.as_deref(), workspace, enabled)
+}
+
+/// Like [`set_enabled`] for one exact scope, so the global and the project copy of a plugin
+/// can be switched independently.
+pub fn set_enabled_in(
+    name: &str,
+    scope: Option<&Path>,
+    workspace: &Path,
+    enabled: bool,
+) -> Result<PluginStatus, PluginError> {
+    crate::install::set_enabled(name, scope, enabled)?;
+    let want = scope.map(|p| p.to_string_lossy().into_owned());
     list(workspace)?
         .into_iter()
-        .find(|s| s.entry.name == entry.name)
+        .find(|s| s.entry.name == name && s.entry.workspace == want)
         .ok_or_else(|| PluginError::Install(format!("plugin `{name}` is not installed")))
 }
 
@@ -127,11 +169,17 @@ mod tests {
 
     #[test]
     fn state_follows_the_registry_and_what_is_loaded() {
-        let loaded = vec!["demo".to_string()];
+        let loaded = vec![("demo".to_string(), None)];
         assert_eq!(state_of(&entry(true), &loaded), LoadState::Active);
         assert_eq!(state_of(&entry(false), &loaded), LoadState::PendingDisable);
         assert_eq!(state_of(&entry(true), &[]), LoadState::PendingEnable);
         assert_eq!(state_of(&entry(false), &[]), LoadState::Off);
+        // The same name in another scope does not count as this copy being loaded.
+        let project_loaded = vec![("demo".to_string(), Some("/ws".to_string()))];
+        assert_eq!(
+            state_of(&entry(true), &project_loaded),
+            LoadState::PendingEnable
+        );
     }
 
     #[test]
@@ -143,6 +191,7 @@ mod tests {
         };
         assert!(!status(LoadState::Active).needs_restart());
         assert!(!status(LoadState::Off).needs_restart());
+        assert!(!status(LoadState::Shadowed).needs_restart());
         assert!(status(LoadState::PendingEnable).needs_restart());
         assert!(status(LoadState::PendingDisable).needs_restart());
     }

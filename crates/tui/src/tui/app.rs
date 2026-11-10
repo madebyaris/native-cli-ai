@@ -76,8 +76,8 @@ pub enum TuiCmd {
     ApplyModel(String),
     /// Switch provider (from the model picker).
     ApplyModelProvider(ProviderKind),
-    /// Enable or disable a plugin (from the `/plugins` list).
-    TogglePlugin(String),
+    /// Enable or disable a plugin (from the `/plugins` list): name and scope (`None` = global).
+    TogglePlugin(String, Option<String>),
     /// Apply permission mode (from the permission picker).
     ApplyPermission(usize),
     /// Switch agent profile (from the agent picker).
@@ -1536,7 +1536,15 @@ pub fn run_blocking(
                     let plugin_list = g
                         .model_picker_entries()
                         .iter()
-                        .any(|e| matches!(e.action, ModelPickerAction::TogglePlugin(_)));
+                        .any(|e| matches!(e.action, ModelPickerAction::TogglePlugin(..)));
+                    // Section headers stay visible while filtering; "nothing matches" means no
+                    // selectable row is left.
+                    let nothing_to_pick = {
+                        let entries = g.model_picker_entries();
+                        vis_indices
+                            .iter()
+                            .all(|&i| entries.get(i).is_none_or(|e| e.is_header))
+                    };
                     let search_display = if g.model_picker_search().is_empty() {
                         "type to filter…".to_string()
                     } else {
@@ -1557,7 +1565,7 @@ pub fn run_blocking(
                         ]),
                         Line::default(),
                     ];
-                    if vis_indices.is_empty() {
+                    if nothing_to_pick {
                         lines.push(Line::from(Span::styled(
                             if plugin_list {
                                 " No plugins match"
@@ -2041,8 +2049,9 @@ pub fn run_blocking(
                                         ModelPickerAction::ApplyModel(m) => {
                                             let _ = cmd_tx.try_send(TuiCmd::ApplyModel(m));
                                         }
-                                        ModelPickerAction::TogglePlugin(name) => {
-                                            let _ = cmd_tx.try_send(TuiCmd::TogglePlugin(name));
+                                        ModelPickerAction::TogglePlugin(name, scope) => {
+                                            let _ =
+                                                cmd_tx.try_send(TuiCmd::TogglePlugin(name, scope));
                                         }
                                     }
                                 }

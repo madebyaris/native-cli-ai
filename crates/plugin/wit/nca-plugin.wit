@@ -116,8 +116,9 @@ interface login {
         url: string,
         /// Text to show next to the URL.
         instructions: string,
-        /// `paste-code`: the user pastes what the page shows. `local-callback`:
-        /// nca passes the callback query string to `complete-login`.
+        /// How the user finishes: `paste-code`, the only mode nca supports today. The user
+        /// copies the code the page shows and runs `/login <code>`; nca passes it to
+        /// `complete-login`. Any other value is rejected.
         mode: string,
     }
 
