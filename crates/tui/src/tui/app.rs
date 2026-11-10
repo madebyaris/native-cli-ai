@@ -256,6 +256,37 @@ pub fn run_blocking(
     let mut last_rendered_size: (u16, u16) = (0, 0);
     let mut last_busy_tick: std::time::Instant = std::time::Instant::now();
     loop {
+        // An external program (the editor) wants the terminal: hand it over, wait, take it back.
+        let release = state
+            .lock()
+            .map(|g| g.terminal_requested && !g.terminal_released)
+            .unwrap_or(false);
+        if release {
+            restore_terminal();
+            if let Ok(mut g) = state.lock() {
+                g.terminal_released = true;
+            }
+            while state
+                .lock()
+                .map(|g| g.terminal_requested && !g.should_exit)
+                .unwrap_or(false)
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            terminal = setup_terminal(mouse_capture)?;
+            // Keys typed while the editor ran belong to the editor, not to a prompt here:
+            // discard whatever is still queued so nothing is submitted by accident.
+            while poll(Duration::from_millis(0)).unwrap_or(false) {
+                let _ = read();
+            }
+            terminal.clear()?;
+            last_rendered_version = 0;
+            last_rendered_size = (0, 0);
+            if let Ok(mut g) = state.lock() {
+                g.terminal_released = false;
+                g.mark_dirty();
+            }
+        }
         if workspace_files_indexing && let Ok(files) = workspace_files_rx.try_recv() {
             workspace_files = files;
             workspace_files_indexing = false;

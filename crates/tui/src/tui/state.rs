@@ -143,6 +143,11 @@ pub struct TuiSessionState {
     /// When the current busy state started (for animation frame selection).
     pub busy_state_since: Instant,
     pub should_exit: bool,
+    /// An external program (the editor) needs the terminal: the UI thread must leave raw mode
+    /// and the alternate screen, stop reading keys, and wait until this is cleared.
+    pub terminal_requested: bool,
+    /// The UI thread has handed the terminal over (acknowledges `terminal_requested`).
+    pub terminal_released: bool,
     /// Selected row in slash-command popup (↑↓ or click).
     pub slash_menu_index: usize,
     /// Active modal overlay (at most one).
@@ -232,6 +237,8 @@ impl TuiSessionState {
             current_busy_state: BusyState::Idle,
             busy_state_since: Instant::now(),
             should_exit: false,
+            terminal_requested: false,
+            terminal_released: false,
             slash_menu_index: 0,
             overlay: UiOverlay::None,
             active_approval: None,
