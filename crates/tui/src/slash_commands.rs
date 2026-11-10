@@ -284,6 +284,15 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         Always
     ),
     command!(
+        "plugins",
+        "/plugins",
+        ["/plugin"],
+        "List plugins, enable or disable them",
+        System,
+        "",
+        Always
+    ),
+    command!(
         "login",
         "/login",
         [],

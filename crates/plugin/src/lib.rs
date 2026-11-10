@@ -10,6 +10,7 @@
 pub mod error;
 pub mod host;
 pub mod install;
+pub mod manage;
 pub mod manifest;
 pub mod registry;
 pub mod types;
