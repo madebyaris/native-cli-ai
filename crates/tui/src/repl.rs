@@ -382,35 +382,61 @@ impl Repl {
     }
 
     /// Open the configured external editor (`NCA_EDITOR`, `[ui].editor`, `EDITOR`, `vim`).
-    async fn open_external_editor(&self, seed: Option<&str>) -> Option<String> {
+    ///
+    /// The editor gets the real terminal: stdin, stdout and stderr are inherited, and in the TUI
+    /// the screen is handed over first (raw mode and alternate screen off, key reading paused)
+    /// and taken back afterwards. Without that the editor draws into a pipe, cannot be seen,
+    /// fights the TUI for keystrokes and is left running when nca is closed.
+    async fn open_external_editor(
+        &self,
+        seed: Option<&str>,
+        tui: Option<&Arc<Mutex<TuiSessionState>>>,
+    ) -> Option<String> {
         let editor_cmd = self.runtime.config().effective_editor_command();
-        let temp_file = format!("nca-prompt-{}.txt", std::process::id());
-        let temp_path = std::env::temp_dir().join(&temp_file);
+        let temp_path = std::env::temp_dir().join(format!("nca-prompt-{}.txt", std::process::id()));
         std::fs::write(&temp_path, seed.unwrap_or("")).ok()?;
 
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(format!("{} '{}'", editor_cmd, temp_path.display()))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await;
+        let handed_over = match tui {
+            Some(st) => release_terminal(st).await,
+            None => true,
+        };
+        let status = if handed_over {
+            Command::new("sh")
+                .arg("-c")
+                .arg(format!("{} '{}'", editor_cmd, temp_path.display()))
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                // If nca goes away while the editor is open, do not leave it behind.
+                .kill_on_drop(true)
+                .status()
+                .await
+        } else {
+            Err(std::io::Error::other(
+                "the screen could not be handed to the editor",
+            ))
+        };
+        if let Some(st) = tui {
+            reclaim_terminal(st).await;
+        }
 
-        match output {
-            Ok(_) => {
-                let content = std::fs::read_to_string(&temp_path).ok()?;
-                let _ = std::fs::remove_file(&temp_path);
-                let content = content.trim().to_string();
-                if content.is_empty() {
-                    None
-                } else {
-                    Some(content)
-                }
-            }
-            Err(e) => {
-                eprintln!("[editor] Failed to open: {e}");
+        let content = match status {
+            Ok(s) if s.success() => std::fs::read_to_string(&temp_path).ok(),
+            Ok(s) => {
+                eprintln!("[editor] `{editor_cmd}` exited with {s}; nothing loaded");
                 None
             }
+            Err(e) => {
+                eprintln!("[editor] Failed to open `{editor_cmd}`: {e}");
+                None
+            }
+        };
+        let _ = std::fs::remove_file(&temp_path);
+        let content = content?.trim().to_string();
+        if content.is_empty() {
+            None
+        } else {
+            Some(content)
         }
     }
 
@@ -1486,7 +1512,11 @@ impl Repl {
             }
             "/editor" => {
                 let seed = if rest.is_empty() { None } else { Some(rest) };
-                match self.open_external_editor(seed).await {
+                let tui = match &out {
+                    ReplOutput::Tui(st) => Some(*st),
+                    ReplOutput::Stdio => None,
+                };
+                match self.open_external_editor(seed, tui).await {
                     Some(text) if !text.is_empty() => {
                         if let ReplOutput::Tui(st) = out {
                             if let Ok(mut g) = st.lock() {
@@ -2804,9 +2834,88 @@ fn parse_permission_mode(raw: &str) -> Option<PermissionMode> {
     }
 }
 
+/// Ask the UI thread for the terminal and wait until it has let go (up to 3 s).
+async fn release_terminal(st: &Arc<Mutex<TuiSessionState>>) -> bool {
+    if let Ok(mut g) = st.lock() {
+        g.terminal_requested = true;
+        g.mark_dirty();
+    }
+    for _ in 0..150 {
+        if st.lock().map(|g| g.terminal_released).unwrap_or(false) {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    if let Ok(mut g) = st.lock() {
+        g.terminal_requested = false;
+    }
+    false
+}
+
+/// Give the terminal back to the UI thread and wait until it has taken it (up to 3 s).
+async fn reclaim_terminal(st: &Arc<Mutex<TuiSessionState>>) {
+    if let Ok(mut g) = st.lock() {
+        g.terminal_requested = false;
+    }
+    for _ in 0..150 {
+        if !st.lock().map(|g| g.terminal_released).unwrap_or(false) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn new_state() -> TuiSessionState {
+        TuiSessionState::new(
+            "s".into(),
+            "m".into(),
+            "a".into(),
+            "p".into(),
+            std::env::temp_dir(),
+        )
+    }
+
+    #[tokio::test]
+    async fn the_terminal_is_handed_over_and_taken_back() {
+        let st = Arc::new(Mutex::new(new_state()));
+        // Stand-in for the UI thread: acknowledge a request, then wait for the give-back.
+        let ui = {
+            let st = st.clone();
+            std::thread::spawn(move || {
+                loop {
+                    {
+                        let mut g = st.lock().unwrap();
+                        if g.terminal_requested && !g.terminal_released {
+                            g.terminal_released = true;
+                            break;
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                while st.lock().unwrap().terminal_requested {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                st.lock().unwrap().terminal_released = false;
+            })
+        };
+        assert!(release_terminal(&st).await);
+        assert!(st.lock().unwrap().terminal_released);
+        reclaim_terminal(&st).await;
+        ui.join().unwrap();
+        let g = st.lock().unwrap();
+        assert!(!g.terminal_requested && !g.terminal_released);
+    }
+
+    #[tokio::test]
+    async fn an_unresponsive_ui_does_not_block_the_editor_forever() {
+        let st = Arc::new(Mutex::new(new_state()));
+        assert!(!release_terminal(&st).await);
+        assert!(!st.lock().unwrap().terminal_requested);
+    }
 
     #[test]
     fn parses_permission_aliases() {
