@@ -126,7 +126,8 @@ Rules:
 * Each guest call: 5 s wall clock (40 s for `login` calls) (epoch interruption), 256 MiB memory.
 * stdout/stderr are discarded; use `host.log`. No sockets: HTTP goes through
   `host.http-request`, any http(s) host unless `capabilities.network` lists hosts (or is `[]`), 8 MiB response cap, no redirects.
-* Filesystem and env access only as granted by the manifest.
+* Filesystem and env access only as granted by the manifest. `fs_read` / `fs_write` grant
+  **directories** (preopened for the plugin), not single files; grant the parent directory.
 * A plugin that fails to verify, compile or instantiate is skipped with a warning.
 * Failures at call time: `auth` fails closed (provider is not built), `subagent` and
   `agent.before-tool-use` deny, `agent.transform-system-prompt` and `cosmetic` fall back to

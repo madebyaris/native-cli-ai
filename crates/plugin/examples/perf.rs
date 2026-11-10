@@ -1,9 +1,11 @@
 //! Hook latency benchmark: `cargo run --release -p nca-plugin --example perf -- [spin]`.
 //!
 //! Uses whatever plugins `NCA_PLUGIN_HOME` (or `~/.nca/plugins`) has installed.
-//! With `spin`, also times the sandbox timeout / memory cap. That needs the
-//! `examples/plugin-spin` fixture installed first: `nca add examples/plugin-spin --yes`
-//! (use a throwaway `NCA_PLUGIN_HOME`; it is a test fixture, not a plugin to keep).
+//! `perf -- spin loop` and `perf -- spin hog` instead time one sandbox case each (the wall-clock
+//! timeout and the memory cap) and skip the normal benchmark. Run them as separate processes: a
+//! trapped instance is poisoned, so a second case in the same process would never run. They need
+//! the `examples/plugin-spin` fixture installed first, into a throwaway plugin home:
+//! `NCA_PLUGIN_HOME=/tmp/spin-home examples/plugin-spin/install.sh target/debug/nca`.
 
 use nca_common::config::{NcaConfig, ProviderKind};
 use nca_plugin::{SpawnRequest, ThemeEntries};
@@ -37,7 +39,14 @@ fn bench<T>(name: &str, mut setup: impl FnMut() -> T, mut f: impl FnMut(T)) {
 }
 
 fn main() {
-    let spin = std::env::args().any(|a| a == "spin");
+    let args: Vec<String> = std::env::args().collect();
+    let spin = args.iter().any(|a| a == "spin");
+    let spin_case = args
+        .iter()
+        .skip_while(|a| *a != "spin")
+        .nth(1)
+        .cloned()
+        .unwrap_or_else(|| "loop".into());
     let ws = std::env::current_dir().unwrap();
 
     let t = Instant::now();
@@ -48,6 +57,24 @@ fn main() {
         nca_plugin::loaded_names(),
         load.as_secs_f64() * 1e3
     );
+
+    if spin {
+        // The fixture's agent hook never returns for these tool names; time how the sandbox
+        // ends the call, then show that the poisoned instance refuses later calls.
+        let t = Instant::now();
+        let d = nca_plugin::before_tool_use(&spin_case, "{}");
+        println!(
+            "sandbox `{spin_case}`: returned after {:.2} s -> {d:?}",
+            t.elapsed().as_secs_f64()
+        );
+        let t = Instant::now();
+        let d = nca_plugin::before_tool_use("execute_bash", "{}");
+        println!(
+            "call after the trap: {:.4} s -> {d:?}",
+            t.elapsed().as_secs_f64()
+        );
+        return;
+    }
 
     let mut config = NcaConfig::default();
     config.provider.default = ProviderKind::Anthropic;
@@ -111,21 +138,4 @@ fn main() {
             black_box(nca_plugin::theme(t));
         },
     );
-
-    if spin {
-        for tool in ["loop", "hog"] {
-            let t = Instant::now();
-            let d = nca_plugin::before_tool_use(tool, "{}");
-            println!(
-                "sandbox `{tool}`: returned after {:.2} s -> {d:?}",
-                t.elapsed().as_secs_f64()
-            );
-        }
-        let t = Instant::now();
-        let d = nca_plugin::before_tool_use("bash", "{}");
-        println!(
-            "call after trap: {:.2} s -> {d:?}",
-            t.elapsed().as_secs_f64()
-        );
-    }
 }

@@ -192,7 +192,8 @@ impl Manifest {
     }
 }
 
-/// A file grant must be absolute or start with `$HOME`, `$NCA_PLUGIN_DATA` or `$WORKSPACE`
+/// A file grant is a directory (it is preopened for the plugin, so a single file cannot be
+/// granted). It must be absolute or start with `$HOME`, `$NCA_PLUGIN_DATA` or `$WORKSPACE`
 /// (the forms the host can expand), and must not climb with `..`. Checked at install time so a
 /// bad grant is rejected before approval instead of silently disabling the plugin later.
 fn grant_path(raw: &str, field: &str) -> Result<(), PluginError> {
@@ -206,7 +207,7 @@ fn grant_path(raw: &str, field: &str) -> Result<(), PluginError> {
         .any(|c| matches!(c, Component::ParentDir));
     if raw.is_empty() || !rooted || climbs {
         return Err(PluginError::Manifest(format!(
-            "{field} entry `{raw}` must be an absolute path or start with $HOME / $NCA_PLUGIN_DATA / $WORKSPACE, without `..`"
+            "{field} entry `{raw}` must be a directory: an absolute path or one starting with $HOME / $NCA_PLUGIN_DATA / $WORKSPACE, without `..`"
         )));
     }
     Ok(())

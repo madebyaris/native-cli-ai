@@ -7,3 +7,7 @@ description = "Test fixture: before-tool-use never returns, to exercise the sand
 
 [hooks]
 agent = true
+
+[capabilities]
+# A test fixture that only burns time and memory: it needs nothing from the host.
+network = []

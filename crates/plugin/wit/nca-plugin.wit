@@ -2,6 +2,7 @@
 ///
 /// A plugin is a WASM component targeting the `plugin` world. Every export
 /// must be present, and a hook the manifest does not declare is never called.
+/// `capabilities.fs_read` / `fs_write` grant directories (they are preopened for the plugin), not single files.
 /// How a hook defers depends on the hook:
 ///   * `auth.resolve-credential`: return `none`, or call `host.next-credential`.
 ///   * `subagent.before-spawn`: the first plugin that declares the hook decides. To let the
