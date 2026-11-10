@@ -101,10 +101,47 @@ interface cosmetic {
     resolve-theme: func() -> result<theme, string>;
 }
 
+/// Interactive sign-in and re-login for plugins that own a credential
+/// (for example an OAuth subscription token). Optional: a plugin that does not
+/// need it targets the plain `plugin` world and nca never calls these.
+interface login {
+    record challenge {
+        /// Page the user opens to approve access.
+        url: string,
+        /// Text to show next to the URL.
+        instructions: string,
+        /// `paste-code`: the user pastes what the page shows. `local-callback`:
+        /// nca passes the callback query string to `complete-login`.
+        mode: string,
+    }
+
+    /// Providers this plugin can sign in to (for example `anthropic`).
+    providers: func() -> list<string>;
+
+    /// Start a sign-in. The plugin keeps its own pending state (PKCE verifier and so on).
+    begin-login: func(provider: string) -> result<challenge, string>;
+
+    /// Finish the sign-in with the pasted code or callback query string.
+    complete-login: func(provider: string, input: string) -> result<_, string>;
+
+    /// The provider rejected the credential (HTTP 401/403). `some(key)`: a fresh
+    /// credential, retry once. `none`: cannot recover, the user must sign in again.
+    /// `err`: a hard failure with a message. A dropped connection is NOT an auth
+    /// failure and is never reported here.
+    on-auth-failure: func(provider: string, status: u16) -> result<option<string>, string>;
+}
+
 world plugin {
     import host;
     export auth;
     export subagent;
     export agent;
     export cosmetic;
+}
+
+/// Same as `plugin`, plus the optional `login` interface. Declare `login = true`
+/// under `[hooks]` in the manifest.
+world plugin-login {
+    include plugin;
+    export login;
 }

@@ -9,6 +9,7 @@ four areas of nca by calling back into the core implementation:
 | `subagent` | Rewrite or deny a `spawn_subagent` request | `host.next-spawn-decision` |
 | `agent` | Rewrite the system prompt; allow/deny each tool call | prompt is passed in; tool calls run after the built-in approval flow |
 | `cosmetic` | Recolour TUI tokens | `host.next-theme` (the built-in palette) |
+| `login` (optional) | Interactive sign-in, refresh on 401/403, re-login | none: used only by `/login` and the provider's auth-failure path |
 
 ## Install
 
@@ -62,7 +63,9 @@ tenant = "acme"
 
 The interface is `crates/plugin/wit/nca-plugin.wit` (package `nca:plugin@1.0.0`, world
 `plugin`). A component must export all four hook interfaces; return `none` / `allow` for the
-ones it does not care about. See `examples/plugin-template` (Rust, `wasm32-wasip2`):
+ones it does not care about. A plugin that also needs sign-in targets the world `plugin-login`
+(the same plus `login`) and sets `login = true` under `[hooks]`; plugins built against `plugin`
+keep working unchanged. See `examples/plugin-template` (Rust, `wasm32-wasip2`):
 
 ```bash
 rustup target add wasm32-wasip2
@@ -74,9 +77,35 @@ Chaining: plugins are ordered by `priority`, then name. A hook call enters the f
 that declared the hook; its `host.next-*` import runs the rest of the chain and finally core.
 Returning `none` from `auth.resolve-credential` passes to the next plugin.
 
+## Sign-in and re-login (`login` hook)
+
+For plugins that own a credential, such as an OAuth subscription token. The interface
+(`nca:plugin/login`) has four functions:
+
+| Function | Called when | Returns |
+| --- | --- | --- |
+| `providers` | nca needs to know who can sign in | provider ids, e.g. `anthropic` |
+| `begin-login(provider)` | the user runs `/login` | `{ url, instructions, mode }`; nca prints the URL and tries to open the browser |
+| `complete-login(provider, input)` | the user runs `/login <code>` | `ok`, or an error shown to the user |
+| `on-auth-failure(provider, status)` | the provider answered 401/403 to a credential from this plugin | `some(key)`: retry once with it; `none`: sign in again; `err`: could not try |
+
+Rules:
+
+* Keep PKCE state and tokens in the plugin's own data directory: `fs_write = ["$NCA_PLUGIN_DATA"]`,
+  and the plugin sees that path in the `NCA_PLUGIN_DATA` environment variable.
+* Put endpoints and client ids in `[config]` and read them with `host.config-get`, so a change on
+  the provider's side needs no rebuild.
+* Sign-in calls get 40 s instead of 5 s, because they talk to the network.
+* A dropped connection is not an auth failure. Make `on-auth-failure` return `err` when the
+  refresh request itself fails (nca then reports "could not refresh", and the user stays signed in).
+  Return `none` only when the server refused the refresh token. After `none`, or when the
+  refreshed credential is rejected as well, nca stops the turn with `signed out: ...` and the TUI
+  says to run `/login`. The session is kept.
+* `examples/plugin-template` is a runnable skeleton of all four functions.
+
 ## Limits and failure policy
 
-* Each guest call: 5 s wall clock (epoch interruption), 256 MiB memory.
+* Each guest call: 5 s wall clock (40 s for `login` calls) (epoch interruption), 256 MiB memory.
 * stdout/stderr are discarded; use `host.log`. No sockets: HTTP goes through
   `host.http-request`, any http(s) host unless `capabilities.network` lists hosts (or is `[]`), 8 MiB response cap, no redirects.
 * Filesystem and env access only as granted by the manifest.

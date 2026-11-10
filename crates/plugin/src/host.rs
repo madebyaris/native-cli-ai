@@ -10,14 +10,19 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
+use wasmtime::component::{
+    Component, ComponentType, HasSelf, Lift, Linker, Lower, ResourceTable, TypedFunc,
+};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::error::PluginError;
 use crate::manifest::{Capabilities, Hooks, Manifest};
 use crate::registry::Entry;
-use crate::types::{Credential, SpawnDecision, SpawnRequest, ThemeEntries, ToolDecision};
+use crate::types::{
+    AuthRecovery, Credential, LoginChallenge, SpawnDecision, SpawnRequest, ThemeEntries,
+    ToolDecision,
+};
 
 mod bindings {
     wasmtime::component::bindgen!({
@@ -31,6 +36,8 @@ use bindings::nca::plugin::{host as wit_host, types as wit};
 
 /// Wall-clock budget for one guest call (epoch interruption).
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
+/// Sign-in calls do a token exchange over HTTP, so they get a longer budget.
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(40);
 const EPOCH_TICK: Duration = Duration::from_millis(50);
 const MAX_MEMORY_BYTES: usize = 256 * 1024 * 1024;
 const MAX_HTTP_BODY: u64 = 8 * 1024 * 1024;
@@ -240,6 +247,47 @@ fn http_request(
 struct Instance {
     store: Store<HostState>,
     bindings: Bindings,
+    /// Present only when the component also exports `nca:plugin/login` (the
+    /// `plugin-login` world). Older plugins do not, and keep working.
+    login: Option<LoginFuncs>,
+}
+
+/// Wire form of `login.challenge`.
+#[derive(ComponentType, Lift, Lower, Clone, Debug)]
+#[component(record)]
+struct WireChallenge {
+    url: String,
+    instructions: String,
+    mode: String,
+}
+
+struct LoginFuncs {
+    providers: TypedFunc<(), (Vec<String>,)>,
+    begin: TypedFunc<(String,), (Result<WireChallenge, String>,)>,
+    complete: TypedFunc<(String, String), (Result<(), String>,)>,
+    on_failure: TypedFunc<(String, u16), (FailureReply,)>,
+}
+
+type FailureReply = Result<Option<String>, String>;
+
+const LOGIN_INTERFACE: &str = "nca:plugin/login@1.0.0";
+
+fn login_funcs(
+    instance: &wasmtime::component::Instance,
+    store: &mut Store<HostState>,
+) -> Option<LoginFuncs> {
+    let iface = instance.get_export_index(&mut *store, None, LOGIN_INTERFACE)?;
+    let mut idx = |name: &str| instance.get_export_index(&mut *store, Some(&iface), name);
+    let providers = idx("providers")?;
+    let begin = idx("begin-login")?;
+    let complete = idx("complete-login")?;
+    let on_failure = idx("on-auth-failure")?;
+    Some(LoginFuncs {
+        providers: instance.get_typed_func(&mut *store, providers).ok()?,
+        begin: instance.get_typed_func(&mut *store, begin).ok()?,
+        complete: instance.get_typed_func(&mut *store, complete).ok()?,
+        on_failure: instance.get_typed_func(&mut *store, on_failure).ok()?,
+    })
 }
 
 pub(crate) struct Node {
@@ -255,25 +303,57 @@ impl Node {
         defaults: &Defaults,
         f: impl FnOnce(&mut Bindings, &mut Store<HostState>) -> wasmtime::Result<R> + Send,
     ) -> Result<R, PluginError> {
+        self.run(defaults, CALL_TIMEOUT, |inst| {
+            let Instance {
+                store, bindings, ..
+            } = inst;
+            f(bindings, store)
+        })
+    }
+
+    /// Call the optional `login` interface. Errors when the component lacks it.
+    fn call_login<R: Send>(
+        &self,
+        f: impl FnOnce(&LoginFuncs, &mut Store<HostState>) -> wasmtime::Result<R> + Send,
+    ) -> Result<R, PluginError> {
+        let name = self.name.clone();
+        self.run(&Defaults::default(), LOGIN_TIMEOUT, move |inst| {
+            let Instance { store, login, .. } = inst;
+            match login {
+                Some(login) => f(login, store),
+                None => Err(wasmtime::Error::msg(format!(
+                    "plugin `{name}` does not export the `login` interface"
+                ))),
+            }
+        })
+    }
+
+    fn run<R: Send>(
+        &self,
+        defaults: &Defaults,
+        timeout: Duration,
+        f: impl FnOnce(&mut Instance) -> wasmtime::Result<R> + Send,
+    ) -> Result<R, PluginError> {
         let mut guard = self
             .instance
             .lock()
             .map_err(|_| rt_err(&self.name, "plugin instance poisoned by an earlier trap"))?;
-        let Instance { store, bindings } = &mut *guard;
-        store.data_mut().defaults = defaults.clone();
-        store.set_epoch_deadline((CALL_TIMEOUT.as_millis() / EPOCH_TICK.as_millis()) as u64);
+        let inst = &mut *guard;
+        inst.store.data_mut().defaults = defaults.clone();
+        inst.store
+            .set_epoch_deadline((timeout.as_millis() / EPOCH_TICK.as_millis()) as u64);
         // wasmtime-wasi blocks on its own runtime for filesystem access, which panics if
         // the current thread is already driving a tokio runtime. Run the guest on a
         // plain scoped thread in that case.
         let out = if tokio::runtime::Handle::try_current().is_ok() {
             std::thread::scope(|scope| {
                 scope
-                    .spawn(|| f(bindings, store))
+                    .spawn(|| f(inst))
                     .join()
                     .unwrap_or_else(|_| Err(wasmtime::Error::msg("plugin call panicked")))
             })
         } else {
-            f(bindings, store)
+            f(inst)
         };
         out.map_err(|e| rt_err(&self.name, e))
     }
@@ -434,6 +514,73 @@ impl PluginSet {
         )
     }
 
+    /// Plugins that declared `login`, with the providers each can sign in to.
+    pub(crate) fn login_plugins(&self) -> Vec<(String, Vec<String>)> {
+        self.order
+            .iter()
+            .filter(|n| n.hooks.login)
+            .filter_map(|n| {
+                let providers = n.call_login(|l, s| l.providers.call(s, ())).ok()?.0;
+                Some((n.name.clone(), providers))
+            })
+            .collect()
+    }
+
+    fn login_node(&self, provider: &str) -> Result<&Arc<Node>, PluginError> {
+        self.order
+            .iter()
+            .filter(|n| n.hooks.login)
+            .find(|n| {
+                n.call_login(|l, s| l.providers.call(s, ()))
+                    .is_ok_and(|(ps,)| ps.iter().any(|p| p == provider))
+            })
+            .ok_or_else(|| PluginError::Runtime {
+                plugin: "login".into(),
+                message: format!("no installed plugin can sign in to `{provider}`"),
+            })
+    }
+
+    pub(crate) fn begin_login(&self, provider: &str) -> Result<LoginChallenge, PluginError> {
+        let node = self.login_node(provider)?;
+        let p = provider.to_string();
+        let (out,) = node.call_login(move |l, s| l.begin.call(s, (p,)))?;
+        out.map(|c| LoginChallenge {
+            plugin: node.name.clone(),
+            url: c.url,
+            instructions: c.instructions,
+            paste_code: c.mode != "local-callback",
+        })
+        .map_err(|message| PluginError::Runtime {
+            plugin: node.name.clone(),
+            message,
+        })
+    }
+
+    pub(crate) fn complete_login(&self, provider: &str, input: &str) -> Result<(), PluginError> {
+        let node = self.login_node(provider)?;
+        let (p, i) = (provider.to_string(), input.to_string());
+        let (out,) = node.call_login(move |l, s| l.complete.call(s, (p, i)))?;
+        out.map_err(|message| PluginError::Runtime {
+            plugin: node.name.clone(),
+            message,
+        })
+    }
+
+    pub(crate) fn on_auth_failure(&self, provider: &str, status: u16) -> AuthRecovery {
+        let Ok(node) = self.login_node(provider) else {
+            return AuthRecovery::NoPlugin;
+        };
+        let p = provider.to_string();
+        match node.call_login(move |l, s| l.on_failure.call(s, (p, status))) {
+            Ok((Ok(Some(key)),)) => AuthRecovery::Refreshed(key),
+            Ok((Ok(None),)) => AuthRecovery::LoginRequired(
+                "the saved sign-in was rejected; run /login to sign in again".into(),
+            ),
+            Ok((Err(message),)) => AuthRecovery::Unavailable(message),
+            Err(e) => AuthRecovery::Unavailable(e.to_string()),
+        }
+    }
+
     pub(crate) fn before_spawn(&self, request: SpawnRequest) -> Result<SpawnDecision, PluginError> {
         chain_spawn(self.head.as_ref(), request, &Defaults::default())
     }
@@ -507,6 +654,8 @@ fn build_wasi(
     // Stdio is not inherited (null streams); plugins log through `host.log`.
     let mut builder = WasiCtxBuilder::new();
     std::fs::create_dir_all(data_dir).map_err(|e| rt_err(name, e))?;
+    // The plugin's private data directory (the same path `$NCA_PLUGIN_DATA` expands to).
+    builder.env("NCA_PLUGIN_DATA", data_dir.to_string_lossy());
     for (paths, perms) in [
         (&caps.fs_read, FsPerms::ReadOnly),
         (&caps.fs_write, FsPerms::ReadWrite),
@@ -533,12 +682,10 @@ fn instantiate(
     let engine = engine()?;
     let component = Component::new(engine, wasm).map_err(|e| rt_err(&name, e))?;
     let linker = new_linker()?;
-    let pre = PluginPre::new(
-        linker
-            .instantiate_pre(&component)
-            .map_err(|e| rt_err(&name, e))?,
-    )
-    .map_err(|e| rt_err(&name, e))?;
+    let instance_pre = linker
+        .instantiate_pre(&component)
+        .map_err(|e| rt_err(&name, e))?;
+    PluginPre::new(instance_pre.clone()).map_err(|e| rt_err(&name, e))?;
 
     let state = HostState {
         wasi: build_wasi(&manifest.capabilities, &entry.data_dir(), workspace, &name)?,
@@ -557,12 +704,31 @@ fn instantiate(
     let mut store = Store::new(engine, state);
     store.limiter(|s| &mut s.limits);
     store.set_epoch_deadline((CALL_TIMEOUT.as_millis() / EPOCH_TICK.as_millis()) as u64);
-    let bindings = pre.instantiate(&mut store).map_err(|e| rt_err(&name, e))?;
+    let raw = instance_pre
+        .instantiate(&mut store)
+        .map_err(|e| rt_err(&name, e))?;
+    let bindings = Bindings::new(&mut store, &raw).map_err(|e| rt_err(&name, e))?;
+    let login = if manifest.hooks.login {
+        let funcs = login_funcs(&raw, &mut store);
+        if funcs.is_none() {
+            return Err(rt_err(
+                &name,
+                "manifest declares `login = true` but the component does not export `nca:plugin/login@1.0.0` (build it against the `plugin-login` world)",
+            ));
+        }
+        funcs
+    } else {
+        None
+    };
     Ok(Node {
         name,
         hooks: manifest.hooks.clone(),
         next,
-        instance: Mutex::new(Instance { store, bindings }),
+        instance: Mutex::new(Instance {
+            store,
+            bindings,
+            login,
+        }),
     })
 }
 

@@ -29,3 +29,28 @@ pub enum ToolDecision {
 
 /// `(token, "#rrggbb")` pairs.
 pub type ThemeEntries = Vec<(String, String)>;
+
+/// How to start a sign-in, as returned by a plugin's `login.begin-login`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginChallenge {
+    pub plugin: String,
+    pub url: String,
+    pub instructions: String,
+    /// `true`: the user pastes the code the page shows. `false`: a local callback
+    /// passes the query string.
+    pub paste_code: bool,
+}
+
+/// Result of telling a plugin its credential was rejected (HTTP 401/403).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthRecovery {
+    /// No installed plugin owns the credential for this provider.
+    NoPlugin,
+    /// A fresh credential; retry the request once.
+    Refreshed(String),
+    /// Recovery is impossible; show the message and start the sign-in again.
+    LoginRequired(String),
+    /// The plugin could not try (offline, timeout) or failed. Not a sign-out:
+    /// report the error and let the user retry.
+    Unavailable(String),
+}

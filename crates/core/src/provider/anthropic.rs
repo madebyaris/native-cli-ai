@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use nca_common::config::{AnthropicConfig, NcaConfig};
+use nca_common::config::{AnthropicConfig, NcaConfig, ProviderKind};
 use nca_common::message::Message;
 use nca_common::tool::ToolDefinition;
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -13,8 +13,14 @@ pub struct AnthropicProvider {
     client: reqwest::Client,
     config: AnthropicConfig,
     oauth: bool,
+    /// Subscription token a plugin handed back after a 401/403; used instead of the one the client was built with.
+    refreshed_key: std::sync::Mutex<Option<String>>,
     max_tokens: u32,
 }
+
+/// Prefix of the `AuthError` message when the plugin cannot recover the sign-in. The UI
+/// matches it to start the login flow again.
+pub const SIGNED_OUT_PREFIX: &str = "signed out: ";
 
 const OAUTH_BETA: &str = "oauth-2025-04-20";
 const OAUTH_USER_AGENT: &str = "claude-cli/2.1.280 (external, cli)";
@@ -105,8 +111,23 @@ impl AnthropicProvider {
             client,
             config: anthropic,
             oauth,
+            refreshed_key: std::sync::Mutex::new(None),
             max_tokens: config.model.max_tokens,
         })
+    }
+
+    async fn send(&self, body: &serde_json::Value) -> Result<reqwest::Response, ProviderError> {
+        let mut req = self.client.post(self.endpoint()).json(body);
+        let key = self
+            .refreshed_key
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(key) = key {
+            // Per-request headers override the client's defaults.
+            req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {key}"));
+        }
+        req.send().await.map_err(map_send_error)
     }
 
     fn endpoint(&self) -> String {
@@ -141,15 +162,44 @@ impl Provider for AnthropicProvider {
             with_oauth_system(&mut body);
         }
 
-        let response = self
-            .client
-            .post(self.endpoint())
-            .json(&body)
-            .send()
-            .await
-            .map_err(map_send_error)?;
+        let mut response = self.send(&body).await?;
+        let mut status = response.status();
 
-        let status = response.status();
+        // A subscription token that an auth plugin supplied was rejected: let the plugin
+        // refresh it and retry once. A dropped connection is not an auth failure and never
+        // gets here (it fails in `send`), so a flaky network does not sign the user out.
+        if self.oauth && matches!(status.as_u16(), 401 | 403) {
+            let code = status.as_u16();
+            let recovery = tokio::task::spawn_blocking(move || {
+                nca_plugin::on_auth_failure(ProviderKind::Anthropic, code)
+            })
+            .await
+            .unwrap_or_else(|e| nca_plugin::AuthRecovery::Unavailable(e.to_string()));
+            match recovery {
+                nca_plugin::AuthRecovery::NoPlugin => {}
+                nca_plugin::AuthRecovery::Refreshed(key) => {
+                    *self.refreshed_key.lock().unwrap_or_else(|e| e.into_inner()) = Some(key);
+                    response = self.send(&body).await?;
+                    status = response.status();
+                }
+                nca_plugin::AuthRecovery::Unavailable(message) => {
+                    return Err(ProviderError::AuthError(format!(
+                        "could not refresh the Claude sign-in ({message}); check your connection and try again"
+                    )));
+                }
+                nca_plugin::AuthRecovery::LoginRequired(message) => {
+                    return Err(ProviderError::AuthError(format!(
+                        "{SIGNED_OUT_PREFIX}{message}. Run /login to sign in again."
+                    )));
+                }
+            }
+            if matches!(status.as_u16(), 401 | 403) && self.oauth {
+                return Err(ProviderError::AuthError(format!(
+                    "{SIGNED_OUT_PREFIX}the refreshed token was rejected too. Run /login to sign in again."
+                )));
+            }
+        }
+
         if !status.is_success() {
             let headers = response.headers().clone();
             let body_text = response.text().await.unwrap_or_default();

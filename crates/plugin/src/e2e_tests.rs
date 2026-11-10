@@ -8,7 +8,7 @@ use std::process::Command;
 use crate::host::PluginSet;
 use crate::install::{self, InstallOptions};
 use crate::registry::Registry;
-use crate::types::{Credential, SpawnDecision, SpawnRequest, ToolDecision};
+use crate::types::{AuthRecovery, Credential, SpawnDecision, SpawnRequest, ToolDecision};
 
 fn example_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugin-template")
@@ -79,6 +79,7 @@ fn install_load_and_run_every_hook() {
         seen.borrow().as_slice(),
         [
             "network: any host (default)",
+            "write files: $NCA_PLUGIN_DATA",
             "environment: EXAMPLE_API_KEY"
         ]
     );
@@ -158,6 +159,45 @@ fn install_load_and_run_every_hook() {
     assert!(theme.contains(&("assistant".into(), "#f97316".into())));
     assert!(theme.contains(&("bg".into(), "#000000".into())));
     assert!(!theme.contains(&("assistant".into(), "#aaaaaa".into())));
+
+    // login: sign in, use the saved token, refresh once on 401, then ask for re-login.
+    unsafe { std::env::remove_var("EXAMPLE_API_KEY") };
+    assert_eq!(
+        set.login_plugins(),
+        vec![("example".to_string(), vec!["anthropic".to_string()])]
+    );
+    let challenge = set.begin_login("anthropic").unwrap();
+    assert_eq!(challenge.plugin, "example");
+    assert!(challenge.paste_code && challenge.url.starts_with("https://"));
+    assert!(
+        set.begin_login("openai").is_err(),
+        "no plugin signs in to openai"
+    );
+    let err = set.complete_login("anthropic", "bogus").unwrap_err();
+    assert!(err.to_string().contains("not valid"), "{err}");
+    // Before signing in there is nothing to refresh.
+    assert!(matches!(
+        set.on_auth_failure("anthropic", 401),
+        AuthRecovery::LoginRequired(_)
+    ));
+    set.complete_login("anthropic", "code-abc").unwrap();
+    let got = set.resolve_credential("anthropic", None).unwrap().unwrap();
+    assert_eq!(got.api_key.as_deref(), Some("token-code-abc"));
+    assert_eq!(
+        set.on_auth_failure("anthropic", 401),
+        AuthRecovery::Refreshed("token-refreshed-from-refresh-1".into())
+    );
+    let got = set.resolve_credential("anthropic", None).unwrap().unwrap();
+    assert_eq!(
+        got.api_key.as_deref(),
+        Some("token-refreshed-from-refresh-1")
+    );
+    // The refresh token was spent: the next rejection means sign in again.
+    assert!(matches!(
+        set.on_auth_failure("anthropic", 403),
+        AuthRecovery::LoginRequired(_)
+    ));
+    assert_eq!(set.on_auth_failure("openai", 401), AuthRecovery::NoPlugin);
 
     // Tampering with the installed wasm after approval is detected; plugin is skipped.
     let wasm_path = entry.dir.join("plugin.wasm");

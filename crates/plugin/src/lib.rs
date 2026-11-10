@@ -22,7 +22,10 @@ use nca_common::config::{NcaConfig, ProviderKind};
 
 pub use error::PluginError;
 pub use host::PluginSet;
-pub use types::{Credential, SpawnDecision, SpawnRequest, ThemeEntries, ToolDecision};
+pub use types::{
+    AuthRecovery, Credential, LoginChallenge, SpawnDecision, SpawnRequest, ThemeEntries,
+    ToolDecision,
+};
 
 static GLOBAL: OnceLock<PluginSet> = OnceLock::new();
 
@@ -48,7 +51,8 @@ pub fn loaded_names() -> Vec<String> {
     GLOBAL.get().map(|s| s.names().to_vec()).unwrap_or_default()
 }
 
-fn provider_name(kind: ProviderKind) -> &'static str {
+/// The provider id plugins see (`anthropic`, `openai`, ...).
+pub fn provider_name(kind: ProviderKind) -> &'static str {
     match kind {
         ProviderKind::MiniMax => "minimax",
         ProviderKind::OpenAi => "openai",
@@ -111,6 +115,38 @@ pub fn plugin_key_status(config: &NcaConfig, kind: ProviderKind) -> Option<Resul
 /// Whether an installed auth plugin currently supplies an API key for `kind`.
 pub fn plugin_supplies_key(config: &NcaConfig, kind: ProviderKind) -> bool {
     matches!(plugin_key_status(config, kind), Some(Ok(())))
+}
+
+/// Plugins that can sign a provider in, as `(plugin, providers)`. UI use only.
+pub fn login_plugins() -> Vec<(String, Vec<String>)> {
+    active().map(PluginSet::login_plugins).unwrap_or_default()
+}
+
+/// Start a sign-in for `kind` (for example `/login`).
+pub fn begin_login(kind: ProviderKind) -> Result<LoginChallenge, PluginError> {
+    let set = active().ok_or_else(|| PluginError::Runtime {
+        plugin: "login".into(),
+        message: "no plugins are loaded".into(),
+    })?;
+    set.begin_login(provider_name(kind))
+}
+
+/// Finish a sign-in with the code the user pasted (or the callback query string).
+pub fn complete_login(kind: ProviderKind, input: &str) -> Result<(), PluginError> {
+    let set = active().ok_or_else(|| PluginError::Runtime {
+        plugin: "login".into(),
+        message: "no plugins are loaded".into(),
+    })?;
+    set.complete_login(provider_name(kind), input)
+}
+
+/// The provider answered 401/403 to a credential a plugin supplied. Lets the
+/// plugin refresh it. Network failures are not auth failures: do not call this for them.
+pub fn on_auth_failure(kind: ProviderKind, status: u16) -> AuthRecovery {
+    match active() {
+        Some(set) => set.on_auth_failure(provider_name(kind), status),
+        None => AuthRecovery::NoPlugin,
+    }
 }
 
 /// Subagent hook. `Deny` must stop the spawn; `Allow` carries the request to use.

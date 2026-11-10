@@ -1388,6 +1388,12 @@ impl TuiSessionState {
                 } else {
                     DisplayBlock::ErrorLine(message.clone())
                 });
+                if lower.contains("signed out:") {
+                    self.blocks.push(DisplayBlock::System(
+                        "↻ Sign-in expired. Run /login to sign in again; your session is kept."
+                            .into(),
+                    ));
+                }
                 if lower.contains("run cancelled") {
                     self.set_busy_state(BusyState::Idle);
                 } else if soft_retry {

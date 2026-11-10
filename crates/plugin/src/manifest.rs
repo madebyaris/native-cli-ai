@@ -48,11 +48,14 @@ pub struct Hooks {
     pub agent: bool,
     #[serde(default)]
     pub cosmetic: bool,
+    /// Interactive sign-in / re-login (`login` interface, `plugin-login` world).
+    #[serde(default)]
+    pub login: bool,
 }
 
 impl Hooks {
     pub fn any(&self) -> bool {
-        self.auth || self.subagent || self.agent || self.cosmetic
+        self.auth || self.subagent || self.agent || self.cosmetic || self.login
     }
 
     pub fn names(&self) -> Vec<&'static str> {
@@ -68,6 +71,9 @@ impl Hooks {
         }
         if self.cosmetic {
             out.push("cosmetic");
+        }
+        if self.login {
+            out.push("login");
         }
         out
     }

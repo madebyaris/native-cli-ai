@@ -185,6 +185,8 @@ pub struct Repl {
     history_path: Option<std::path::PathBuf>,
     agent_profile: AgentProfile,
     current_agent_label: String,
+    /// A sign-in started with `/login` that waits for the code the user pastes.
+    pending_login: Option<ProviderKind>,
 }
 
 impl Repl {
@@ -200,6 +202,7 @@ impl Repl {
             history_path,
             agent_profile,
             current_agent_label,
+            pending_login: None,
         }
     }
 
@@ -1365,6 +1368,25 @@ impl Repl {
             "/login" => {
                 // Subscription-style login: providers whose credentials come from an auth
                 // plugin (for example claude-provider). API-key providers use /connect.
+                let arg = rest.trim();
+                // Step 2: the user pastes the code the approval page showed.
+                if let Some(kind) = self.pending_login
+                    && !arg.is_empty()
+                    && !matches!(arg, "new" | "again")
+                {
+                    self.pending_login = None;
+                    match nca_plugin::complete_login(kind, arg) {
+                        Ok(()) => {
+                            out.println(&format!("[login] signed in to {}", kind.display_name()));
+                            self.apply_provider_in_session(kind, out).await?;
+                        }
+                        Err(e) => out.println(&format!(
+                            "[login] sign-in failed: {e}. Run /login to try again."
+                        )),
+                    }
+                    return Ok(true);
+                }
+
                 let mut chosen = None;
                 let mut notes = Vec::new();
                 for p in ProviderKind::ALL {
@@ -1377,11 +1399,47 @@ impl Repl {
                         None => {}
                     }
                 }
+                // Step 1: start a browser sign-in for a provider whose plugin offers one,
+                // when nothing is signed in yet or the user asks (`/login new`).
+                let can_login = nca_plugin::login_plugins();
+                let loginable = ProviderKind::ALL.into_iter().find(|p| {
+                    can_login
+                        .iter()
+                        .any(|(_, ps)| ps.iter().any(|x| x == nca_plugin::provider_name(*p)))
+                });
+                let wants_new = matches!(arg, "new" | "again");
+                if let Some(kind) = loginable
+                    && (chosen.is_none() || wants_new)
+                {
+                    match nca_plugin::begin_login(kind) {
+                        Ok(c) => {
+                            self.pending_login = Some(kind);
+                            out.println(&format!(
+                                "[login] {} sign-in via plugin `{}`",
+                                kind.display_name(),
+                                c.plugin
+                            ));
+                            out.println(&format!("[login] open: {}", c.url));
+                            out.println(&format!("[login] {}", c.instructions));
+                            if c.paste_code {
+                                out.println("[login] then run: /login <code>");
+                            }
+                            open_in_browser(&c.url);
+                            return Ok(true);
+                        }
+                        Err(e) => notes.push(format!("{}: cannot start sign-in: {e}", kind.display_name())),
+                    }
+                }
                 for note in &notes {
                     out.println(&format!("[login] {note}"));
                 }
                 match chosen {
-                    Some(p) => self.apply_provider_in_session(p, out).await?,
+                    Some(p) => {
+                        if loginable.is_some() {
+                            out.println("[login] use `/login new` to sign in again.");
+                        }
+                        self.apply_provider_in_session(p, out).await?
+                    }
                     None if notes.is_empty() => out.println(
                         "[login] no auth plugin supplies credentials. Install one, e.g. `nca add https://github.com/igun997/claude-provider`, or use /connect for API keys.",
                     ),
@@ -2990,6 +3048,23 @@ fn parse_permission_mode(raw: &str) -> Option<PermissionMode> {
         }
         _ => None,
     }
+}
+
+/// Best-effort: open `url` in the default browser. The URL is also printed, so a
+/// failure (no display, SSH session) is harmless.
+fn open_in_browser(url: &str) {
+    use std::process::{Command, Stdio};
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = Command::new(opener)
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
 }
 
 #[cfg(test)]
