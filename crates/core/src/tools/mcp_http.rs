@@ -3,11 +3,11 @@
 //! Each JSON-RPC message is one POST to the server's endpoint. The reply is either a JSON body or
 //! an SSE stream, and the server may issue an `Mcp-Session-Id` that later requests must echo.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nca_common::config::McpServerConfig;
 use reqwest::StatusCode;
-use reqwest::blocking::{Client, Response};
+use reqwest::blocking::{Client, ClientBuilder, RequestBuilder, Response};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 
@@ -27,6 +27,7 @@ pub(super) struct McpHttpClient {
     session_id: Option<String>,
     protocol_version: Option<String>,
     next_id: u64,
+    deadline: Option<Instant>,
 }
 
 impl McpHttpClient {
@@ -59,24 +60,49 @@ impl McpHttpClient {
             })?;
             headers.insert(AUTHORIZATION, value);
         }
-        let client = Client::builder()
+        Self::with_client(&server.name, url, headers, Client::builder(), None)
+    }
+
+    pub(super) fn connect_anonymous(
+        server_name: &str,
+        url: &str,
+        timeout: Duration,
+    ) -> Result<Self, String> {
+        let builder = Client::builder()
+            .user_agent(concat!("nca/", env!("CARGO_PKG_VERSION")))
+            .redirect(reqwest::redirect::Policy::none());
+        Self::with_client(
+            server_name,
+            url,
+            HeaderMap::new(),
+            builder,
+            Instant::now().checked_add(timeout),
+        )
+    }
+
+    fn with_client(
+        server_name: &str,
+        url: &str,
+        headers: HeaderMap,
+        builder: ClientBuilder,
+        deadline: Option<Instant>,
+    ) -> Result<Self, String> {
+        let client = builder
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             .build()
             .map_err(|err| {
-                format!(
-                    "failed to build HTTP client for MCP server `{}`: {err}",
-                    server.name
-                )
+                format!("failed to build HTTP client for MCP server `{server_name}`: {err}")
             })?;
         Ok(Self {
-            server_name: server.name.clone(),
+            server_name: server_name.to_string(),
             url: url.to_string(),
             client,
             headers,
             session_id: None,
             protocol_version: None,
             next_id: 1,
+            deadline,
         })
     }
 
@@ -134,7 +160,7 @@ impl McpHttpClient {
         if let Some(version) = &self.protocol_version {
             request = request.header("MCP-Protocol-Version", version);
         }
-        let _ = request.send();
+        let _ = self.send_request(request);
     }
 
     fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
@@ -180,6 +206,20 @@ impl McpHttpClient {
         }
         if let Some(session) = &self.session_id {
             request = request.header("Mcp-Session-Id", session);
+        }
+        self.send_request(request)
+    }
+
+    fn send_request(&self, mut request: RequestBuilder) -> Result<Response, String> {
+        if let Some(deadline) = self.deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(format!(
+                    "MCP server `{}` search timed out",
+                    self.server_name
+                ));
+            }
+            request = request.timeout(remaining);
         }
         request
             .send()

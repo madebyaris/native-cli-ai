@@ -222,6 +222,7 @@ brave-api = "..."
 | Backend | Needs a key | Env fallback | Notes |
 |---|---|---|---|
 | `keenable` | no (optional) | `KEENABLE_API_KEY` | Primary keyless search API; a key selects its authenticated endpoint |
+| `parallel` | no | — | Opt-in search through Parallel's public MCP server |
 | `exa` | yes | `EXA_API_KEY` | Neural search with extracted highlights |
 | `tavily` | yes | `TAVILY_API_KEY` | `search_depth = "basic"` |
 | `serper` | yes | `SERPER_API_KEY` | Google results via Serper |
@@ -236,6 +237,19 @@ results, nca tries keyed APIs when their keys are configured, then the keyless H
 scrapers. Scraper results are accepted only when the query is visible in them, so a decoy
 response is rejected instead of being handed to the model as fact. When every backend
 fails, `web_search` returns an error naming each one rather than an empty result.
+
+To try Parallel first with Keenable as a fallback, set:
+
+```toml
+[web]
+search_backends = ["parallel", "keenable"]
+```
+
+When nca reaches `parallel` in the list, it sends the search query to
+`https://mcp.parallel.ai/mcp` as both the objective and the search query. These
+requests are anonymous and use the versioned `nca` User-Agent so Parallel can
+measure aggregate usage. The browser User-Agent setting applies to the other
+search backends.
 
 ### Using the editor's search in ACP mode
 
