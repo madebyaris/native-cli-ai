@@ -1,10 +1,7 @@
 //! Keyless web search.
 //!
-//! There is no dependable search API without a key, so this scrapes the HTML of engines
-//! that tolerate plain HTTP clients. No single engine is dependable: on some networks
-//! DuckDuckGo refuses connections, Bing answers with results for a different query, and
-//! Mojeek returns a bot challenge. The tool therefore walks a configurable list of
-//! backends and uses the first one that returns results matching the query.
+//! The tool walks a configurable list of APIs and HTML scrapers and uses the first
+//! backend that returns results matching the query.
 
 use nca_common::config::WebConfig;
 use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
@@ -13,6 +10,7 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use super::ToolExecutor;
+use super::mcp_http::McpHttpClient;
 
 /// Search engines answer a client that identifies itself as a bot with a challenge page
 /// or unrelated results, so search requests present as a browser. `web.search_user_agent`
@@ -24,9 +22,13 @@ const DEFAULT_SEARCH_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 
 /// ("ai", "go") match too much to be evidence either way.
 const MIN_RELEVANCE_TOKEN_CHARS: usize = 3;
 
+const PARALLEL_ENDPOINT: &str = "https://mcp.parallel.ai/mcp";
+
 pub struct WebSearchTool {
     client: reqwest::Client,
     config: WebConfig,
+    #[cfg(test)]
+    parallel_endpoint: Option<String>,
 }
 
 impl WebSearchTool {
@@ -41,7 +43,12 @@ impl WebSearchTool {
             .user_agent(user_agent)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        Self { client, config }
+        Self {
+            client,
+            config,
+            #[cfg(test)]
+            parallel_endpoint: None,
+        }
     }
 
     /// Configured backends, de-duplicated. Unknown names are reported rather than silently
@@ -65,6 +72,9 @@ impl WebSearchTool {
 
     /// The API key for a keyed backend: the configured key, else its environment variable.
     fn api_key(&self, backend: Backend) -> Option<String> {
+        if backend == Backend::Parallel {
+            return None;
+        }
         if let Some(key) = self.config.search_keys.get(backend.name())
             && !key.trim().is_empty()
         {
@@ -136,6 +146,7 @@ impl WebSearchTool {
                 let value = self.post_json(endpoint, body, &headers).await?;
                 Ok(parse_keenable(&value))
             }
+            Backend::Parallel => self.fetch_parallel(backend.endpoint(), query).await,
             Backend::Serper => {
                 let body = serde_json::json!({ "q": query, "num": limit });
                 let value = self
@@ -183,6 +194,28 @@ impl WebSearchTool {
                 Ok(backend.parse(&body))
             }
         }
+    }
+
+    async fn fetch_parallel(
+        &self,
+        endpoint: &'static str,
+        query: &str,
+    ) -> Result<Vec<SearchHit>, String> {
+        #[cfg(test)]
+        let endpoint = self.parallel_endpoint.as_deref().unwrap_or(endpoint);
+        let endpoint = endpoint.to_string();
+        let timeout = Duration::from_secs(self.config.timeout_secs);
+        let arguments = serde_json::json!({ "objective": query, "search_queries": [query] });
+        tokio::task::spawn_blocking(move || {
+            let mut client = McpHttpClient::connect_anonymous("parallel", &endpoint, timeout)?;
+            let result = client
+                .initialize()
+                .and_then(|()| client.call_tool("web_search", arguments));
+            client.shutdown();
+            parse_parallel(&result?)
+        })
+        .await
+        .map_err(|err| format!("MCP search task failed: {err}"))?
     }
 
     async fn post_json(
@@ -325,6 +358,7 @@ enum Backend {
     Exa,
     Tavily,
     Keenable,
+    Parallel,
     Serper,
     BraveApi,
     Brave,
@@ -339,6 +373,7 @@ impl Backend {
             "exa" => Some(Self::Exa),
             "tavily" => Some(Self::Tavily),
             "keenable" => Some(Self::Keenable),
+            "parallel" => Some(Self::Parallel),
             "serper" => Some(Self::Serper),
             "brave-api" | "brave_api" => Some(Self::BraveApi),
             "brave" => Some(Self::Brave),
@@ -354,6 +389,7 @@ impl Backend {
             Self::Exa => "exa",
             Self::Tavily => "tavily",
             Self::Keenable => "keenable",
+            Self::Parallel => "parallel",
             Self::Serper => "serper",
             Self::BraveApi => "brave-api",
             Self::Brave => "brave",
@@ -368,6 +404,7 @@ impl Backend {
             Self::Exa => "https://api.exa.ai/search",
             Self::Tavily => "https://api.tavily.com/search",
             Self::Keenable => "https://api.keenable.ai/v1/search/public",
+            Self::Parallel => PARALLEL_ENDPOINT,
             Self::Serper => "https://google.serper.dev/search",
             Self::BraveApi => "https://api.search.brave.com/res/v1/web/search",
             Self::Brave => "https://search.brave.com/search",
@@ -378,7 +415,7 @@ impl Backend {
     }
 
     /// Environment variable consulted when `web.search_keys` has no entry.
-    /// `None` marks a keyless scraper.
+    /// `None` marks a backend that can run without a key.
     fn key_env(self) -> Option<&'static str> {
         match self {
             Self::Exa => Some("EXA_API_KEY"),
@@ -398,6 +435,49 @@ impl Backend {
             _ => Vec::new(),
         }
     }
+}
+
+fn parse_parallel(value: &serde_json::Value) -> Result<Vec<SearchHit>, String> {
+    if value["isError"].as_bool() == Some(true) {
+        return Err("MCP search tool returned an error".into());
+    }
+    let results = value
+        .pointer("/structuredContent/results")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("MCP search reply is missing structured results")?;
+
+    Ok(results
+        .iter()
+        .filter_map(|result| {
+            let url = result["url"].as_str()?;
+            let source = reqwest::Url::parse(url).ok()?;
+            if !matches!(source.scheme(), "http" | "https")
+                || source.host_str().is_none()
+                || !source.username().is_empty()
+                || source.password().is_some()
+                || url.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+            {
+                return None;
+            }
+            let title =
+                non_empty(json_string(result, &["title"])).unwrap_or_else(|| url.to_string());
+            let snippet = result["excerpts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .find_map(|excerpt| non_empty(clean_text(excerpt)))
+                .unwrap_or_default()
+                .chars()
+                .take(400)
+                .collect();
+            Some(SearchHit {
+                title,
+                url: url.to_string(),
+                snippet,
+            })
+        })
+        .collect())
 }
 
 /// Best human-readable explanation from a search API's error body.
@@ -714,6 +794,7 @@ fn clean_text(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
 
     fn tool(backends: &[&str]) -> WebSearchTool {
         let config = WebConfig {
@@ -981,6 +1062,133 @@ mod tests {
         assert_eq!(hits[2].snippet.chars().count(), 400);
         assert!(parse_serper(&value).is_empty());
         assert!(parse_brave_api(&value).is_empty());
+    }
+
+    #[tokio::test]
+    async fn parallel_search_is_opt_in_and_uses_anonymous_mcp_sessions() {
+        let defaults = WebSearchTool::new(WebConfig::default()).plan().0;
+        assert_eq!(defaults.first(), Some(&Backend::Keenable));
+        assert!(!defaults.contains(&Backend::Parallel));
+
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("start MCP fixture");
+        let mut tool = WebSearchTool::new(WebConfig {
+            search_backends: vec!["Parallel".into()],
+            search_user_agent: Some("custom-scraper-agent".into()),
+            timeout_secs: 5,
+            ..WebConfig::default()
+        });
+        tool.parallel_endpoint = Some(format!("http://{}/mcp", server.server_addr()));
+        let fixture = std::thread::spawn(move || {
+            for (session, query) in [("first", "rust vec"), ("second", "rust iterators")] {
+                for method in [
+                    "initialize",
+                    "notifications/initialized",
+                    "tools/call",
+                    "DELETE",
+                ] {
+                    let mut request = server
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("read MCP request")
+                        .expect("MCP request");
+                    assert_eq!(request.url(), "/mcp");
+                    let header = |name: &'static str| {
+                        request
+                            .headers()
+                            .iter()
+                            .find(|header| header.field.equiv(name))
+                            .map(|header| header.value.as_str())
+                    };
+                    assert_eq!(
+                        header("User-Agent"),
+                        Some(concat!("nca/", env!("CARGO_PKG_VERSION")))
+                    );
+                    assert_eq!(header("Authorization"), None);
+                    assert_eq!(header("X-Api-Key"), None);
+                    if method == "initialize" {
+                        assert_eq!(header("Mcp-Session-Id"), None);
+                    } else {
+                        assert_eq!(header("MCP-Protocol-Version"), Some("2025-06-18"));
+                        assert_eq!(header("Mcp-Session-Id"), Some(session));
+                    }
+                    if method == "DELETE" {
+                        assert_eq!(request.method(), &tiny_http::Method::Delete);
+                        request.respond(tiny_http::Response::empty(200)).unwrap();
+                        continue;
+                    }
+                    assert_eq!(request.method(), &tiny_http::Method::Post);
+                    let body: Value =
+                        serde_json::from_reader(request.as_reader()).expect("JSON-RPC");
+                    assert_eq!(body["method"], method);
+                    if method == "notifications/initialized" {
+                        request.respond(tiny_http::Response::empty(202)).unwrap();
+                        continue;
+                    }
+                    let result = if method == "initialize" {
+                        json!({ "protocolVersion": "2025-06-18" })
+                    } else {
+                        assert_eq!(
+                            body["params"],
+                            json!({
+                                "name": "web_search",
+                                "arguments": { "objective": query, "search_queries": [query] }
+                            })
+                        );
+                        json!({
+                            "structuredContent": {
+                                "results": [
+                                    { "url": "file:///tmp/page", "title": query },
+                                    { "url": "https://example.com/doc?q=rust%20vec#method",
+                                      "title": null, "excerpts": [format!("About {query}")] },
+                                    { "url": "https://example.com/second", "title": "Another result" }
+                                ]
+                            }
+                        })
+                    };
+                    let reply = json!({ "jsonrpc": "2.0", "id": body["id"], "result": result });
+                    let mut response =
+                        tiny_http::Response::from_string(format!("data: {reply}\n\n")).with_header(
+                            tiny_http::Header::from_bytes("Content-Type", "text/event-stream")
+                                .unwrap(),
+                        );
+                    if method == "initialize" {
+                        response.add_header(
+                            tiny_http::Header::from_bytes("Mcp-Session-Id", session).unwrap(),
+                        );
+                    }
+                    request.respond(response).unwrap();
+                }
+            }
+        });
+
+        for query in ["rust vec", "rust iterators"] {
+            let mut call = call(query);
+            call.input["limit"] = json!(1);
+            let result = tool.execute(&call).await;
+            assert!(result.success, "{:?}", result.error);
+            assert_eq!(
+                result.output,
+                format!(
+                    "- https://example.com/doc?q=rust%20vec#method\n  URL: https://example.com/doc?q=rust%20vec#method\n  Snippet: About {query}"
+                )
+            );
+        }
+        fixture.join().expect("verify MCP wire requests");
+    }
+
+    #[test]
+    fn parallel_rejects_tool_errors_and_malformed_results() {
+        assert!(
+            parse_parallel(&json!({
+                "isError": true, "structuredContent": { "results": [] }
+            }))
+            .is_err()
+        );
+        assert!(parse_parallel(&json!({"structuredContent": {"results": null}})).is_err());
+        assert!(
+            parse_parallel(&json!({"structuredContent": {"results": []}}))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
